@@ -149,6 +149,28 @@ class PasswordDialog(QDialog):
             self.error.setText(str(exc))
 
 
+class ChannelRow(QFrame):
+    def __init__(self, channel: dict, select_callback, activate_callback) -> None:
+        super().__init__()
+        self.channel = channel
+        self.select_callback = select_callback
+        self.activate_callback = activate_callback
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.select_callback(self.channel)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self.channel["type"] == "voice":
+            self.select_callback(self.channel)
+            self.activate_callback(self.channel)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, api: ApiClient) -> None:
         super().__init__()
@@ -530,7 +552,7 @@ class MainWindow(QMainWindow):
         self.channel_list.setItemWidget(item, self.voice_member_widget(state, compact=True))
 
     def channel_widget(self, channel: dict, *, active: bool, connected: bool) -> QWidget:
-        row = QFrame()
+        row = ChannelRow(channel, self.select_channel, self.connect_from_channel_row)
         row.setObjectName("channelRowActive" if active else "channelRow")
         layout = QHBoxLayout(row)
         layout.setContentsMargins(10, 5, 6, 5)
@@ -540,19 +562,23 @@ class MainWindow(QMainWindow):
             icon.setPixmap(svg_icon("voice").pixmap(QSize(17, 17)))
         icon.setObjectName("muted")
         icon.setFixedWidth(22)
+        icon.setAttribute(Qt.WA_TransparentForMouseEvents)
         name = QLabel(channel["name"])
         name.setObjectName("channelName")
+        name.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(icon)
         layout.addWidget(name, 1)
         if connected:
             badge = QLabel("●")
             badge.setObjectName("ok")
             badge.setToolTip("Вы подключены")
+            badge.setAttribute(Qt.WA_TransparentForMouseEvents)
             layout.addWidget(badge)
         count = len(self.voice_cache.get(channel["id"], [])) if channel["type"] == "voice" else 0
         if count:
             meta = QLabel(str(count))
             meta.setObjectName("channelMeta")
+            meta.setAttribute(Qt.WA_TransparentForMouseEvents)
             layout.addWidget(meta)
         if channel["type"] == "voice":
             action = icon_button("leave" if connected else "join", "Отключиться" if connected else "Подключиться к каналу")

@@ -15,9 +15,10 @@ from .config import get_settings
 from . import models, schemas
 from .audit import write_audit
 from .database import Base, SessionLocal, engine, get_db
+from ..media_crypto import ENCRYPTED_FRAME_PREFIX
 from .deps import current_user, ensure_channel_member, require_permission, user_from_token
 from .permissions import seed_permissions, has_permission, user_permissions
-from .security import create_token, hash_password, validate_password_strength, verify_password
+from .security import create_token, encode_secret, hash_password, media_key_for_channel, media_key_id, validate_password_strength, verify_password
 from .screen_relay import screen_relay
 from .voice_relay import voice_relay
 
@@ -77,6 +78,13 @@ def websocket_origin_allowed(websocket: WebSocket) -> bool:
     if not origin:
         return True
     return "*" in settings.cors_origins or origin in settings.cors_origins
+
+
+def websocket_token(websocket: WebSocket, query_token: str) -> str:
+    authorization = websocket.headers.get("authorization", "")
+    if authorization.startswith("Bearer "):
+        return authorization.removeprefix("Bearer ").strip()
+    return query_token.strip()
 
 
 def seed_database() -> None:
@@ -291,6 +299,27 @@ def list_channels(space_id: int, user: models.User = Depends(current_user), db: 
     return list(rows)
 
 
+@app.get("/channels/{channel_id}/media-key", response_model=schemas.MediaKeyOut, tags=["security"])
+def channel_media_key(
+    channel_id: int,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> schemas.MediaKeyOut:
+    channel = ensure_channel_member(db, user.id, channel_id)
+    if channel.type != "voice":
+        raise HTTPException(status_code=400, detail="Медиа-ключ доступен только для голосового канала")
+    if not (
+        has_permission(db, user.id, "voice.join")
+        or has_permission(db, user.id, "screen_share.view")
+        or has_permission(db, user.id, "screen_share.start")
+    ):
+        raise HTTPException(status_code=403, detail="Нет права получать медиа-ключ")
+    return schemas.MediaKeyOut(
+        key_id=media_key_id(channel_id),
+        key=encode_secret(media_key_for_channel(channel_id)),
+    )
+
+
 @app.post("/channels", response_model=schemas.ChannelOut, tags=["channels"])
 def create_channel(
     payload: schemas.ChannelCreateIn,
@@ -446,14 +475,14 @@ def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceState
 
 
 @app.websocket("/voice/ws/{channel_id}")
-async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
+async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = "") -> None:
     if not websocket_origin_allowed(websocket):
         await websocket.close(code=1008, reason="bad origin")
         return
 
     with SessionLocal() as db:
         try:
-            user = user_from_token(db, token)
+            user = user_from_token(db, websocket_token(websocket, token))
         except HTTPException:
             await websocket.close(code=1008, reason="auth required")
             return
@@ -481,6 +510,8 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
                 continue
             if len(data) > 4096:
                 continue
+            if not data.startswith(ENCRYPTED_FRAME_PREFIX):
+                continue
             await voice_relay.broadcast_audio(channel_id, user_id, data)
     except WebSocketDisconnect:
         pass
@@ -494,7 +525,7 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
 
 
 @app.websocket("/screen/ws/{channel_id}")
-async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
+async def screen_websocket(websocket: WebSocket, channel_id: int, token: str = "") -> None:
     if not websocket_origin_allowed(websocket):
         await websocket.close(code=1008, reason="bad origin")
         return
@@ -502,7 +533,7 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
     can_send = False
     with SessionLocal() as db:
         try:
-            user = user_from_token(db, token)
+            user = user_from_token(db, websocket_token(websocket, token))
         except HTTPException:
             await websocket.close(code=1008, reason="auth required")
             return
@@ -546,6 +577,8 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
             if not can_send:
                 continue
             if len(data) > SCREEN_FRAME_LIMIT_BYTES:
+                continue
+            if data != b"__STOP__" and not data.startswith(ENCRYPTED_FRAME_PREFIX):
                 continue
             await screen_relay.broadcast_frame(channel_id, user_id, data)
     except WebSocketDisconnect:

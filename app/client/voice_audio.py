@@ -12,12 +12,15 @@ from collections.abc import Callable
 import sounddevice as sd
 import websockets
 
+from app.media_crypto import decrypt_frame, encrypt_frame
+
 
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 SAMPLE_WIDTH = 2
 BLOCKSIZE = 320
 FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
+VOICE_AAD = b"private-voicechat:voice:v1"
 SPEAKING_RMS = 450
 SPEAKING_HOLD_SECONDS = 0.35
 MIC_TEST_DELAY_FRAMES = 18
@@ -218,6 +221,8 @@ class VoiceAudioClient:
         self,
         *,
         ws_url: str,
+        ws_headers: dict[str, str],
+        media_key: bytes,
         is_muted: Callable[[], bool],
         is_deafened: Callable[[], bool],
         is_locally_muted: Callable[[int], bool],
@@ -229,6 +234,8 @@ class VoiceAudioClient:
         output_device: int | None = None,
     ) -> None:
         self.ws_url = ws_url
+        self.ws_headers = ws_headers
+        self.media_key = media_key
         self.is_muted = is_muted
         self.is_deafened = is_deafened
         self.is_locally_muted = is_locally_muted
@@ -326,7 +333,7 @@ class VoiceAudioClient:
             self._status(f"audio error: {exc}")
 
     async def _socket_loop(self) -> None:
-        async with websockets.connect(self.ws_url, max_size=8192) as websocket:
+        async with websockets.connect(self.ws_url, max_size=8192, additional_headers=self.ws_headers) as websocket:
             sender = asyncio.create_task(self._send_loop(websocket))
             receiver = asyncio.create_task(self._receive_loop(websocket))
             done, pending = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED)
@@ -342,7 +349,7 @@ class VoiceAudioClient:
             except queue.Empty:
                 await asyncio.sleep(0.004)
                 continue
-            await websocket.send(frame)
+            await websocket.send(encrypt_frame(self.media_key, frame, VOICE_AAD))
 
     async def _receive_loop(self, websocket) -> None:
         async for message in websocket:
@@ -353,7 +360,10 @@ class VoiceAudioClient:
             user_id = int.from_bytes(message[:4], "big")
             if self.is_deafened() or self.is_locally_muted(user_id):
                 continue
-            pcm = message[4:]
+            try:
+                pcm = decrypt_frame(self.media_key, message[4:], VOICE_AAD)
+            except ValueError:
+                continue
             volume = max(0, min(200, self.local_volume(user_id)))
             if volume != 100:
                 pcm = audioop.mul(pcm, SAMPLE_WIDTH, volume / 100)

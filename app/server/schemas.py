@@ -69,6 +69,12 @@ class ChannelOut(OrmModel):
     type: str
 
 
+class MediaKeyOut(BaseModel):
+    key_id: str
+    key: str
+    algorithm: str = "AES-256-GCM"
+
+
 class MemberIn(OrmModel):
     user_id: int
 

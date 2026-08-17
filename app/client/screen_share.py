@@ -9,9 +9,12 @@ from typing import Union
 from PySide6.QtCore import QObject, Signal
 import websockets
 
+from app.media_crypto import decrypt_frame, encrypt_frame
+
 
 STOP_FRAME = b"__STOP__"
 SCREEN_WS_MAX_BYTES = 3_200_000
+SCREEN_AAD = b"private-voicechat:screen:v1"
 
 
 class ScreenShareClient(QObject):
@@ -19,9 +22,11 @@ class ScreenShareClient(QObject):
     stopped_received = Signal(int)
     status_changed = Signal(str)
 
-    def __init__(self, ws_url: str) -> None:
+    def __init__(self, ws_url: str, ws_headers: dict[str, str], media_key: bytes) -> None:
         super().__init__()
         self.ws_url = ws_url
+        self.ws_headers = ws_headers
+        self.media_key = media_key
         self._send_queue: queue.Queue[Union[bytes, str]] = queue.Queue(maxsize=4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -78,7 +83,11 @@ class ScreenShareClient(QObject):
                 self.status_changed.emit(f"screen error: {exc}")
 
     async def _socket_loop(self) -> None:
-        async with websockets.connect(self.ws_url, max_size=SCREEN_WS_MAX_BYTES) as websocket:
+        async with websockets.connect(
+            self.ws_url,
+            max_size=SCREEN_WS_MAX_BYTES,
+            additional_headers=self.ws_headers,
+        ) as websocket:
             self.status_changed.emit("screen connected")
             sender = asyncio.create_task(self._send_loop(websocket))
             receiver = asyncio.create_task(self._receive_loop(websocket))
@@ -94,6 +103,8 @@ class ScreenShareClient(QObject):
                 frame = await asyncio.to_thread(self._send_queue.get, True, 0.05)
             except queue.Empty:
                 continue
+            if isinstance(frame, bytes) and frame != STOP_FRAME:
+                frame = encrypt_frame(self.media_key, frame, SCREEN_AAD)
             await websocket.send(frame)
 
     async def _receive_loop(self, websocket) -> None:
@@ -107,4 +118,8 @@ class ScreenShareClient(QObject):
             if frame == STOP_FRAME:
                 self.stopped_received.emit(user_id)
             else:
-                self.frame_received.emit(user_id, frame)
+                try:
+                    plaintext = decrypt_frame(self.media_key, frame, SCREEN_AAD)
+                except ValueError:
+                    continue
+                self.frame_received.emit(user_id, plaintext)

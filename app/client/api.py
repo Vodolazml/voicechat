@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -57,14 +57,20 @@ class ApiClient:
     def voice_ws_url(self, channel_id: int) -> str:
         scheme = "wss" if self.base_url.startswith("https://") else "ws"
         host = self.base_url.split("://", 1)[1].rstrip("/")
-        token = quote(self.token or "")
-        return f"{scheme}://{host}/voice/ws/{channel_id}?token={token}"
+        return f"{scheme}://{host}/voice/ws/{channel_id}"
 
     def screen_ws_url(self, channel_id: int) -> str:
         scheme = "wss" if self.base_url.startswith("https://") else "ws"
         host = self.base_url.split("://", 1)[1].rstrip("/")
-        token = quote(self.token or "")
-        return f"{scheme}://{host}/screen/ws/{channel_id}?token={token}"
+        return f"{scheme}://{host}/screen/ws/{channel_id}"
+
+    def ws_headers(self) -> dict[str, str]:
+        return self._headers()
+
+    def media_key(self, channel_id: int) -> bytes:
+        data = self.request("GET", f"/channels/{channel_id}/media-key")
+        key = str(data["key"])
+        return base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")

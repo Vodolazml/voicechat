@@ -43,6 +43,21 @@ def password_fingerprint(password_hash: str) -> str:
     return _b64(digest)[:32]
 
 
+def media_key_for_channel(channel_id: int) -> bytes:
+    settings = get_settings()
+    return hmac.new(settings.secret_key.encode(), f"media:v1:{channel_id}".encode(), hashlib.sha256).digest()
+
+
+def media_key_id(channel_id: int) -> str:
+    settings = get_settings()
+    digest = hmac.new(settings.secret_key.encode(), f"media-id:v1:{channel_id}".encode(), hashlib.sha256).digest()
+    return _b64(digest)[:16]
+
+
+def encode_secret(data: bytes) -> str:
+    return _b64(data)
+
+
 def create_token(user_id: int, password_hash: str) -> str:
     settings = get_settings()
     now = int(time.time())

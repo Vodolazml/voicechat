@@ -11,7 +11,9 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 
-$env:VOICECHAT_SECRET_KEY="change-this-to-a-long-random-secret-at-least-32-chars"
+$bytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$env:VOICECHAT_SECRET_KEY=[Convert]::ToBase64String($bytes)
 $env:VOICECHAT_BOOTSTRAP_PASSWORD="Admin12345!Local"
 python -m uvicorn app.server.main:app --reload --host 127.0.0.1 --port 8765
 ```
@@ -40,10 +42,13 @@ python -m app.client.main
 
 ## Безопасность
 
-- задавайте `VOICECHAT_SECRET_KEY` длинной случайной строкой и не используйте пример из репозитория на сервере;
+- задавайте `VOICECHAT_SECRET_KEY` длинной случайной строкой, сервер не стартует с примерным секретом;
 - для доступа по сети добавьте домены или IP в `VOICECHAT_ALLOWED_HOSTS`;
 - браузерные Origin для WebSocket и CORS разрешаются только через `VOICECHAT_CORS_ORIGINS`;
 - старые токены становятся недействительными после смены пароля.
+- голос и демонстрация экрана шифруются на клиенте через AES-256-GCM перед отправкой в WebSocket.
+
+Подробный текущий аудит: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 
 ## Порядок разработки
 

@@ -242,6 +242,7 @@ class MainWindow(QMainWindow):
         self.deafened = False
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
+        self.media_keys: dict[int, bytes] = {}
         self.voice_audio: VoiceAudioClient | None = None
         self.screen_client: ScreenShareClient | None = None
         self.screen_viewer: ScreenShareViewer | None = None
@@ -585,6 +586,7 @@ class MainWindow(QMainWindow):
                 self.stop_audio()
                 self.api.disconnect(channel_id)
                 self.connected_channel_id = None
+                self.media_keys.pop(channel_id, None)
                 self.channel_status.setText("Отключено")
             else:
                 self.stop_screen_share()
@@ -610,8 +612,11 @@ class MainWindow(QMainWindow):
 
     def start_audio(self, channel_id: int) -> None:
         try:
+            media_key = self.channel_media_key(channel_id)
             self.voice_audio = VoiceAudioClient(
                 ws_url=self.api.voice_ws_url(channel_id),
+                ws_headers=self.api.ws_headers(),
+                media_key=media_key,
                 is_muted=lambda: self.muted,
                 is_deafened=lambda: self.deafened,
                 is_locally_muted=lambda user_id: user_id in self.local_mutes,
@@ -634,7 +639,11 @@ class MainWindow(QMainWindow):
         self.last_speaking = False
 
     def start_screen_client(self, channel_id: int) -> None:
-        self.screen_client = ScreenShareClient(self.api.screen_ws_url(channel_id))
+        self.screen_client = ScreenShareClient(
+            self.api.screen_ws_url(channel_id),
+            self.api.ws_headers(),
+            self.channel_media_key(channel_id),
+        )
         self.screen_client.frame_received.connect(self.on_screen_frame)
         self.screen_client.stopped_received.connect(self.on_screen_stop)
         self.screen_client.status_changed.connect(self.set_audio_status)
@@ -650,6 +659,13 @@ class MainWindow(QMainWindow):
             self.screen_viewer.close()
             self.screen_viewer = None
         self.redraw_voice_stage()
+
+    def channel_media_key(self, channel_id: int) -> bytes:
+        media_key = self.media_keys.get(channel_id)
+        if media_key is None:
+            media_key = self.api.media_key(channel_id)
+            self.media_keys[channel_id] = media_key
+        return media_key
 
     def toggle_screen_share(self) -> None:
         if self.screen_sharing:

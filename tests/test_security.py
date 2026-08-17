@@ -7,6 +7,7 @@ from app.server import models
 from app.server.database import Base
 from app.server.deps import user_from_token
 from app.server.security import create_token, decode_token, hash_password, validate_password_strength, verify_password
+from app.media_crypto import decrypt_frame, encrypt_frame
 
 
 def test_password_hash_is_not_plaintext() -> None:
@@ -54,3 +55,17 @@ def test_token_is_bound_to_current_password_hash() -> None:
 
         with pytest.raises(HTTPException):
             user_from_token(db, token)
+
+
+def test_media_frames_are_encrypted_and_authenticated() -> None:
+    key = b"k" * 32
+    plaintext = b"raw voice or screen bytes"
+    packet = encrypt_frame(key, plaintext, b"voice")
+
+    assert plaintext not in packet
+    assert decrypt_frame(key, packet, b"voice") == plaintext
+
+    with pytest.raises(ValueError):
+        decrypt_frame(key, packet, b"screen")
+    with pytest.raises(ValueError):
+        decrypt_frame(key, plaintext, b"voice")

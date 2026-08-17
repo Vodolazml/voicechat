@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from functools import partial
+from time import monotonic
 
 from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QIcon, QPixmap
@@ -35,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .styles import APP_STYLE
-from .voice_audio import AudioDevice, VoiceAudioClient, audio_devices
+from .voice_audio import AudioDevice, VoiceAudioClient, audio_devices, device_display_name
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -192,11 +193,13 @@ class MainWindow(QMainWindow):
         self.input_device_id: int | None = None
         self.output_device_id: int | None = None
         self.last_speaking = False
+        self.last_voice_sync_at = 0.0
 
         self.setWindowTitle("Private VoiceChat")
         self.resize(1180, 720)
         self.setMinimumSize(900, 560)
         self.setCentralWidget(self.build_ui())
+        self.update_audio_device_label()
 
         self.timer = QTimer(self)
         self.timer.setInterval(2500)
@@ -338,6 +341,9 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         self.user_label = QLabel("Пользователь")
         self.user_label.setObjectName("ok")
+        self.device_label = QLabel("Системные аудиоустройства")
+        self.device_label.setObjectName("deviceLabel")
+        self.device_label.setToolTip("Выбранные микрофон и устройство вывода")
         self.mute_button = icon_button("mic", "Выключить микрофон")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.deafen_button = icon_button("headphones", "Отключить входящий звук")
@@ -353,6 +359,7 @@ class MainWindow(QMainWindow):
         refresh = icon_button("refresh", "Обновить")
         refresh.clicked.connect(self.reload_all)
         layout.addWidget(self.user_label)
+        layout.addWidget(self.device_label)
         layout.addStretch()
         layout.addWidget(self.mute_button)
         layout.addWidget(self.deafen_button)
@@ -528,10 +535,13 @@ class MainWindow(QMainWindow):
     def sync_speaking_state(self) -> None:
         if not self.connected_channel_id:
             return
+        now = monotonic()
         speaking = bool(self.voice_audio and self.voice_audio.speaking and not self.muted and not self.deafened)
-        if speaking == self.last_speaking:
+        needs_heartbeat = now - self.last_voice_sync_at >= 5
+        if speaking == self.last_speaking and not needs_heartbeat:
             return
         self.last_speaking = speaking
+        self.last_voice_sync_at = now
         try:
             self.api.update_voice(self.connected_channel_id, self.muted, self.deafened, speaking=speaking)
             if self.current_channel and self.current_channel["id"] == self.connected_channel_id:
@@ -544,6 +554,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         self.input_device_id, self.output_device_id = dialog.selected_devices()
+        self.update_audio_device_label()
         if self.connected_channel_id:
             channel_id = self.connected_channel_id
             self.stop_audio()
@@ -551,6 +562,16 @@ class MainWindow(QMainWindow):
                 self.start_audio(channel_id)
             except RuntimeError as exc:
                 self.show_error(str(exc))
+
+    def update_audio_device_label(self) -> None:
+        input_name = device_display_name(self.input_device_id) if self.input_device_id is not None else "системный микрофон"
+        output_name = device_display_name(self.output_device_id) if self.output_device_id is not None else "системный вывод"
+        short_input = input_name.replace("Микрофон ", "").replace("Динамики ", "")
+        short_output = output_name.replace("Микрофон ", "").replace("Динамики ", "")
+        self.device_label.setText(f"{short_input} -> {short_output}")
+        self.device_label.setToolTip(
+            f"Микрофон: {input_name}\nВывод: {output_name}\nЕсли написано «микрофон выключен», это кнопка mute, а не выбранное устройство."
+        )
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted

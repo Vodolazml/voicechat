@@ -114,6 +114,14 @@ def audio_devices(*, include_advanced: bool = False) -> tuple[list[AudioDevice],
     return inputs, outputs
 
 
+def device_display_name(device_id: int) -> str:
+    try:
+        raw = sd.query_devices(device_id)
+    except Exception:
+        return f"устройство {device_id}"
+    return simplify_device_name(str(raw["name"]))
+
+
 class VoiceAudioClient:
     def __init__(
         self,

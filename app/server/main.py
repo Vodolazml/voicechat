@@ -1,4 +1,5 @@
 from collections import defaultdict, deque
+from datetime import timedelta
 from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -315,6 +316,7 @@ def connect_channel(
         existing.deafened = payload.deafened
         existing.speaking = False
         existing.status = "connected"
+        existing.updated_at = models.utcnow()
         state = existing
     else:
         state = models.VoiceState(user_id=user.id, channel_id=channel_id, muted=payload.muted, deafened=payload.deafened)
@@ -338,6 +340,7 @@ def update_voice_state(
     state.deafened = payload.deafened
     state.speaking = payload.speaking
     state.status = payload.status
+    state.updated_at = models.utcnow()
     db.commit()
     return voice_state_out(db, state)
 
@@ -364,6 +367,12 @@ def voice_states(
     db: Session = Depends(get_db),
 ) -> list[schemas.VoiceStateOut]:
     ensure_channel_member(db, user.id, channel_id)
+    cutoff = models.utcnow() - timedelta(seconds=45)
+    stale_rows = list(db.scalars(select(models.VoiceState).where(models.VoiceState.updated_at < cutoff)))
+    for stale in stale_rows:
+        db.delete(stale)
+    if stale_rows:
+        db.commit()
     rows = db.scalars(select(models.VoiceState).where(models.VoiceState.channel_id == channel_id).order_by(models.VoiceState.user_id))
     return [voice_state_out(db, row) for row in rows]
 
@@ -430,3 +439,8 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
         pass
     finally:
         await voice_relay.leave(channel_id, payload.user_id)
+        with SessionLocal() as db:
+            state = db.get(models.VoiceState, payload.user_id)
+            if state and state.channel_id == channel_id:
+                db.delete(state)
+                db.commit()

@@ -175,6 +175,13 @@ QLabel#ok {
 QLabel#warn {
     color: #f0b232;
 }
+QLabel#deviceLabel {
+    color: #949ba4;
+    background: #2b2d31;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 12px;
+}
 QLabel#pingGood {
     background: #1f3f2b;
     color: #3ddd82;

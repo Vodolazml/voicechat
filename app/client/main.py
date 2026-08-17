@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .styles import APP_STYLE
+from .voice_audio import VoiceAudioClient
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -186,6 +187,8 @@ class MainWindow(QMainWindow):
         self.deafened = False
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
+        self.voice_audio: VoiceAudioClient | None = None
+        self.audio_status = "audio idle"
 
         self.setWindowTitle("Private VoiceChat")
         self.resize(1180, 720)
@@ -450,7 +453,7 @@ class MainWindow(QMainWindow):
         self.stage_eyebrow.setText("ГОЛОСОВОЙ КАНАЛ" if channel["type"] == "voice" else "ТЕКСТОВЫЙ КАНАЛ")
         self.stage_title.setText(channel["name"])
         self.stage_subtitle.setText(
-            "Вы подключены. Здесь видны участники, локальные состояния микрофона и готовность будущего аудио."
+            "Вы подключены. Микрофон и входящий звук работают через защищенный канал сервера."
             if connected_here
             else "Нажмите «Подключиться», чтобы войти в канал и увидеть себя среди участников."
             if channel["type"] == "voice"
@@ -465,17 +468,51 @@ class MainWindow(QMainWindow):
         try:
             channel_id = self.current_channel["id"]
             if self.connected_channel_id == channel_id:
+                self.stop_audio()
                 self.api.disconnect(channel_id)
                 self.connected_channel_id = None
                 self.channel_status.setText("Отключено")
             else:
+                self.stop_audio()
                 state = self.api.connect(channel_id, self.muted, self.deafened)
                 self.connected_channel_id = state["channel_id"]
+                self.start_audio(channel_id)
                 self.channel_status.setText("Подключено")
             self.refresh_space_voice_cache()
             self.select_channel(self.current_channel)
         except ApiError as exc:
             self.show_error(str(exc))
+        except RuntimeError as exc:
+            if self.connected_channel_id:
+                try:
+                    self.api.disconnect(self.connected_channel_id)
+                except ApiError:
+                    pass
+                self.connected_channel_id = None
+            self.show_error(str(exc))
+
+    def start_audio(self, channel_id: int) -> None:
+        try:
+            self.voice_audio = VoiceAudioClient(
+                ws_url=self.api.voice_ws_url(channel_id),
+                is_muted=lambda: self.muted,
+                is_deafened=lambda: self.deafened,
+                is_locally_muted=lambda user_id: user_id in self.local_mutes,
+                local_volume=lambda user_id: self.local_volumes.get(user_id, 100),
+                status_callback=self.set_audio_status,
+            )
+            self.voice_audio.start()
+        except Exception as exc:
+            self.voice_audio = None
+            raise RuntimeError(f"Не удалось запустить голос: {exc}") from exc
+
+    def stop_audio(self) -> None:
+        if self.voice_audio:
+            self.voice_audio.stop()
+            self.voice_audio = None
+
+    def set_audio_status(self, text: str) -> None:
+        self.audio_status = text
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted
@@ -762,6 +799,15 @@ class MainWindow(QMainWindow):
     def set_local_volume(self, user_id: int, value: int, label: QLabel) -> None:
         self.local_volumes[user_id] = value
         label.setText(f"Громкость: {value}%")
+
+    def closeEvent(self, event) -> None:
+        self.stop_audio()
+        if self.connected_channel_id:
+            try:
+                self.api.disconnect(self.connected_channel_id)
+            except ApiError:
+                pass
+        event.accept()
 
     def add_stage_empty(self, text: str) -> None:
         empty = QLabel(text)

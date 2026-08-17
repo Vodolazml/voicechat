@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -52,6 +53,12 @@ class ApiClient:
             self.request("GET", "/health")
             samples.append(int((perf_counter() - started) * 1000))
         return min(samples)
+
+    def voice_ws_url(self, channel_id: int) -> str:
+        scheme = "wss" if self.base_url.startswith("https://") else "ws"
+        host = self.base_url.split("://", 1)[1].rstrip("/")
+        token = quote(self.token or "")
+        return f"{scheme}://{host}/voice/ws/{channel_id}?token={token}"
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")

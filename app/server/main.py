@@ -1,7 +1,7 @@
 from collections import defaultdict, deque
 from time import monotonic
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -13,6 +13,8 @@ from .database import Base, SessionLocal, engine, get_db
 from .deps import current_user, ensure_channel_member, require_permission
 from .permissions import seed_permissions, has_permission, user_permissions
 from .security import create_token, hash_password, validate_password_strength, verify_password
+from .security import decode_token
+from .voice_relay import voice_relay
 
 
 settings = get_settings()
@@ -35,6 +37,7 @@ def seed_database() -> None:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         seed_permissions(db)
+        db.query(models.VoiceState).delete()
         admin = db.scalar(select(models.User).where(models.User.username == "admin"))
         admin_role = db.scalar(select(models.Role).where(models.Role.name == "Owner/System Admin"))
         if not admin:
@@ -384,3 +387,46 @@ def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceState
         speaking=state.speaking,
         status=state.status,
     )
+
+
+@app.websocket("/voice/ws/{channel_id}")
+async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
+    try:
+        payload = decode_token(token)
+    except HTTPException:
+        await websocket.close(code=1008, reason="auth required")
+        return
+
+    with SessionLocal() as db:
+        user = db.get(models.User, payload.user_id)
+        if not user or user.status != "active":
+            await websocket.close(code=1008, reason="inactive user")
+            return
+        channel = db.get(models.Channel, channel_id)
+        if not channel or channel.is_deleted or channel.type != "voice":
+            await websocket.close(code=1008, reason="bad channel")
+            return
+        if not db.get(models.ChannelMember, {"channel_id": channel_id, "user_id": user.id}):
+            await websocket.close(code=1008, reason="no channel access")
+            return
+        if not has_permission(db, user.id, "voice.join") or not has_permission(db, user.id, "voice.speak"):
+            await websocket.close(code=1008, reason="no voice permission")
+            return
+
+    await websocket.accept()
+    await voice_relay.join(channel_id, payload.user_id, websocket)
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if not data:
+                continue
+            if len(data) > 4096:
+                continue
+            await voice_relay.broadcast_audio(channel_id, payload.user_id, data)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await voice_relay.leave(channel_id, payload.user_id)

@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .styles import APP_STYLE
-from .voice_audio import VoiceAudioClient
+from .voice_audio import AudioDevice, VoiceAudioClient, audio_devices
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -189,6 +189,9 @@ class MainWindow(QMainWindow):
         self.local_volumes: dict[int, int] = {}
         self.voice_audio: VoiceAudioClient | None = None
         self.audio_status = "audio idle"
+        self.input_device_id: int | None = None
+        self.output_device_id: int | None = None
+        self.last_speaking = False
 
         self.setWindowTitle("Private VoiceChat")
         self.resize(1180, 720)
@@ -203,6 +206,10 @@ class MainWindow(QMainWindow):
         self.ping_timer.setInterval(3000)
         self.ping_timer.timeout.connect(self.refresh_ping)
         self.ping_timer.start()
+        self.speaking_timer = QTimer(self)
+        self.speaking_timer.setInterval(250)
+        self.speaking_timer.timeout.connect(self.sync_speaking_state)
+        self.speaking_timer.start()
 
         self.reload_all()
         self.refresh_ping()
@@ -339,6 +346,7 @@ class MainWindow(QMainWindow):
         self.ping_label.setObjectName("pingUnknown")
         self.ping_label.setToolTip("Задержка API до сервера")
         self.settings_button = icon_button("settings", "Настройки")
+        self.settings_button.clicked.connect(self.open_audio_settings)
         create_user = QPushButton("Создать пользователя")
         create_user.setObjectName("secondary")
         create_user.clicked.connect(self.create_user)
@@ -500,6 +508,8 @@ class MainWindow(QMainWindow):
                 is_locally_muted=lambda user_id: user_id in self.local_mutes,
                 local_volume=lambda user_id: self.local_volumes.get(user_id, 100),
                 status_callback=self.set_audio_status,
+                input_device=self.input_device_id,
+                output_device=self.output_device_id,
             )
             self.voice_audio.start()
         except Exception as exc:
@@ -510,9 +520,37 @@ class MainWindow(QMainWindow):
         if self.voice_audio:
             self.voice_audio.stop()
             self.voice_audio = None
+        self.last_speaking = False
 
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
+
+    def sync_speaking_state(self) -> None:
+        if not self.connected_channel_id:
+            return
+        speaking = bool(self.voice_audio and self.voice_audio.speaking and not self.muted and not self.deafened)
+        if speaking == self.last_speaking:
+            return
+        self.last_speaking = speaking
+        try:
+            self.api.update_voice(self.connected_channel_id, self.muted, self.deafened, speaking=speaking)
+            if self.current_channel and self.current_channel["id"] == self.connected_channel_id:
+                self.refresh_voice()
+        except ApiError:
+            pass
+
+    def open_audio_settings(self) -> None:
+        dialog = AudioSettingsDialog(self, self.input_device_id, self.output_device_id)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.input_device_id, self.output_device_id = dialog.selected_devices()
+        if self.connected_channel_id:
+            channel_id = self.connected_channel_id
+            self.stop_audio()
+            try:
+                self.start_audio(channel_id)
+            except RuntimeError as exc:
+                self.show_error(str(exc))
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted
@@ -700,7 +738,7 @@ class MainWindow(QMainWindow):
 
     def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False, state: dict | None = None) -> QWidget:
         row = QFrame()
-        row.setObjectName("memberRow")
+        row.setObjectName("memberRowSpeaking" if state and state.get("speaking") else "memberRow")
         if state:
             row.setContextMenuPolicy(Qt.CustomContextMenu)
             row.customContextMenuRequested.connect(partial(self.show_member_menu, row, state))
@@ -731,7 +769,7 @@ class MainWindow(QMainWindow):
 
     def add_stage_member(self, state: dict) -> None:
         card = QFrame()
-        card.setObjectName("voiceCard")
+        card.setObjectName("voiceCardSpeaking" if state.get("speaking") else "voiceCard")
         card.setFixedSize(210, 150)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(partial(self.show_member_menu, card, state))
@@ -754,8 +792,9 @@ class MainWindow(QMainWindow):
         card_layout.addStretch()
         bottom = QHBoxLayout()
         bottom.addStretch()
-        badge = QLabel("MUTE" if state["muted"] else "LIVE")
-        badge.setObjectName("pillMuted" if state["muted"] else "pillLive")
+        badge_text = "MUTE" if state["muted"] else "ГОВОРИТ" if state.get("speaking") else "LIVE"
+        badge = QLabel(badge_text)
+        badge.setObjectName("pillMuted" if state["muted"] else "pillSpeaking" if state.get("speaking") else "pillLive")
         bottom.addWidget(badge)
         if state["user_id"] in self.local_mutes:
             local = QLabel("LOCAL")
@@ -896,6 +935,59 @@ class MainWindow(QMainWindow):
 
     def show_error(self, text: str) -> None:
         QMessageBox.warning(self, "Ошибка", text)
+
+
+class AudioSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget, input_device_id: int | None, output_device_id: int | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Настройки аудио")
+        self.setMinimumWidth(520)
+        try:
+            self.inputs, self.outputs = audio_devices()
+        except Exception as exc:
+            self.inputs = []
+            self.outputs = []
+            self.error_text = f"Не удалось получить список устройств: {exc}"
+        else:
+            self.error_text = ""
+
+        self.input_combo = QComboBox()
+        self.output_combo = QComboBox()
+        self.fill_combo(self.input_combo, self.inputs, input_device_id, "Системный микрофон")
+        self.fill_combo(self.output_combo, self.outputs, output_device_id, "Системное устройство вывода")
+
+        form = QFormLayout()
+        form.addRow("Микрофон", self.input_combo)
+        form.addRow("Вывод", self.output_combo)
+
+        hint = QLabel(self.error_text or "Изменения применятся сразу. Если вы уже в голосовом канале, аудио перезапустится.")
+        hint.setObjectName("muted" if not self.error_text else "warn")
+        hint.setWordWrap(True)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Аудиоустройства")
+        title.setObjectName("title")
+        layout.addWidget(title)
+        layout.addLayout(form)
+        layout.addWidget(hint)
+        layout.addWidget(buttons)
+
+    def fill_combo(self, combo: QComboBox, devices: list[AudioDevice], selected: int | None, default_label: str) -> None:
+        combo.addItem(default_label, None)
+        selected_index = 0
+        for device in devices:
+            label = f"{device.name}  ({device.id})"
+            combo.addItem(label, device.id)
+            if selected == device.id:
+                selected_index = combo.count() - 1
+        combo.setCurrentIndex(selected_index)
+
+    def selected_devices(self) -> tuple[int | None, int | None]:
+        return self.input_combo.currentData(), self.output_combo.currentData()
 
 
 class ChannelDialog(QDialog):

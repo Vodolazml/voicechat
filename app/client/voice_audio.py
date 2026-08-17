@@ -4,6 +4,8 @@ import asyncio
 import audioop
 import queue
 import threading
+from dataclasses import dataclass
+from time import monotonic
 from collections.abc import Callable
 
 import sounddevice as sd
@@ -15,6 +17,34 @@ CHANNELS = 1
 SAMPLE_WIDTH = 2
 BLOCKSIZE = 320
 FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
+SPEAKING_RMS = 450
+SPEAKING_HOLD_SECONDS = 0.35
+
+
+@dataclass(frozen=True)
+class AudioDevice:
+    id: int
+    name: str
+    inputs: int
+    outputs: int
+
+
+def audio_devices() -> tuple[list[AudioDevice], list[AudioDevice]]:
+    inputs: list[AudioDevice] = []
+    outputs: list[AudioDevice] = []
+    for index, raw in enumerate(sd.query_devices()):
+        name = str(raw["name"])
+        device = AudioDevice(
+            id=index,
+            name=name,
+            inputs=int(raw["max_input_channels"]),
+            outputs=int(raw["max_output_channels"]),
+        )
+        if device.inputs > 0:
+            inputs.append(device)
+        if device.outputs > 0:
+            outputs.append(device)
+    return inputs, outputs
 
 
 class VoiceAudioClient:
@@ -27,6 +57,8 @@ class VoiceAudioClient:
         is_locally_muted: Callable[[int], bool],
         local_volume: Callable[[int], int],
         status_callback: Callable[[str], None] | None = None,
+        input_device: int | None = None,
+        output_device: int | None = None,
     ) -> None:
         self.ws_url = ws_url
         self.is_muted = is_muted
@@ -34,12 +66,16 @@ class VoiceAudioClient:
         self.is_locally_muted = is_locally_muted
         self.local_volume = local_volume
         self.status_callback = status_callback
+        self.input_device = input_device
+        self.output_device = output_device
         self.capture_queue: queue.Queue[bytes] = queue.Queue(maxsize=40)
         self.playback_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._input_stream: sd.RawInputStream | None = None
         self._output_stream: sd.RawOutputStream | None = None
+        self.speaking = False
+        self._last_voice_at = 0.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -50,6 +86,7 @@ class VoiceAudioClient:
             channels=CHANNELS,
             dtype="int16",
             blocksize=BLOCKSIZE,
+            device=self.input_device,
             callback=self._capture_callback,
         )
         self._output_stream = sd.RawOutputStream(
@@ -57,6 +94,7 @@ class VoiceAudioClient:
             channels=CHANNELS,
             dtype="int16",
             blocksize=BLOCKSIZE,
+            device=self.output_device,
             callback=self._playback_callback,
         )
         self._input_stream.start()
@@ -84,10 +122,17 @@ class VoiceAudioClient:
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:
         if self._stop.is_set() or self.is_muted():
+            self.speaking = False
             return
         data = bytes(indata)
         if not data:
             return
+        now = monotonic()
+        if audioop.rms(data, SAMPLE_WIDTH) >= SPEAKING_RMS:
+            self._last_voice_at = now
+            self.speaking = True
+        elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
+            self.speaking = False
         self._put_latest(self.capture_queue, data)
 
     def _playback_callback(self, outdata, frames, time_info, status) -> None:

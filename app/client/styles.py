@@ -314,6 +314,14 @@ QLabel#pillLive {
     font-weight: 800;
     padding: 4px 10px;
 }
+QLabel#pillSpeaking {
+    background: #5865f2;
+    border-radius: 10px;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+}
 QLabel#pillMuted {
     background: #4e5058;
     border-radius: 10px;
@@ -329,6 +337,15 @@ QFrame#voiceCard {
 }
 QFrame#voiceCard:hover {
     background: #3a3c42;
+}
+QFrame#voiceCardSpeaking {
+    background: #3a3d55;
+    border: 2px solid #5865f2;
+    border-radius: 8px;
+}
+QFrame#memberRowSpeaking {
+    background: #3a3d55;
+    border-radius: 6px;
 }
 QFrame#emptyState {
     background: #2b2d31;

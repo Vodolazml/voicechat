@@ -1,5 +1,5 @@
 {
-  "server_url": "http://YOUR_SERVER_IP:8765",
+  "server_url": "http://72.35.246.230:8765",
   "lock_server_url": true,
   "allow_insecure_http": true
 }

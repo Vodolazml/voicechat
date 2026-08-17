@@ -334,7 +334,7 @@ class MainWindow(QMainWindow):
         self.deafen_button.clicked.connect(self.toggle_deafen)
         self.ping_label = QLabel("ping --")
         self.ping_label.setObjectName("pingUnknown")
-        self.ping_label.setToolTip("Задержка до сервера")
+        self.ping_label.setToolTip("Задержка API до сервера")
         self.settings_button = icon_button("settings", "Настройки")
         create_user = QPushButton("Создать пользователя")
         create_user.setObjectName("secondary")
@@ -382,15 +382,15 @@ class MainWindow(QMainWindow):
         if ping < 80:
             quality = "pingGood"
             text = f"{ping} ms"
-            tip = "Соединение стабильное"
+            tip = "API-соединение стабильное"
         elif ping < 180:
             quality = "pingWarn"
             text = f"{ping} ms"
-            tip = "Есть небольшая задержка"
+            tip = "Есть небольшая задержка API"
         else:
             quality = "pingBad"
             text = f"{ping} ms"
-            tip = "Высокая задержка или проблемы сети"
+            tip = "Высокая задержка API или проблемы сети"
         self.ping_label.setText(text)
         self.ping_label.setObjectName(quality)
         self.ping_label.setToolTip(tip)

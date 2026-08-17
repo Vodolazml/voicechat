@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
@@ -15,17 +15,17 @@ class ApiError(RuntimeError):
 class ApiClient:
     base_url: str = "http://127.0.0.1:8765"
     token: str | None = None
+    _client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=8), init=False)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
-            response = httpx.request(
+            response = self._client.request(
                 method,
                 f"{self.base_url.rstrip('/')}{path}",
                 headers=self._headers(),
-                timeout=8,
                 **kwargs,
             )
         except httpx.HTTPError as exc:
@@ -46,9 +46,12 @@ class ApiClient:
         return data
 
     def ping_ms(self) -> int:
-        started = perf_counter()
-        self.request("GET", "/health")
-        return int((perf_counter() - started) * 1000)
+        samples = []
+        for _ in range(2):
+            started = perf_counter()
+            self.request("GET", "/health")
+            samples.append(int((perf_counter() - started) * 1000))
+        return min(samples)
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")

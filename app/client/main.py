@@ -42,8 +42,37 @@ from .styles import APP_STYLE
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
 
-SCREEN_FRAME_LIMIT_BYTES = 1_500_000
-SCREEN_CAPTURE_PRESETS = ((1920, 1080, 82), (1600, 900, 76), (1280, 720, 68))
+SCREEN_FRAME_LIMIT_BYTES = 2_800_000
+SCREEN_QUALITY_PRESETS = {
+    "1080p_high": {
+        "label": "FullHD высокое",
+        "tooltip": "1920x1080, высокая четкость",
+        "captures": ((1920, 1080, 86), (1920, 1080, 78), (1600, 900, 74)),
+    },
+    "1080p_balanced": {
+        "label": "FullHD среднее",
+        "tooltip": "1920x1080, меньше нагрузка на сеть",
+        "captures": ((1920, 1080, 74), (1600, 900, 70), (1280, 720, 66)),
+    },
+    "720p_high": {
+        "label": "HD 720p",
+        "tooltip": "1280x720, стабильнее на слабой сети",
+        "captures": ((1280, 720, 78), (1280, 720, 68), (960, 540, 64)),
+    },
+    "540p_low": {
+        "label": "540p эконом",
+        "tooltip": "960x540, минимальная нагрузка",
+        "captures": ((960, 540, 72), (854, 480, 64)),
+    },
+}
+DEFAULT_SCREEN_QUALITY = "1080p_high"
+SCREEN_FPS_PRESETS = (
+    ("2 FPS", 500),
+    ("5 FPS", 200),
+    ("10 FPS", 100),
+    ("15 FPS", 67),
+)
+DEFAULT_SCREEN_FPS_INTERVAL_MS = 200
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -201,6 +230,8 @@ class MainWindow(QMainWindow):
         self.screen_client: ScreenShareClient | None = None
         self.screen_viewer: ScreenShareViewer | None = None
         self.screen_sharing = False
+        self.screen_quality_key = DEFAULT_SCREEN_QUALITY
+        self.screen_fps_interval_ms = DEFAULT_SCREEN_FPS_INTERVAL_MS
         self.screen_frames: dict[int, QPixmap] = {}
         self.current_voice_states: list[dict] = []
         self.audio_status = "audio idle"
@@ -230,7 +261,7 @@ class MainWindow(QMainWindow):
         self.speaking_timer.timeout.connect(self.sync_speaking_state)
         self.speaking_timer.start()
         self.screen_timer = QTimer(self)
-        self.screen_timer.setInterval(250)
+        self.screen_timer.setInterval(self.screen_fps_interval_ms)
         self.screen_timer.timeout.connect(self.capture_screen_frame)
 
         self.reload_all()
@@ -369,6 +400,20 @@ class MainWindow(QMainWindow):
         self.deafen_button.clicked.connect(self.toggle_deafen)
         self.screen_button = icon_button("screen", "Включить демонстрацию экрана")
         self.screen_button.clicked.connect(self.toggle_screen_share)
+        self.screen_quality_combo = QComboBox()
+        self.screen_quality_combo.setObjectName("compactCombo")
+        self.screen_quality_combo.setToolTip("Качество демонстрации экрана")
+        for key, preset in SCREEN_QUALITY_PRESETS.items():
+            self.screen_quality_combo.addItem(str(preset["label"]), key)
+        self.screen_quality_combo.setCurrentIndex(self.screen_quality_combo.findData(self.screen_quality_key))
+        self.screen_quality_combo.currentIndexChanged.connect(self.change_screen_quality)
+        self.screen_fps_combo = QComboBox()
+        self.screen_fps_combo.setObjectName("compactCombo")
+        self.screen_fps_combo.setToolTip("Частота кадров демонстрации экрана")
+        for label, interval_ms in SCREEN_FPS_PRESETS:
+            self.screen_fps_combo.addItem(label, interval_ms)
+        self.screen_fps_combo.setCurrentIndex(self.screen_fps_combo.findData(self.screen_fps_interval_ms))
+        self.screen_fps_combo.currentIndexChanged.connect(self.change_screen_fps)
         self.ping_label = QLabel("ping --")
         self.ping_label.setObjectName("pingUnknown")
         self.ping_label.setToolTip("Задержка API до сервера")
@@ -385,6 +430,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.mute_button)
         layout.addWidget(self.deafen_button)
         layout.addWidget(self.screen_button)
+        layout.addWidget(self.screen_quality_combo)
+        layout.addWidget(self.screen_fps_combo)
         layout.addWidget(self.ping_label)
         layout.addWidget(self.settings_button)
         layout.addWidget(create_user)
@@ -585,6 +632,7 @@ class MainWindow(QMainWindow):
         if not self.screen_client:
             self.start_screen_client(self.connected_channel_id)
         self.screen_sharing = True
+        self.screen_timer.setInterval(self.screen_fps_interval_ms)
         self.screen_timer.start()
         self.apply_screen_button()
         self.capture_screen_frame()
@@ -609,7 +657,8 @@ class MainWindow(QMainWindow):
         source = screen.grabWindow(0)
         pixmap = source
         frame = b""
-        for width, height, quality in SCREEN_CAPTURE_PRESETS:
+        preset = SCREEN_QUALITY_PRESETS.get(self.screen_quality_key, SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
+        for width, height, quality in preset["captures"]:
             pixmap = source.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             frame = self.encode_screen_frame(pixmap, quality)
             if frame and len(frame) <= SCREEN_FRAME_LIMIT_BYTES:
@@ -647,6 +696,23 @@ class MainWindow(QMainWindow):
         self.screen_button.setToolTip("Остановить демонстрацию экрана" if self.screen_sharing else "Включить демонстрацию экрана")
         self.screen_button.setObjectName("iconActive" if self.screen_sharing else "iconButton")
         self.repolish(self.screen_button)
+
+    def change_screen_quality(self) -> None:
+        key = self.screen_quality_combo.currentData()
+        if key in SCREEN_QUALITY_PRESETS:
+            self.screen_quality_key = str(key)
+            preset = SCREEN_QUALITY_PRESETS[self.screen_quality_key]
+            self.screen_quality_combo.setToolTip(f"Качество демонстрации: {preset['tooltip']}")
+            if self.screen_sharing:
+                self.capture_screen_frame()
+
+    def change_screen_fps(self) -> None:
+        interval_ms = self.screen_fps_combo.currentData()
+        if isinstance(interval_ms, int):
+            self.screen_fps_interval_ms = interval_ms
+            self.screen_timer.setInterval(interval_ms)
+            fps = max(1, round(1000 / interval_ms))
+            self.screen_fps_combo.setToolTip(f"Частота демонстрации: {fps} кадров/сек")
 
     def open_screen_viewer(self, user_id: int) -> None:
         if user_id not in self.screen_frames:

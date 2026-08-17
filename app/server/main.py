@@ -20,7 +20,7 @@ from .voice_relay import voice_relay
 
 
 settings = get_settings()
-SCREEN_FRAME_LIMIT_BYTES = 1_500_000
+SCREEN_FRAME_LIMIT_BYTES = 2_800_000
 
 app = FastAPI(title=settings.app_name)
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)

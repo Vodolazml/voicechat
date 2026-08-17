@@ -12,6 +12,15 @@ QLineEdit, QComboBox, QSpinBox {
     padding: 8px 10px;
     color: #f2f3f5;
 }
+QComboBox#compactCombo {
+    background: #2b2d31;
+    border: 1px solid #3f4147;
+    border-radius: 6px;
+    padding: 5px 8px;
+    min-width: 92px;
+    max-width: 145px;
+    font-size: 12px;
+}
 QPushButton {
     background: #5865f2;
     border: none;

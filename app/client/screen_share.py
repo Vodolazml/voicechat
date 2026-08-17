@@ -9,7 +9,7 @@ import websockets
 
 
 STOP_FRAME = b"__STOP__"
-SCREEN_WS_MAX_BYTES = 2_000_000
+SCREEN_WS_MAX_BYTES = 3_200_000
 
 
 class ScreenShareClient(QObject):

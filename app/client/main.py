@@ -4,8 +4,8 @@ import sys
 from functools import partial
 from time import monotonic
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QIcon, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -1150,6 +1150,43 @@ class MicTestDialog(QDialog):
         super().reject()
 
 
+class VoiceThresholdMeter(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.level = 0
+        self.threshold = 450
+        self.active = False
+        self.setMinimumHeight(42)
+
+    def set_values(self, level: int, threshold: int, active: bool) -> None:
+        self.level = max(0, min(100, level))
+        self.threshold = max(150, min(1600, threshold))
+        self.active = active
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(0, 8, self.width(), 20)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#1e1f22"))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        level_width = rect.width() * (self.level / 100)
+        if level_width > 0:
+            level_rect = QRectF(rect.left(), rect.top(), level_width, rect.height())
+            painter.setBrush(QColor("#23a559" if self.active else "#4e5058"))
+            painter.drawRoundedRect(level_rect, 8, 8)
+
+        threshold_percent = min(100, int(self.threshold / 30)) / 100
+        threshold_x = rect.left() + rect.width() * threshold_percent
+        painter.setPen(QPen(QColor("#f0b232"), 2))
+        painter.drawLine(int(threshold_x), 4, int(threshold_x), 34)
+
+        painter.setPen(QColor("#949ba4"))
+        painter.drawText(rect.adjusted(0, 21, 0, 18), Qt.AlignRight, "порог")
+
+
 class AudioSettingsDialog(QDialog):
     def __init__(
         self,
@@ -1172,6 +1209,7 @@ class AudioSettingsDialog(QDialog):
             self.error_text = f"Не удалось получить список устройств: {exc}"
         else:
             self.error_text = ""
+        self.level_monitor: MicTestMonitor | None = None
 
         self.input_combo = QComboBox()
         self.output_combo = QComboBox()
@@ -1183,6 +1221,12 @@ class AudioSettingsDialog(QDialog):
         self.threshold_slider.valueChanged.connect(self.update_threshold_label)
         self.threshold_label = QLabel("")
         self.threshold_label.setObjectName("muted")
+        self.threshold_meter = VoiceThresholdMeter()
+        self.threshold_status = QLabel("Говорите в микрофон, чтобы подобрать порог.")
+        self.threshold_status.setObjectName("muted")
+        self.threshold_timer = QTimer(self)
+        self.threshold_timer.setInterval(80)
+        self.threshold_timer.timeout.connect(self.refresh_threshold_meter)
         self.advanced_box = QCheckBox("Показать системные и виртуальные устройства")
         self.advanced_box.stateChanged.connect(self.reload_devices)
         self.test_button = QPushButton("Тест микрофона")
@@ -1190,6 +1234,7 @@ class AudioSettingsDialog(QDialog):
         self.test_button.clicked.connect(self.open_mic_test)
         self.fill_combo(self.input_combo, self.inputs, input_device_id, "Системный микрофон")
         self.fill_combo(self.output_combo, self.outputs, output_device_id, "Системное устройство вывода")
+        self.input_combo.currentIndexChanged.connect(self.restart_threshold_monitor)
 
         form = QFormLayout()
         form.addRow("Микрофон", self.input_combo)
@@ -1203,6 +1248,8 @@ class AudioSettingsDialog(QDialog):
         threshold_row.addWidget(self.threshold_slider, 1)
         threshold_row.addWidget(self.threshold_label)
         form.addRow("Порог", threshold_row)
+        form.addRow("", self.threshold_meter)
+        form.addRow("", self.threshold_status)
         form.addRow("", self.advanced_box)
         self.update_threshold_label(noise_threshold)
 
@@ -1221,6 +1268,7 @@ class AudioSettingsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(hint)
         layout.addWidget(buttons)
+        self.restart_threshold_monitor()
 
     def fill_combo(self, combo: QComboBox, devices: list[AudioDevice], selected: int | None, default_label: str) -> None:
         combo.blockSignals(True)
@@ -1245,6 +1293,7 @@ class AudioSettingsDialog(QDialog):
             self.outputs = []
         self.fill_combo(self.input_combo, self.inputs, self.input_device_id, "Системный микрофон")
         self.fill_combo(self.output_combo, self.outputs, self.output_device_id, "Системное устройство вывода")
+        self.restart_threshold_monitor()
 
     def selected_devices(self) -> tuple[int | None, int | None]:
         return self.input_combo.currentData(), self.output_combo.currentData()
@@ -1263,10 +1312,71 @@ class AudioSettingsDialog(QDialog):
         else:
             mode = "строго"
         self.threshold_label.setText(f"{value} ({mode})")
+        if self.level_monitor:
+            self.level_monitor.set_threshold(value)
+        self.threshold_meter.set_values(
+            self.level_monitor.level if self.level_monitor else 0,
+            value,
+            self.level_monitor.speaking if self.level_monitor else False,
+        )
+
+    def restart_threshold_monitor(self) -> None:
+        self.stop_threshold_monitor()
+        try:
+            self.level_monitor = MicTestMonitor(
+                self.input_combo.currentData(),
+                None,
+                self.threshold_slider.value(),
+                playback=False,
+            )
+            self.level_monitor.start()
+            self.threshold_timer.start()
+            self.threshold_status.setText("Говорите в микрофон, чтобы подобрать порог.")
+            self.threshold_status.setObjectName("muted")
+        except Exception as exc:
+            self.level_monitor = None
+            self.threshold_timer.stop()
+            self.threshold_status.setText(f"Не удалось открыть микрофон для шкалы: {exc}")
+            self.threshold_status.setObjectName("warn")
+        self.threshold_status.style().unpolish(self.threshold_status)
+        self.threshold_status.style().polish(self.threshold_status)
+
+    def stop_threshold_monitor(self) -> None:
+        self.threshold_timer.stop()
+        if self.level_monitor:
+            self.level_monitor.stop()
+            self.level_monitor = None
+
+    def refresh_threshold_meter(self) -> None:
+        if not self.level_monitor:
+            return
+        self.threshold_meter.set_values(
+            self.level_monitor.level,
+            self.threshold_slider.value(),
+            self.level_monitor.speaking,
+        )
+        self.threshold_status.setText("Голос проходит" if self.level_monitor.speaking else "Фон отсекается")
+        self.threshold_status.setObjectName("ok" if self.level_monitor.speaking else "muted")
+        self.threshold_status.style().unpolish(self.threshold_status)
+        self.threshold_status.style().polish(self.threshold_status)
 
     def open_mic_test(self) -> None:
+        self.stop_threshold_monitor()
         dialog = MicTestDialog(self, self.input_combo.currentData(), self.output_combo.currentData(), self.threshold_slider.value())
         dialog.exec()
+        self.restart_threshold_monitor()
+
+    def accept(self) -> None:
+        self.stop_threshold_monitor()
+        super().accept()
+
+    def reject(self) -> None:
+        self.stop_threshold_monitor()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self.stop_threshold_monitor()
+        event.accept()
 
 
 class ChannelDialog(QDialog):

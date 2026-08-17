@@ -124,10 +124,17 @@ def device_display_name(device_id: int) -> str:
 
 
 class MicTestMonitor:
-    def __init__(self, input_device: int | None = None, output_device: int | None = None, threshold: int = SPEAKING_RMS) -> None:
+    def __init__(
+        self,
+        input_device: int | None = None,
+        output_device: int | None = None,
+        threshold: int = SPEAKING_RMS,
+        playback: bool = True,
+    ) -> None:
         self.input_device = input_device
         self.output_device = output_device
         self.threshold = threshold
+        self.playback = playback
         self.level = 0
         self.speaking = False
         self._last_voice_at = 0.0
@@ -144,16 +151,18 @@ class MicTestMonitor:
             device=self.input_device,
             callback=self._callback,
         )
-        self._output_stream = sd.RawOutputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=BLOCKSIZE,
-            device=self.output_device,
-            callback=self._playback_callback,
-        )
+        if self.playback:
+            self._output_stream = sd.RawOutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=BLOCKSIZE,
+                device=self.output_device,
+                callback=self._playback_callback,
+            )
         self._stream.start()
-        self._output_stream.start()
+        if self._output_stream:
+            self._output_stream.start()
 
     def stop(self) -> None:
         for stream in (self._stream, self._output_stream):
@@ -177,6 +186,8 @@ class MicTestMonitor:
             self.speaking = True
         elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
             self.speaking = False
+        if not self.playback:
+            return
         try:
             self._delay_queue.put_nowait(data)
         except queue.Full:
@@ -185,6 +196,9 @@ class MicTestMonitor:
                 self._delay_queue.put_nowait(data)
             except queue.Empty:
                 pass
+
+    def set_threshold(self, threshold: int) -> None:
+        self.threshold = threshold
 
     def _playback_callback(self, outdata, frames, time_info, status) -> None:
         if self._delay_queue.qsize() < MIC_TEST_DELAY_FRAMES:

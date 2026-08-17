@@ -4,18 +4,20 @@ import json
 from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import JSONResponse
 
 from .config import get_settings
 from . import models, schemas
 from .audit import write_audit
 from .database import Base, SessionLocal, engine, get_db
-from .deps import current_user, ensure_channel_member, require_permission
+from .deps import current_user, ensure_channel_member, require_permission, user_from_token
 from .permissions import seed_permissions, has_permission, user_permissions
 from .security import create_token, hash_password, validate_password_strength, verify_password
-from .security import decode_token
 from .screen_relay import screen_relay
 from .voice_relay import voice_relay
 
@@ -23,9 +25,41 @@ from .voice_relay import voice_relay
 settings = get_settings()
 SCREEN_FRAME_LIMIT_BYTES = 2_800_000
 SCREEN_ALLOWED_VIEWER_INTERVALS_MS = {17, 33, 67, 100, 200, 500}
+MAX_WS_TEXT_CHARS = 2048
 
 app = FastAPI(title=settings.app_name)
+if settings.allowed_hosts and "*" not in settings.allowed_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PUT"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
+
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "Некорректный размер запроса"})
+        if body_size > settings.max_http_body_bytes:
+            return JSONResponse(status_code=413, content={"detail": "Запрос слишком большой"})
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), display-capture=()")
+    response.headers.setdefault("Cache-Control", "no-store")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 def rate_limit(key: str, limit: int, window_seconds: int) -> None:
@@ -36,6 +70,13 @@ def rate_limit(key: str, limit: int, window_seconds: int) -> None:
     if len(bucket) >= limit:
         raise HTTPException(status_code=429, detail="Слишком много действий. Попробуйте позже.")
     bucket.append(now)
+
+
+def websocket_origin_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    return "*" in settings.cors_origins or origin in settings.cors_origins
 
 
 def seed_database() -> None:
@@ -91,8 +132,9 @@ def health() -> dict[str, str]:
 
 @app.post("/auth/login", response_model=schemas.TokenOut, tags=["auth"])
 def login(payload: schemas.LoginIn, request: Request, db: Session = Depends(get_db)) -> schemas.TokenOut:
-    rate_limit(f"login:{request.client.host if request.client else 'local'}:{payload.username}", 5, 300)
-    user = db.scalar(select(models.User).where(models.User.username == payload.username))
+    username = payload.username.strip()
+    rate_limit(f"login:{request.client.host if request.client else 'local'}:{username}", 5, 300)
+    user = db.scalar(select(models.User).where(models.User.username == username))
     if not user or user.status != "active" or not verify_password(payload.password, user.password_hash):
         write_audit(
             db,
@@ -107,7 +149,7 @@ def login(payload: schemas.LoginIn, request: Request, db: Session = Depends(get_
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     write_audit(db, actor_id=user.id, action="auth.login", target_type="user", target_id=user.id, request=request)
     db.commit()
-    return schemas.TokenOut(access_token=create_token(user.id), must_change_password=user.must_change_password)
+    return schemas.TokenOut(access_token=create_token(user.id, user.password_hash), must_change_password=user.must_change_password)
 
 
 @app.get("/me", response_model=schemas.MeOut, tags=["auth"])
@@ -128,6 +170,7 @@ def change_password(
     user: models.User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
+    rate_limit(f"password:{user.id}", 5, 300)
     if not verify_password(payload.old_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Старый пароль указан неверно")
     validate_password_strength(payload.new_password)
@@ -404,17 +447,17 @@ def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceState
 
 @app.websocket("/voice/ws/{channel_id}")
 async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
-    try:
-        payload = decode_token(token)
-    except HTTPException:
-        await websocket.close(code=1008, reason="auth required")
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=1008, reason="bad origin")
         return
 
     with SessionLocal() as db:
-        user = db.get(models.User, payload.user_id)
-        if not user or user.status != "active":
-            await websocket.close(code=1008, reason="inactive user")
+        try:
+            user = user_from_token(db, token)
+        except HTTPException:
+            await websocket.close(code=1008, reason="auth required")
             return
+        user_id = user.id
         channel = db.get(models.Channel, channel_id)
         if not channel or channel.is_deleted or channel.type != "voice":
             await websocket.close(code=1008, reason="bad channel")
@@ -427,7 +470,7 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
             return
 
     await websocket.accept()
-    await voice_relay.join(channel_id, payload.user_id, websocket)
+    await voice_relay.join(channel_id, user_id, websocket)
     try:
         while True:
             message = await websocket.receive()
@@ -438,13 +481,13 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
                 continue
             if len(data) > 4096:
                 continue
-            await voice_relay.broadcast_audio(channel_id, payload.user_id, data)
+            await voice_relay.broadcast_audio(channel_id, user_id, data)
     except WebSocketDisconnect:
         pass
     finally:
-        await voice_relay.leave(channel_id, payload.user_id)
+        await voice_relay.leave(channel_id, user_id)
         with SessionLocal() as db:
-            state = db.get(models.VoiceState, payload.user_id)
+            state = db.get(models.VoiceState, user_id)
             if state and state.channel_id == channel_id:
                 db.delete(state)
                 db.commit()
@@ -452,18 +495,18 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
 
 @app.websocket("/screen/ws/{channel_id}")
 async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
-    try:
-        payload = decode_token(token)
-    except HTTPException:
-        await websocket.close(code=1008, reason="auth required")
+    if not websocket_origin_allowed(websocket):
+        await websocket.close(code=1008, reason="bad origin")
         return
 
     can_send = False
     with SessionLocal() as db:
-        user = db.get(models.User, payload.user_id)
-        if not user or user.status != "active":
-            await websocket.close(code=1008, reason="inactive user")
+        try:
+            user = user_from_token(db, token)
+        except HTTPException:
+            await websocket.close(code=1008, reason="auth required")
             return
+        user_id = user.id
         channel = db.get(models.Channel, channel_id)
         if not channel or channel.is_deleted or channel.type != "voice":
             await websocket.close(code=1008, reason="bad channel")
@@ -478,7 +521,7 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
             return
 
     await websocket.accept()
-    await screen_relay.join(channel_id, payload.user_id, websocket)
+    await screen_relay.join(channel_id, user_id, websocket)
     try:
         while True:
             message = await websocket.receive()
@@ -486,6 +529,8 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
                 break
             text = message.get("text")
             if text:
+                if len(text) > MAX_WS_TEXT_CHARS:
+                    continue
                 try:
                     control = json.loads(text)
                 except json.JSONDecodeError:
@@ -502,10 +547,10 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
                 continue
             if len(data) > SCREEN_FRAME_LIMIT_BYTES:
                 continue
-            await screen_relay.broadcast_frame(channel_id, payload.user_id, data)
+            await screen_relay.broadcast_frame(channel_id, user_id, data)
     except WebSocketDisconnect:
         pass
     finally:
         if can_send:
-            await screen_relay.broadcast_frame(channel_id, payload.user_id, b"__STOP__")
-        await screen_relay.leave(channel_id, payload.user_id)
+            await screen_relay.broadcast_frame(channel_id, user_id, b"__STOP__")
+        await screen_relay.leave(channel_id, user_id)

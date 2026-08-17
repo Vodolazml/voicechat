@@ -11,8 +11,8 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 
-$env:VOICECHAT_SECRET_KEY="change-this-secret-key"
-$env:VOICECHAT_BOOTSTRAP_PASSWORD="Admin12345!"
+$env:VOICECHAT_SECRET_KEY="change-this-to-a-long-random-secret-at-least-32-chars"
+$env:VOICECHAT_BOOTSTRAP_PASSWORD="Admin12345!Local"
 python -m uvicorn app.server.main:app --reload --host 127.0.0.1 --port 8765
 ```
 
@@ -37,6 +37,13 @@ python -m app.client.main
 - рабочий голосовой MVP: микрофон клиента отправляет аудио на сервер по WebSocket, сервер ретранслирует звук участникам того же канала.
 
 Текущий голосовой слой использует raw PCM 16 kHz mono. Это удобно для первого рабочего прототипа, но дальше его стоит заменить или дополнить Opus/WebRTC, echo cancellation, noise suppression и отдельным media-сервисом.
+
+## Безопасность
+
+- задавайте `VOICECHAT_SECRET_KEY` длинной случайной строкой и не используйте пример из репозитория на сервере;
+- для доступа по сети добавьте домены или IP в `VOICECHAT_ALLOWED_HOSTS`;
+- браузерные Origin для WebSocket и CORS разрешаются только через `VOICECHAT_CORS_ORIGINS`;
+- старые токены становятся недействительными после смены пароля.
 
 ## Порядок разработки
 

@@ -1,13 +1,16 @@
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
+USERNAME_PATTERN = r"^[a-zA-Z0-9_.-]+$"
+SAFE_TEXT_PATTERN = r"^[^\x00-\x1f\x7f<>]+$"
+
 
 class OrmModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
 class LoginIn(BaseModel):
-    username: str = Field(min_length=1, max_length=64)
+    username: str = Field(min_length=1, max_length=64, pattern=USERNAME_PATTERN)
     password: str = Field(min_length=1, max_length=256)
 
 
@@ -30,9 +33,9 @@ class PasswordChangeIn(OrmModel):
 
 
 class UserCreateIn(OrmModel):
-    username: str = Field(min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")
-    display_name: str = Field(min_length=1, max_length=120)
-    temporary_password: str = Field(min_length=10, max_length=256)
+    username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
+    display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    temporary_password: str = Field(min_length=12, max_length=256)
     is_admin: bool = False
 
 
@@ -45,7 +48,7 @@ class UserOut(OrmModel):
 
 
 class SpaceCreateIn(OrmModel):
-    name: str = Field(min_length=2, max_length=120)
+    name: str = Field(min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
 
 
 class SpaceOut(OrmModel):
@@ -55,7 +58,7 @@ class SpaceOut(OrmModel):
 
 class ChannelCreateIn(OrmModel):
     space_id: int
-    name: str = Field(min_length=2, max_length=120)
+    name: str = Field(min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
     type: str = Field(pattern=r"^(text|voice)$")
 
 

@@ -197,6 +197,7 @@ class MainWindow(QMainWindow):
 
         self.channel_list = QListWidget()
         self.channel_list.itemClicked.connect(self.select_channel_item)
+        self.channel_list.itemDoubleClicked.connect(self.activate_channel_item)
         channel_frame = QFrame()
         channel_frame.setObjectName("panel")
         channel_frame.setFixedWidth(300)
@@ -351,6 +352,14 @@ class MainWindow(QMainWindow):
         channel = item.data(Qt.UserRole)
         if channel:
             self.select_channel(channel)
+
+    def activate_channel_item(self, item: QListWidgetItem) -> None:
+        channel = item.data(Qt.UserRole)
+        if not channel:
+            return
+        self.select_channel(channel)
+        if channel["type"] == "voice":
+            self.toggle_connection()
 
     def select_channel(self, channel: dict) -> None:
         self.current_channel = channel

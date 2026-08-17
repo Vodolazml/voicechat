@@ -7,6 +7,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.version import APP_VERSION
+from .updater import UpdateInfo
+
 
 class ApiError(RuntimeError):
     pass
@@ -70,6 +73,17 @@ class ApiClient:
             self.request("GET", "/health")
             samples.append(int((perf_counter() - started) * 1000))
         return min(samples)
+
+    def check_update(self) -> UpdateInfo:
+        data = self.request("GET", f"/client/update?version={APP_VERSION}")
+        return UpdateInfo(
+            latest_version=str(data.get("latest_version", APP_VERSION)),
+            update_available=bool(data.get("update_available", False)),
+            required=bool(data.get("required", False)),
+            download_url=str(data.get("download_url", "")),
+            sha256=str(data.get("sha256", "")),
+            release_notes_url=str(data.get("release_notes_url", "")),
+        )
 
     def voice_ws_url(self, channel_id: int) -> str:
         scheme = "wss" if self.base_url.startswith("https://") else "ws"

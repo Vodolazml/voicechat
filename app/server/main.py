@@ -23,6 +23,7 @@ from .permissions import seed_permissions, has_permission, user_permissions
 from .security import create_token, hash_password, validate_password_strength, verify_password
 from .screen_relay import screen_relay
 from .voice_relay import voice_relay
+from ..version import APP_VERSION
 
 
 settings = get_settings()
@@ -161,6 +162,34 @@ def on_startup() -> None:
 @app.get("/health", tags=["service"])
 def health() -> dict[str, str]:
     return {"status": "ok", "encoding": "utf-8"}
+
+
+def version_tuple(value: str) -> tuple[int, ...]:
+    parts = []
+    for raw in value.split("."):
+        try:
+            parts.append(int(raw))
+        except ValueError:
+            break
+    return tuple(parts or [0])
+
+
+@app.get("/client/update", response_model=schemas.ClientUpdateOut, tags=["service"])
+def client_update(version: str = APP_VERSION) -> schemas.ClientUpdateOut:
+    latest = settings.client_latest_version
+    update_available = (
+        bool(settings.client_download_url)
+        and bool(settings.client_download_sha256)
+        and version_tuple(latest) > version_tuple(version)
+    )
+    return schemas.ClientUpdateOut(
+        latest_version=latest,
+        update_available=update_available,
+        required=update_available and settings.client_update_required,
+        download_url=settings.client_download_url if update_available else "",
+        sha256=settings.client_download_sha256 if update_available else "",
+        release_notes_url=settings.client_release_notes_url if update_available else "",
+    )
 
 
 @app.post("/auth/login", response_model=schemas.TokenOut, tags=["auth"])

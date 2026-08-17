@@ -12,6 +12,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
     allowed_hosts: list[str] = ["127.0.0.1", "localhost", "testserver"]
     max_http_body_bytes: int = 65536
+    client_latest_version: str = "0.1.0"
+    client_download_url: str = ""
+    client_download_sha256: str = ""
+    client_update_required: bool = False
+    client_release_notes_url: str = ""
 
     model_config = SettingsConfigDict(env_prefix="VOICECHAT_", env_file=".env")
 

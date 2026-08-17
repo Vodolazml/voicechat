@@ -2,6 +2,7 @@ import pytest
 
 from app.client.api import ApiError, normalize_base_url
 from app.client.client_config import load_client_config
+from app.client.updater import update_file_name
 
 
 def test_normalizes_remote_server_to_https() -> None:
@@ -30,3 +31,7 @@ def test_loads_packaged_client_config(tmp_path, monkeypatch) -> None:
 
     assert config.server_url == "https://voice.example.com"
     assert config.lock_server_url is True
+
+
+def test_update_file_name_uses_url_name() -> None:
+    assert update_file_name("https://voice.example.com/downloads/app.zip", "0.1.1") == "app.zip"

@@ -42,6 +42,7 @@ from .e2ee import ChannelE2EE, E2EEIdentity
 from .screen_share import STOP_FRAME, ScreenShareClient
 from .settings_store import load_client_settings, save_client_settings
 from .styles import APP_STYLE
+from .updater import UpdateInfo, download_update, open_update_file
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
 
@@ -151,6 +152,7 @@ class LoginDialog(QDialog):
             self.server.setToolTip("Адрес сервера задан администратором в client_config.json")
         self.error = QLabel("")
         self.error.setObjectName("warn")
+        self.update_checked_for = ""
 
         form = QFormLayout()
         form.addRow("Сервер", self.server)
@@ -174,6 +176,8 @@ class LoginDialog(QDialog):
                 self.api.set_base_url(self.packaged_config.server_url)
             else:
                 self.api.set_base_url(self.server.text())
+            if not self.ensure_update_checked():
+                return
             data = self.api.login(self.username.text().strip(), self.password.text())
             if data.get("must_change_password"):
                 dialog = PasswordDialog(self.api, self.password.text())
@@ -186,6 +190,42 @@ class LoginDialog(QDialog):
             self.accept()
         except ApiError as exc:
             self.error.setText(str(exc))
+
+    def ensure_update_checked(self) -> bool:
+        if self.update_checked_for == self.api.base_url:
+            return True
+        info = self.api.check_update()
+        self.update_checked_for = self.api.base_url
+        if not info.update_available:
+            return True
+        return self.prompt_update(info)
+
+    def prompt_update(self, info: UpdateInfo) -> bool:
+        message = f"Доступна новая версия {info.latest_version}."
+        if info.required:
+            message += "\nЭто обязательное обновление, вход будет доступен после установки."
+        else:
+            message += "\nМожно скачать сейчас или продолжить с текущей версией."
+        buttons = QMessageBox.Ok if info.required else QMessageBox.Ok | QMessageBox.Cancel
+        answer = QMessageBox.question(
+            self,
+            "Обновление клиента",
+            message,
+            buttons,
+            QMessageBox.Ok,
+        )
+        if answer != QMessageBox.Ok:
+            return not info.required
+        try:
+            path = download_update(info)
+            open_update_file(path)
+        except Exception as exc:
+            self.error.setText(f"Не удалось скачать обновление: {exc}")
+            return not info.required
+        if info.required:
+            self.error.setText("Установите обновление и запустите приложение снова.")
+            return False
+        return True
 
 
 class PasswordDialog(QDialog):

@@ -19,6 +19,15 @@ class TokenOut(OrmModel):
     must_change_password: bool
 
 
+class ClientUpdateOut(BaseModel):
+    latest_version: str
+    update_available: bool
+    required: bool = False
+    download_url: str = ""
+    sha256: str = ""
+    release_notes_url: str = ""
+
+
 class MeOut(OrmModel):
     id: int
     username: str

@@ -98,6 +98,38 @@ python -m app.client.main
 
 Если вы положили `client_config.json` рядом с программой, адрес сервера уже будет прописан.
 
+## Обновления клиента
+
+Клиент при входе вызывает:
+
+```text
+GET /client/update?version=<текущая версия>
+```
+
+Сервер берёт данные обновления из `.env.production`:
+
+```env
+VOICECHAT_CLIENT_LATEST_VERSION=0.1.1
+VOICECHAT_CLIENT_DOWNLOAD_URL=https://voice.example.com/downloads/PrivateVoiceChat-0.1.1.zip
+VOICECHAT_CLIENT_DOWNLOAD_SHA256=<sha256 файла>
+VOICECHAT_CLIENT_UPDATE_REQUIRED=false
+VOICECHAT_CLIENT_RELEASE_NOTES_URL=https://voice.example.com/releases/0.1.1
+```
+
+Если версия новее, клиент покажет окно обновления. При скачивании файл сохраняется в:
+
+```text
+%USERPROFILE%\.private_voicechat\updates
+```
+
+После загрузки клиент сверяет SHA-256. Если хэш не совпал, файл удаляется.
+
+Обновление не будет предложено, если `VOICECHAT_CLIENT_DOWNLOAD_SHA256` пустой.
+
+Пока нет установщика, клиент открывает скачанный файл, а пользователь ставит или распаковывает обновление вручную. После упаковки в установщик этот же механизм можно довести до автоматического запуска installer/updater.
+
+Если `VOICECHAT_CLIENT_UPDATE_REQUIRED=true`, вход в программу блокируется до обновления.
+
 ## Минимальная безопасность для эксперимента
 
 - Используйте только HTTPS/WSS.

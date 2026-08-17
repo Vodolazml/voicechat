@@ -64,6 +64,28 @@ QToolButton#iconDanger {
 QToolButton#iconDanger:hover {
     background: #a12828;
 }
+QToolButton#channelAction {
+    background: transparent;
+    border: none;
+    border-radius: 13px;
+    padding: 4px;
+    min-width: 26px;
+    min-height: 26px;
+}
+QToolButton#channelAction:hover {
+    background: #248046;
+}
+QToolButton#channelActionConnected {
+    background: #248046;
+    border: none;
+    border-radius: 13px;
+    padding: 4px;
+    min-width: 26px;
+    min-height: 26px;
+}
+QToolButton#channelActionConnected:hover {
+    background: #da373c;
+}
 QListWidget {
     background: transparent;
     border: none;
@@ -79,6 +101,17 @@ QListWidget::item:selected {
 }
 QFrame#sidebar {
     background: #1e1f22;
+}
+QFrame#serverRow {
+    background: transparent;
+    border-radius: 8px;
+}
+QFrame#serverRow:hover {
+    background: #2b2d31;
+}
+QFrame#serverRowSelected {
+    background: #35373c;
+    border-radius: 8px;
 }
 QFrame#panel {
     background: #2b2d31;
@@ -101,6 +134,37 @@ QFrame#bottomBar {
 QLabel#title {
     font-size: 20px;
     font-weight: 700;
+}
+QLabel#serverTitle {
+    color: #949ba4;
+    font-size: 12px;
+    font-weight: 800;
+    padding: 0 4px 4px 4px;
+}
+QLabel#serverBadge {
+    background: #313338;
+    color: #dbdee1;
+    border-radius: 18px;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 36px;
+    max-height: 36px;
+    font-weight: 800;
+}
+QLabel#serverBadgeSelected {
+    background: #5865f2;
+    color: #ffffff;
+    border-radius: 14px;
+    min-width: 36px;
+    min-height: 36px;
+    max-width: 36px;
+    max-height: 36px;
+    font-weight: 800;
+}
+QLabel#serverName {
+    color: #dbdee1;
+    font-size: 12px;
+    font-weight: 600;
 }
 QLabel#muted {
     color: #949ba4;
@@ -157,6 +221,17 @@ QFrame#channelRow:hover {
 QFrame#channelRowActive {
     background: #404249;
     border-radius: 6px;
+}
+QPushButton#serverAdd {
+    background: #313338;
+    color: #23a559;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-weight: 800;
+}
+QPushButton#serverAdd:hover {
+    background: #248046;
+    color: #ffffff;
 }
 QFrame#memberRow {
     background: transparent;

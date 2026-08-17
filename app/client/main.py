@@ -47,6 +47,8 @@ def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
         "settings": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
         "plus": '<path d="M12 5v14"/><path d="M5 12h14"/>',
         "refresh": '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 3v5h-5"/><path d="M6 21v-5h5"/>',
+        "join": '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
+        "leave": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/>',
     }
     svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{paths[name]}</svg>'
     pixmap = QPixmap()
@@ -182,16 +184,20 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         self.space_list = QListWidget()
-        self.space_list.setFixedWidth(74)
+        self.space_list.setFixedWidth(126)
         self.space_list.itemClicked.connect(self.select_space_item)
         space_frame = QFrame()
         space_frame.setObjectName("sidebar")
         space_layout = QVBoxLayout(space_frame)
         space_layout.setContentsMargins(8, 10, 8, 10)
         space_layout.setSpacing(8)
-        add_space = QPushButton("+")
-        add_space.setToolTip("Создать пространство")
+        server_title = QLabel("Серверы")
+        server_title.setObjectName("serverTitle")
+        add_space = QPushButton("Новый")
+        add_space.setObjectName("serverAdd")
+        add_space.setToolTip("Создать сервер")
         add_space.clicked.connect(self.create_space)
+        space_layout.addWidget(server_title)
         space_layout.addWidget(self.space_list)
         space_layout.addWidget(add_space)
 
@@ -321,10 +327,12 @@ class MainWindow(QMainWindow):
             self.spaces = self.api.spaces()
             self.space_list.clear()
             for space in self.spaces:
-                item = QListWidgetItem(space["name"][:2].upper())
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(108, 64))
                 item.setToolTip(space["name"])
                 item.setData(Qt.UserRole, space)
                 self.space_list.addItem(item)
+                self.space_list.setItemWidget(item, self.server_widget(space, selected=self.current_space and self.current_space.get("id") == space["id"]))
             if self.spaces and not self.current_space:
                 self.space_list.setCurrentRow(0)
                 self.select_space(self.spaces[0])
@@ -337,6 +345,7 @@ class MainWindow(QMainWindow):
     def select_space(self, space: dict) -> None:
         self.current_space = space
         self.space_title.setText(space["name"])
+        self.render_servers()
         try:
             self.channels = self.api.channels(space["id"])
             self.refresh_space_voice_cache()
@@ -524,7 +533,8 @@ class MainWindow(QMainWindow):
         row = QFrame()
         row.setObjectName("channelRowActive" if active else "channelRow")
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(10, 6, 8, 6)
+        layout.setContentsMargins(10, 5, 6, 5)
+        layout.setSpacing(8)
         icon = QLabel("#")
         if channel["type"] == "voice":
             icon.setPixmap(svg_icon("voice").pixmap(QSize(17, 17)))
@@ -544,6 +554,40 @@ class MainWindow(QMainWindow):
             meta = QLabel(str(count))
             meta.setObjectName("channelMeta")
             layout.addWidget(meta)
+        if channel["type"] == "voice":
+            action = icon_button("leave" if connected else "join", "Отключиться" if connected else "Подключиться к каналу")
+            action.setObjectName("channelActionConnected" if connected else "channelAction")
+            action.clicked.connect(lambda _checked=False, selected_channel=channel: self.connect_from_channel_row(selected_channel))
+            layout.addWidget(action)
+        return row
+
+    def connect_from_channel_row(self, channel: dict) -> None:
+        self.select_channel(channel)
+        self.toggle_connection()
+
+    def render_servers(self) -> None:
+        for index in range(self.space_list.count()):
+            item = self.space_list.item(index)
+            space = item.data(Qt.UserRole)
+            if space:
+                selected = bool(self.current_space and self.current_space.get("id") == space["id"])
+                self.space_list.setItemWidget(item, self.server_widget(space, selected=selected))
+
+    def server_widget(self, space: dict, *, selected: bool) -> QWidget:
+        row = QFrame()
+        row.setObjectName("serverRowSelected" if selected else "serverRow")
+        row.setToolTip(space["name"])
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 7, 6, 7)
+        layout.setSpacing(8)
+        badge = QLabel(self.initials(space["name"])[:2])
+        badge.setObjectName("serverBadgeSelected" if selected else "serverBadge")
+        badge.setAlignment(Qt.AlignCenter)
+        layout.addWidget(badge)
+        label = QLabel(space["name"])
+        label.setObjectName("serverName")
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
         return row
 
     def voice_member_widget(self, state: dict, *, compact: bool) -> QWidget:

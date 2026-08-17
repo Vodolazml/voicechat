@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import audioop
 import queue
+import re
 import threading
 from dataclasses import dataclass
 from time import monotonic
@@ -27,23 +28,89 @@ class AudioDevice:
     name: str
     inputs: int
     outputs: int
+    simple_name: str
+    advanced: bool
 
 
-def audio_devices() -> tuple[list[AudioDevice], list[AudioDevice]]:
+ADVANCED_MARKERS = (
+    "переназначение",
+    "первичный драйвер",
+    "первичный звуковой",
+    "primary sound",
+    "stereo mix",
+    "стерео микшер",
+    "mapper",
+    "output (",
+    "line input",
+    "лин. вход",
+)
+
+
+def simplify_device_name(name: str) -> str:
+    result = name.strip()
+    for suffix in (
+        " - Input",
+        " - Output",
+        " (input)",
+        " (output)",
+        " input",
+        " output",
+    ):
+        result = result.replace(suffix, "")
+    while "  " in result:
+        result = result.replace("  ", " ")
+    result = result.strip(" -")
+    if result.count("(") > result.count(")"):
+        result += ")"
+    return result
+
+
+def device_key(name: str) -> str:
+    simplified = simplify_device_name(name).lower().replace("ё", "е")
+    simplified = re.sub(r"\b(input|output|audio|вход|выход)\b", "", simplified)
+    simplified = re.sub(r"[^0-9a-zа-я]+", "", simplified)
+    return simplified
+
+
+def add_unique_device(devices: list[AudioDevice], index_by_key: dict[str, int], key: str, device: AudioDevice) -> None:
+    existing_index = index_by_key.get(key)
+    if existing_index is None:
+        index_by_key[key] = len(devices)
+        devices.append(device)
+        return
+    existing = devices[existing_index]
+    if len(device.simple_name) > len(existing.simple_name):
+        devices[existing_index] = device
+
+
+def is_advanced_device(name: str) -> bool:
+    lowered = name.lower()
+    return any(marker in lowered for marker in ADVANCED_MARKERS)
+
+
+def audio_devices(*, include_advanced: bool = False) -> tuple[list[AudioDevice], list[AudioDevice]]:
     inputs: list[AudioDevice] = []
     outputs: list[AudioDevice] = []
+    seen_inputs: dict[str, int] = {}
+    seen_outputs: dict[str, int] = {}
     for index, raw in enumerate(sd.query_devices()):
         name = str(raw["name"])
+        simple_name = simplify_device_name(name)
+        advanced = is_advanced_device(name)
         device = AudioDevice(
             id=index,
             name=name,
             inputs=int(raw["max_input_channels"]),
             outputs=int(raw["max_output_channels"]),
+            simple_name=simple_name,
+            advanced=advanced,
         )
-        if device.inputs > 0:
-            inputs.append(device)
-        if device.outputs > 0:
-            outputs.append(device)
+        input_key = device_key(simple_name)
+        output_key = device_key(simple_name)
+        if device.inputs > 0 and (include_advanced or not advanced):
+            add_unique_device(inputs, seen_inputs, input_key, device)
+        if device.outputs > 0 and (include_advanced or not advanced):
+            add_unique_device(outputs, seen_outputs, output_key, device)
     return inputs, outputs
 
 

@@ -942,8 +942,10 @@ class AudioSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Настройки аудио")
         self.setMinimumWidth(520)
+        self.input_device_id = input_device_id
+        self.output_device_id = output_device_id
         try:
-            self.inputs, self.outputs = audio_devices()
+            self.inputs, self.outputs = audio_devices(include_advanced=False)
         except Exception as exc:
             self.inputs = []
             self.outputs = []
@@ -953,14 +955,17 @@ class AudioSettingsDialog(QDialog):
 
         self.input_combo = QComboBox()
         self.output_combo = QComboBox()
+        self.advanced_box = QCheckBox("Показать системные и виртуальные устройства")
+        self.advanced_box.stateChanged.connect(self.reload_devices)
         self.fill_combo(self.input_combo, self.inputs, input_device_id, "Системный микрофон")
         self.fill_combo(self.output_combo, self.outputs, output_device_id, "Системное устройство вывода")
 
         form = QFormLayout()
         form.addRow("Микрофон", self.input_combo)
         form.addRow("Вывод", self.output_combo)
+        form.addRow("", self.advanced_box)
 
-        hint = QLabel(self.error_text or "Изменения применятся сразу. Если вы уже в голосовом канале, аудио перезапустится.")
+        hint = QLabel(self.error_text or "По умолчанию показаны обычные устройства. Расширенный список нужен для виртуальных кабелей, line-in и системных endpoints.")
         hint.setObjectName("muted" if not self.error_text else "warn")
         hint.setWordWrap(True)
 
@@ -977,14 +982,28 @@ class AudioSettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def fill_combo(self, combo: QComboBox, devices: list[AudioDevice], selected: int | None, default_label: str) -> None:
+        combo.blockSignals(True)
+        combo.clear()
         combo.addItem(default_label, None)
         selected_index = 0
         for device in devices:
-            label = f"{device.name}  ({device.id})"
+            label = f"{device.simple_name}  ({device.id})" if device.advanced else device.simple_name
             combo.addItem(label, device.id)
             if selected == device.id:
                 selected_index = combo.count() - 1
         combo.setCurrentIndex(selected_index)
+        combo.blockSignals(False)
+
+    def reload_devices(self) -> None:
+        self.input_device_id, self.output_device_id = self.selected_devices()
+        include_advanced = self.advanced_box.isChecked()
+        try:
+            self.inputs, self.outputs = audio_devices(include_advanced=include_advanced)
+        except Exception:
+            self.inputs = []
+            self.outputs = []
+        self.fill_combo(self.input_combo, self.inputs, self.input_device_id, "Системный микрофон")
+        self.fill_combo(self.output_combo, self.outputs, self.output_device_id, "Системное устройство вывода")
 
     def selected_devices(self) -> tuple[int | None, int | None]:
         return self.input_combo.currentData(), self.output_combo.currentData()

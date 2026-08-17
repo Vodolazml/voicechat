@@ -60,6 +60,12 @@ class ApiClient:
         token = quote(self.token or "")
         return f"{scheme}://{host}/voice/ws/{channel_id}?token={token}"
 
+    def screen_ws_url(self, channel_id: int) -> str:
+        scheme = "wss" if self.base_url.startswith("https://") else "ws"
+        host = self.base_url.split("://", 1)[1].rstrip("/")
+        token = quote(self.token or "")
+        return f"{scheme}://{host}/screen/ws/{channel_id}?token={token}"
+
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")
 

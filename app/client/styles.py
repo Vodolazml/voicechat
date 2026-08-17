@@ -64,6 +64,17 @@ QToolButton#iconDanger {
 QToolButton#iconDanger:hover {
     background: #a12828;
 }
+QToolButton#iconActive {
+    background: #248046;
+    border: none;
+    border-radius: 16px;
+    padding: 7px;
+    min-width: 32px;
+    min-height: 32px;
+}
+QToolButton#iconActive:hover {
+    background: #1a6334;
+}
 QToolButton#channelAction {
     background: transparent;
     border: none;
@@ -329,6 +340,14 @@ QLabel#pillSpeaking {
     font-weight: 800;
     padding: 4px 10px;
 }
+QLabel#pillScreen {
+    background: #5865f2;
+    border-radius: 10px;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+}
 QLabel#pillMuted {
     background: #4e5058;
     border-radius: 10px;
@@ -349,6 +368,11 @@ QFrame#voiceCardSpeaking {
     background: #303b34;
     border: 3px solid #23a559;
     border-radius: 8px;
+}
+QLabel#screenPreview {
+    background: #111214;
+    border: 1px solid #1e1f22;
+    border-radius: 6px;
 }
 QFrame#memberRowSpeaking {
     background: #303b34;

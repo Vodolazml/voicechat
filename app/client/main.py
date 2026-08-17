@@ -4,7 +4,7 @@ import sys
 from functools import partial
 from time import monotonic
 
-from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize, QTimer, Qt
 from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ApiClient, ApiError
+from .screen_share import STOP_FRAME, ScreenShareClient
 from .styles import APP_STYLE
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
@@ -48,6 +49,7 @@ def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
         "headphones_off": '<path d="m2 2 20 20"/><path d="M3 14v-2a9 9 0 0 1 13.2-8"/><path d="M20.6 13.2A9 9 0 0 0 19 8.5"/><path d="M5 14h3v7H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Z"/><path d="M16 14h3a2 2 0 0 1 2 2v3"/>',
         "voice": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
         "settings": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
+        "screen": '<path d="M3 5h18v12H3z"/><path d="M8 21h8"/><path d="M12 17v4"/>',
         "plus": '<path d="M12 5v14"/><path d="M5 12h14"/>',
         "refresh": '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 3v5h-5"/><path d="M6 21v-5h5"/>',
         "join": '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
@@ -190,6 +192,10 @@ class MainWindow(QMainWindow):
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
         self.voice_audio: VoiceAudioClient | None = None
+        self.screen_client: ScreenShareClient | None = None
+        self.screen_sharing = False
+        self.screen_frames: dict[int, QPixmap] = {}
+        self.current_voice_states: list[dict] = []
         self.audio_status = "audio idle"
         self.input_device_id: int | None = None
         self.output_device_id: int | None = None
@@ -216,6 +222,9 @@ class MainWindow(QMainWindow):
         self.speaking_timer.setInterval(250)
         self.speaking_timer.timeout.connect(self.sync_speaking_state)
         self.speaking_timer.start()
+        self.screen_timer = QTimer(self)
+        self.screen_timer.setInterval(450)
+        self.screen_timer.timeout.connect(self.capture_screen_frame)
 
         self.reload_all()
         self.refresh_ping()
@@ -351,6 +360,8 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         self.deafen_button = icon_button("headphones", "Отключить входящий звук")
         self.deafen_button.clicked.connect(self.toggle_deafen)
+        self.screen_button = icon_button("screen", "Включить демонстрацию экрана")
+        self.screen_button.clicked.connect(self.toggle_screen_share)
         self.ping_label = QLabel("ping --")
         self.ping_label.setObjectName("pingUnknown")
         self.ping_label.setToolTip("Задержка API до сервера")
@@ -366,6 +377,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         layout.addWidget(self.mute_button)
         layout.addWidget(self.deafen_button)
+        layout.addWidget(self.screen_button)
         layout.addWidget(self.ping_label)
         layout.addWidget(self.settings_button)
         layout.addWidget(create_user)
@@ -486,15 +498,20 @@ class MainWindow(QMainWindow):
         try:
             channel_id = self.current_channel["id"]
             if self.connected_channel_id == channel_id:
+                self.stop_screen_share()
+                self.stop_screen_client()
                 self.stop_audio()
                 self.api.disconnect(channel_id)
                 self.connected_channel_id = None
                 self.channel_status.setText("Отключено")
             else:
+                self.stop_screen_share()
+                self.stop_screen_client()
                 self.stop_audio()
                 state = self.api.connect(channel_id, self.muted, self.deafened)
                 self.connected_channel_id = state["channel_id"]
                 self.start_audio(channel_id)
+                self.start_screen_client(channel_id)
                 self.channel_status.setText("Подключено")
             self.refresh_space_voice_cache()
             self.select_channel(self.current_channel)
@@ -533,6 +550,86 @@ class MainWindow(QMainWindow):
             self.voice_audio.stop()
             self.voice_audio = None
         self.last_speaking = False
+
+    def start_screen_client(self, channel_id: int) -> None:
+        self.screen_client = ScreenShareClient(self.api.screen_ws_url(channel_id))
+        self.screen_client.frame_received.connect(self.on_screen_frame)
+        self.screen_client.stopped_received.connect(self.on_screen_stop)
+        self.screen_client.status_changed.connect(self.set_audio_status)
+        self.screen_client.start()
+
+    def stop_screen_client(self) -> None:
+        if self.screen_client:
+            self.screen_client.stop()
+            self.screen_client = None
+        self.screen_frames.clear()
+        self.redraw_voice_stage()
+
+    def toggle_screen_share(self) -> None:
+        if self.screen_sharing:
+            self.stop_screen_share()
+            return
+        if not self.connected_channel_id:
+            self.show_error("Сначала подключитесь к голосовому каналу.")
+            return
+        if not self.screen_client:
+            self.start_screen_client(self.connected_channel_id)
+        self.screen_sharing = True
+        self.screen_timer.start()
+        self.apply_screen_button()
+        self.capture_screen_frame()
+
+    def stop_screen_share(self) -> None:
+        was_sharing = self.screen_sharing
+        self.screen_sharing = False
+        self.screen_timer.stop()
+        if self.screen_client and was_sharing:
+            self.screen_client.send_frame(STOP_FRAME)
+        if self.me:
+            self.screen_frames.pop(int(self.me["id"]), None)
+        self.apply_screen_button()
+        self.redraw_voice_stage()
+
+    def capture_screen_frame(self) -> None:
+        if not self.screen_sharing or not self.screen_client:
+            return
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        pixmap = screen.grabWindow(0).scaled(640, 360, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return
+        pixmap.save(buffer, "JPG", 55)
+        frame = bytes(data)
+        if len(frame) > 256_000:
+            pixmap = pixmap.scaled(480, 270, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            data = QByteArray()
+            buffer = QBuffer(data)
+            if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+                return
+            pixmap.save(buffer, "JPG", 45)
+            frame = bytes(data)
+        if self.me:
+            self.screen_frames[int(self.me["id"])] = pixmap
+        self.screen_client.send_frame(frame)
+        self.redraw_voice_stage()
+
+    def on_screen_frame(self, user_id: int, frame: bytes) -> None:
+        pixmap = QPixmap()
+        if pixmap.loadFromData(frame, "JPG"):
+            self.screen_frames[user_id] = pixmap
+            self.redraw_voice_stage()
+
+    def on_screen_stop(self, user_id: int) -> None:
+        self.screen_frames.pop(user_id, None)
+        self.redraw_voice_stage()
+
+    def apply_screen_button(self) -> None:
+        self.screen_button.setToolTip("Остановить демонстрацию экрана" if self.screen_sharing else "Включить демонстрацию экрана")
+        self.screen_button.setObjectName("iconActive" if self.screen_sharing else "iconButton")
+        self.repolish(self.screen_button)
 
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
@@ -624,10 +721,12 @@ class MainWindow(QMainWindow):
         self.member_list.clear()
         self.clear_stage_members()
         if not self.current_channel or self.current_channel["type"] != "voice":
+            self.current_voice_states = []
             self.add_stage_empty("Для текстовых каналов скоро появится полноценный чат.")
             return
         try:
             states = self.api.voice_states(self.current_channel["id"])
+            self.current_voice_states = states
             self.voice_cache[self.current_channel["id"]] = states
             if not states:
                 item = QListWidgetItem()
@@ -644,9 +743,22 @@ class MainWindow(QMainWindow):
                 self.add_stage_member(state)
             self.render_channels()
         except ApiError:
+            self.current_voice_states = []
             if self.current_channel and self.current_channel["type"] == "voice":
                 self.member_list.addItem("Не удалось обновить участников")
                 self.add_stage_empty("Не удалось обновить участников. Проверьте соединение с сервером.")
+
+    def redraw_voice_stage(self) -> None:
+        if not hasattr(self, "stage_members_layout"):
+            return
+        self.clear_stage_members()
+        if not self.current_channel or self.current_channel["type"] != "voice":
+            return
+        if not self.current_voice_states:
+            self.add_stage_empty("В канале пока никого нет. Подключитесь первым.")
+            return
+        for state in self.current_voice_states:
+            self.add_stage_member(state)
 
     def refresh_space_voice_cache(self) -> None:
         self.voice_cache = {}
@@ -804,16 +916,26 @@ class MainWindow(QMainWindow):
     def add_stage_member(self, state: dict) -> None:
         card = QFrame()
         card.setObjectName("voiceCardSpeaking" if state.get("speaking") else "voiceCard")
-        card.setFixedSize(210, 150)
+        card.setFixedSize(230, 170)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(partial(self.show_member_menu, card, state))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 14, 14, 14)
         card_layout.setSpacing(8)
-        avatar = QLabel(self.initials(state["display_name"]))
-        avatar.setObjectName("bigAvatar")
-        avatar.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(avatar, 0, Qt.AlignCenter)
+        user_id = int(state["user_id"])
+        screen_pixmap = self.screen_frames.get(user_id)
+        if screen_pixmap:
+            preview = QLabel()
+            preview.setObjectName("screenPreview")
+            preview.setAlignment(Qt.AlignCenter)
+            preview.setFixedSize(202, 86)
+            preview.setPixmap(screen_pixmap.scaled(preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            card_layout.addWidget(preview, 0, Qt.AlignCenter)
+        else:
+            avatar = QLabel(self.initials(state["display_name"]))
+            avatar.setObjectName("bigAvatar")
+            avatar.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(avatar, 0, Qt.AlignCenter)
         name = QLabel(state["display_name"])
         name.setObjectName("stageMemberName")
         name.setAlignment(Qt.AlignCenter)
@@ -830,6 +952,9 @@ class MainWindow(QMainWindow):
         badge = QLabel(badge_text)
         badge.setObjectName("pillMuted" if state["muted"] else "pillSpeaking" if state.get("speaking") else "pillLive")
         bottom.addWidget(badge)
+        if screen_pixmap:
+            badge.setText("SCREEN")
+            badge.setObjectName("pillScreen")
         if state["user_id"] in self.local_mutes:
             local = QLabel("LOCAL")
             local.setObjectName("pillMuted")
@@ -874,6 +999,8 @@ class MainWindow(QMainWindow):
         label.setText(f"Громкость: {value}%")
 
     def closeEvent(self, event) -> None:
+        self.stop_screen_share()
+        self.stop_screen_client()
         self.stop_audio()
         if self.connected_channel_id:
             try:

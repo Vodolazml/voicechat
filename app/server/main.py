@@ -15,6 +15,7 @@ from .deps import current_user, ensure_channel_member, require_permission
 from .permissions import seed_permissions, has_permission, user_permissions
 from .security import create_token, hash_password, validate_password_strength, verify_password
 from .security import decode_token
+from .screen_relay import screen_relay
 from .voice_relay import voice_relay
 
 
@@ -444,3 +445,53 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str) -> 
             if state and state.channel_id == channel_id:
                 db.delete(state)
                 db.commit()
+
+
+@app.websocket("/screen/ws/{channel_id}")
+async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) -> None:
+    try:
+        payload = decode_token(token)
+    except HTTPException:
+        await websocket.close(code=1008, reason="auth required")
+        return
+
+    can_send = False
+    with SessionLocal() as db:
+        user = db.get(models.User, payload.user_id)
+        if not user or user.status != "active":
+            await websocket.close(code=1008, reason="inactive user")
+            return
+        channel = db.get(models.Channel, channel_id)
+        if not channel or channel.is_deleted or channel.type != "voice":
+            await websocket.close(code=1008, reason="bad channel")
+            return
+        if not db.get(models.ChannelMember, {"channel_id": channel_id, "user_id": user.id}):
+            await websocket.close(code=1008, reason="no channel access")
+            return
+        can_view = has_permission(db, user.id, "screen_share.view")
+        can_send = has_permission(db, user.id, "screen_share.start")
+        if not can_view and not can_send:
+            await websocket.close(code=1008, reason="no screen permission")
+            return
+
+    await websocket.accept()
+    await screen_relay.join(channel_id, payload.user_id, websocket)
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            data = message.get("bytes")
+            if data is None:
+                continue
+            if not can_send:
+                continue
+            if len(data) > 256_000:
+                continue
+            await screen_relay.broadcast_frame(channel_id, payload.user_id, data)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if can_send:
+            await screen_relay.broadcast_frame(channel_id, payload.user_id, b"__STOP__")
+        await screen_relay.leave(channel_id, payload.user_id)

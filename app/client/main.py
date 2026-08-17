@@ -50,6 +50,11 @@ SCREEN_QUALITY_PRESETS = {
         "tooltip": "1920x1080, высокая четкость",
         "captures": ((1920, 1080, 86), (1920, 1080, 78), (1600, 900, 74)),
     },
+    "1080p_speed": {
+        "label": "FullHD скорость",
+        "tooltip": "1920x1080, ниже JPEG quality ради частоты кадров",
+        "captures": ((1920, 1080, 62), (1600, 900, 58), (1280, 720, 54)),
+    },
     "1080p_balanced": {
         "label": "FullHD среднее",
         "tooltip": "1920x1080, меньше нагрузка на сеть",
@@ -65,12 +70,6 @@ SCREEN_QUALITY_PRESETS = {
         "tooltip": "960x540, минимальная нагрузка",
         "captures": ((960, 540, 72), (854, 480, 64)),
     },
-}
-SCREEN_60FPS_QUALITY_PRESETS = {
-    "1080p_high": ((1920, 1080, 62), (1600, 900, 58), (1280, 720, 54)),
-    "1080p_balanced": ((1920, 1080, 56), (1600, 900, 52), (1280, 720, 48)),
-    "720p_high": ((1280, 720, 62), (960, 540, 56)),
-    "540p_low": ((960, 540, 58), (854, 480, 52)),
 }
 DEFAULT_SCREEN_QUALITY = "1080p_high"
 SCREEN_FPS_PRESETS = (
@@ -709,11 +708,7 @@ class MainWindow(QMainWindow):
         pixmap = source
         frame = b""
         preset = SCREEN_QUALITY_PRESETS.get(self.screen_quality_key, SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
-        capture_presets = (
-            SCREEN_60FPS_QUALITY_PRESETS.get(self.screen_quality_key, preset["captures"])
-            if self.screen_fps_interval_ms <= 17
-            else preset["captures"]
-        )
+        capture_presets = preset["captures"]
         used_quality = 0
         for width, height, quality in capture_presets:
             pixmap = self.prepare_screen_pixmap(source, width, height)
@@ -786,12 +781,13 @@ class MainWindow(QMainWindow):
         actual_fps = len(self.screen_frame_times) / max(0.1, self.screen_frame_times[-1] - self.screen_frame_times[0] or 1)
         target_fps = max(1, round(1000 / self.screen_fps_interval_ms))
         preset = SCREEN_QUALITY_PRESETS.get(self.screen_quality_key, SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
-        speed_note = " · режим скорости" if self.screen_fps_interval_ms <= 17 else ""
-        load_note = " · высокая нагрузка" if actual_fps < target_fps * 0.75 else ""
+        bitrate_mbps = frame_size * 8 * actual_fps / 1_000_000
+        load_note = " · упор: захват/JPEG" if actual_fps < target_fps * 0.75 else ""
+        limit_note = " · близко к лимиту кадра" if frame_size > SCREEN_FRAME_LIMIT_BYTES * 0.9 else ""
         self.screen_stream_info = (
             f"{preset['label']} · {pixmap.width()}x{pixmap.height()} · "
             f"{target_fps} FPS выбрано · {actual_fps:.1f} FPS факт · "
-            f"JPEG {jpeg_quality} · {frame_size // 1024} KB{speed_note}{load_note}"
+            f"JPEG {jpeg_quality} · {frame_size // 1024} KB · ~{bitrate_mbps:.1f} Мбит/с{limit_note}{load_note}"
         )
 
     def on_screen_frame(self, user_id: int, frame: bytes) -> None:
@@ -1490,14 +1486,15 @@ class ScreenShareStartDialog(QDialog):
         preset = SCREEN_QUALITY_PRESETS.get(self.selected_quality_key(), SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
         interval_ms = self.selected_fps_interval_ms()
         fps = max(1, round(1000 / interval_ms))
-        capture_presets = (
-            SCREEN_60FPS_QUALITY_PRESETS.get(self.selected_quality_key(), preset["captures"])
-            if interval_ms <= 17
-            else preset["captures"]
-        )
+        capture_presets = preset["captures"]
         width, height, quality = capture_presets[0]
-        speed_note = " Режим скорости снижает JPEG quality ради FPS." if interval_ms <= 17 else ""
-        self.quality_hint.setText(f"Будет отправляться: {width}x{height}, {fps} FPS, JPEG {quality}. {preset['tooltip']}.{speed_note}")
+        fps_note = (
+            " 60 FPS в текущей JPEG-трансляции зависит от скорости захвата и сжатия; "
+            "для максимальной плавности выберите FullHD скорость или HD 720p."
+            if interval_ms <= 17
+            else ""
+        )
+        self.quality_hint.setText(f"Будет отправляться: {width}x{height}, {fps} FPS, JPEG {quality}. {preset['tooltip']}.{fps_note}")
 
     def refresh_preview(self) -> None:
         screen = QApplication.primaryScreen()

@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
         self.input_device_id: int | None = None
         self.output_device_id: int | None = None
         self.noise_suppression = True
+        self.noise_threshold = 450
         self.last_speaking = False
         self.last_voice_sync_at = 0.0
 
@@ -517,6 +518,7 @@ class MainWindow(QMainWindow):
                 is_locally_muted=lambda user_id: user_id in self.local_mutes,
                 local_volume=lambda user_id: self.local_volumes.get(user_id, 100),
                 noise_suppression=lambda: self.noise_suppression,
+                noise_threshold=lambda: self.noise_threshold,
                 status_callback=self.set_audio_status,
                 input_device=self.input_device_id,
                 output_device=self.output_device_id,
@@ -553,11 +555,18 @@ class MainWindow(QMainWindow):
             pass
 
     def open_audio_settings(self) -> None:
-        dialog = AudioSettingsDialog(self, self.input_device_id, self.output_device_id, self.noise_suppression)
+        dialog = AudioSettingsDialog(
+            self,
+            self.input_device_id,
+            self.output_device_id,
+            self.noise_suppression,
+            self.noise_threshold,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         self.input_device_id, self.output_device_id = dialog.selected_devices()
         self.noise_suppression = dialog.noise_suppression_enabled()
+        self.noise_threshold = dialog.selected_threshold()
         self.update_audio_device_label()
         if self.connected_channel_id:
             channel_id = self.connected_channel_id
@@ -963,16 +972,19 @@ class MainWindow(QMainWindow):
 
 
 class MicTestDialog(QDialog):
-    def __init__(self, parent: QWidget, input_device_id: int | None) -> None:
+    def __init__(self, parent: QWidget, input_device_id: int | None, output_device_id: int | None, threshold: int) -> None:
         super().__init__(parent)
         self.setWindowTitle("Тест микрофона")
         self.setMinimumWidth(420)
-        self.monitor = MicTestMonitor(input_device_id)
+        self.monitor = MicTestMonitor(input_device_id, output_device_id, threshold)
         self.level = QProgressBar()
         self.level.setRange(0, 100)
         self.level.setValue(0)
         self.status = QLabel("Говорите в микрофон.")
         self.status.setObjectName("muted")
+        self.hint = QLabel("Вы услышите себя с небольшой задержкой. Если включено шумоподавление, настройте порог так, чтобы голос уверенно срабатывал, а фон не срабатывал.")
+        self.hint.setObjectName("muted")
+        self.hint.setWordWrap(True)
         self.timer = QTimer(self)
         self.timer.setInterval(80)
         self.timer.timeout.connect(self.refresh_level)
@@ -983,6 +995,7 @@ class MicTestDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(self.level)
         layout.addWidget(self.status)
+        layout.addWidget(self.hint)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1011,7 +1024,14 @@ class MicTestDialog(QDialog):
 
 
 class AudioSettingsDialog(QDialog):
-    def __init__(self, parent: QWidget, input_device_id: int | None, output_device_id: int | None, noise_suppression: bool) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        input_device_id: int | None,
+        output_device_id: int | None,
+        noise_suppression: bool,
+        noise_threshold: int,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки аудио")
         self.setMinimumWidth(520)
@@ -1030,6 +1050,12 @@ class AudioSettingsDialog(QDialog):
         self.output_combo = QComboBox()
         self.noise_box = QCheckBox("Шумоподавление")
         self.noise_box.setChecked(noise_suppression)
+        self.threshold_slider = QSlider(Qt.Horizontal)
+        self.threshold_slider.setRange(150, 1600)
+        self.threshold_slider.setValue(noise_threshold)
+        self.threshold_slider.valueChanged.connect(self.update_threshold_label)
+        self.threshold_label = QLabel("")
+        self.threshold_label.setObjectName("muted")
         self.advanced_box = QCheckBox("Показать системные и виртуальные устройства")
         self.advanced_box.stateChanged.connect(self.reload_devices)
         self.test_button = QPushButton("Тест микрофона")
@@ -1046,7 +1072,12 @@ class AudioSettingsDialog(QDialog):
         noise_row.addStretch()
         noise_row.addWidget(self.test_button)
         form.addRow("Голос", noise_row)
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(self.threshold_slider, 1)
+        threshold_row.addWidget(self.threshold_label)
+        form.addRow("Порог", threshold_row)
         form.addRow("", self.advanced_box)
+        self.update_threshold_label(noise_threshold)
 
         hint = QLabel(self.error_text or "По умолчанию показаны обычные устройства. Расширенный список нужен для виртуальных кабелей, line-in и системных endpoints.")
         hint.setObjectName("muted" if not self.error_text else "warn")
@@ -1094,8 +1125,20 @@ class AudioSettingsDialog(QDialog):
     def noise_suppression_enabled(self) -> bool:
         return self.noise_box.isChecked()
 
+    def selected_threshold(self) -> int:
+        return self.threshold_slider.value()
+
+    def update_threshold_label(self, value: int) -> None:
+        if value < 400:
+            mode = "чувствительно"
+        elif value < 900:
+            mode = "обычно"
+        else:
+            mode = "строго"
+        self.threshold_label.setText(f"{value} ({mode})")
+
     def open_mic_test(self) -> None:
-        dialog = MicTestDialog(self, self.input_combo.currentData())
+        dialog = MicTestDialog(self, self.input_combo.currentData(), self.output_combo.currentData(), self.threshold_slider.value())
         dialog.exec()
 
 

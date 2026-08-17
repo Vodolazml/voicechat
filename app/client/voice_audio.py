@@ -20,6 +20,7 @@ BLOCKSIZE = 320
 FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
 SPEAKING_RMS = 450
 SPEAKING_HOLD_SECONDS = 0.35
+MIC_TEST_DELAY_FRAMES = 18
 
 
 @dataclass(frozen=True)
@@ -123,12 +124,16 @@ def device_display_name(device_id: int) -> str:
 
 
 class MicTestMonitor:
-    def __init__(self, input_device: int | None = None) -> None:
+    def __init__(self, input_device: int | None = None, output_device: int | None = None, threshold: int = SPEAKING_RMS) -> None:
         self.input_device = input_device
+        self.output_device = output_device
+        self.threshold = threshold
         self.level = 0
         self.speaking = False
         self._last_voice_at = 0.0
+        self._delay_queue: queue.Queue[bytes] = queue.Queue(maxsize=MIC_TEST_DELAY_FRAMES * 3)
         self._stream: sd.RawInputStream | None = None
+        self._output_stream: sd.RawOutputStream | None = None
 
     def start(self) -> None:
         self._stream = sd.RawInputStream(
@@ -139,28 +144,59 @@ class MicTestMonitor:
             device=self.input_device,
             callback=self._callback,
         )
+        self._output_stream = sd.RawOutputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype="int16",
+            blocksize=BLOCKSIZE,
+            device=self.output_device,
+            callback=self._playback_callback,
+        )
         self._stream.start()
+        self._output_stream.start()
 
     def stop(self) -> None:
-        if not self._stream:
-            return
-        try:
-            self._stream.stop()
-            self._stream.close()
-        except sd.PortAudioError:
-            pass
+        for stream in (self._stream, self._output_stream):
+            if not stream:
+                continue
+            try:
+                stream.stop()
+                stream.close()
+            except sd.PortAudioError:
+                pass
         self._stream = None
+        self._output_stream = None
 
     def _callback(self, indata, frames, time_info, status) -> None:
         data = bytes(indata)
         rms = audioop.rms(data, SAMPLE_WIDTH) if data else 0
         self.level = max(0, min(100, int(rms / 30)))
         now = monotonic()
-        if rms >= SPEAKING_RMS:
+        if rms >= self.threshold:
             self._last_voice_at = now
             self.speaking = True
         elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
             self.speaking = False
+        try:
+            self._delay_queue.put_nowait(data)
+        except queue.Full:
+            try:
+                self._delay_queue.get_nowait()
+                self._delay_queue.put_nowait(data)
+            except queue.Empty:
+                pass
+
+    def _playback_callback(self, outdata, frames, time_info, status) -> None:
+        if self._delay_queue.qsize() < MIC_TEST_DELAY_FRAMES:
+            outdata[:] = b"\x00" * len(outdata)
+            return
+        try:
+            data = self._delay_queue.get_nowait()
+        except queue.Empty:
+            data = b"\x00" * len(outdata)
+        if len(data) < len(outdata):
+            data += b"\x00" * (len(outdata) - len(data))
+        outdata[:] = data[: len(outdata)]
 
 
 class VoiceAudioClient:
@@ -173,6 +209,7 @@ class VoiceAudioClient:
         is_locally_muted: Callable[[int], bool],
         local_volume: Callable[[int], int],
         noise_suppression: Callable[[], bool],
+        noise_threshold: Callable[[], int],
         status_callback: Callable[[str], None] | None = None,
         input_device: int | None = None,
         output_device: int | None = None,
@@ -183,6 +220,7 @@ class VoiceAudioClient:
         self.is_locally_muted = is_locally_muted
         self.local_volume = local_volume
         self.noise_suppression = noise_suppression
+        self.noise_threshold = noise_threshold
         self.status_callback = status_callback
         self.input_device = input_device
         self.output_device = output_device
@@ -246,7 +284,7 @@ class VoiceAudioClient:
         if not data:
             return
         now = monotonic()
-        if audioop.rms(data, SAMPLE_WIDTH) >= SPEAKING_RMS:
+        if audioop.rms(data, SAMPLE_WIDTH) >= self.noise_threshold():
             self._last_voice_at = now
             self.speaking = True
         elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:

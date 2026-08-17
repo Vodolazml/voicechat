@@ -196,8 +196,13 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(2500)
         self.timer.timeout.connect(self.refresh_voice)
         self.timer.start()
+        self.ping_timer = QTimer(self)
+        self.ping_timer.setInterval(3000)
+        self.ping_timer.timeout.connect(self.refresh_ping)
+        self.ping_timer.start()
 
         self.reload_all()
+        self.refresh_ping()
 
     def build_ui(self) -> QWidget:
         root = QWidget()
@@ -327,6 +332,9 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         self.deafen_button = icon_button("headphones", "Отключить входящий звук")
         self.deafen_button.clicked.connect(self.toggle_deafen)
+        self.ping_label = QLabel("ping --")
+        self.ping_label.setObjectName("pingUnknown")
+        self.ping_label.setToolTip("Задержка до сервера")
         self.settings_button = icon_button("settings", "Настройки")
         create_user = QPushButton("Создать пользователя")
         create_user.setObjectName("secondary")
@@ -337,6 +345,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         layout.addWidget(self.mute_button)
         layout.addWidget(self.deafen_button)
+        layout.addWidget(self.ping_label)
         layout.addWidget(self.settings_button)
         layout.addWidget(create_user)
         layout.addWidget(refresh)
@@ -360,6 +369,36 @@ class MainWindow(QMainWindow):
                 self.select_space(self.spaces[0])
         except ApiError as exc:
             self.show_error(str(exc))
+
+    def refresh_ping(self) -> None:
+        try:
+            ping = self.api.ping_ms()
+        except ApiError:
+            self.ping_label.setText("offline")
+            self.ping_label.setObjectName("pingBad")
+            self.ping_label.setToolTip("Сервер недоступен или сеть оборвалась")
+            self.repolish(self.ping_label)
+            return
+        if ping < 80:
+            quality = "pingGood"
+            text = f"{ping} ms"
+            tip = "Соединение стабильное"
+        elif ping < 180:
+            quality = "pingWarn"
+            text = f"{ping} ms"
+            tip = "Есть небольшая задержка"
+        else:
+            quality = "pingBad"
+            text = f"{ping} ms"
+            tip = "Высокая задержка или проблемы сети"
+        self.ping_label.setText(text)
+        self.ping_label.setObjectName(quality)
+        self.ping_label.setToolTip(tip)
+        self.repolish(self.ping_label)
+
+    def repolish(self, widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     def select_space_item(self, item: QListWidgetItem) -> None:
         self.select_space(item.data(Qt.UserRole))

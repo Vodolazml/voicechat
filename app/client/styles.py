@@ -175,6 +175,42 @@ QLabel#ok {
 QLabel#warn {
     color: #f0b232;
 }
+QLabel#pingGood {
+    background: #1f3f2b;
+    color: #3ddd82;
+    border: 1px solid #248046;
+    border-radius: 12px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 800;
+}
+QLabel#pingWarn {
+    background: #3f331f;
+    color: #f0b232;
+    border: 1px solid #8f6f20;
+    border-radius: 12px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 800;
+}
+QLabel#pingBad {
+    background: #4a2022;
+    color: #ff7676;
+    border: 1px solid #da373c;
+    border-radius: 12px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 800;
+}
+QLabel#pingUnknown {
+    background: #35373c;
+    color: #949ba4;
+    border: 1px solid #4e5058;
+    border-radius: 12px;
+    padding: 4px 9px;
+    font-size: 12px;
+    font-weight: 800;
+}
 QLabel#section {
     color: #949ba4;
     font-size: 12px;

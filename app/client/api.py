@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 import httpx
@@ -43,6 +44,11 @@ class ApiClient:
         data = self.request("POST", "/auth/login", json={"username": username, "password": password})
         self.token = data["access_token"]
         return data
+
+    def ping_ms(self) -> int:
+        started = perf_counter()
+        self.request("GET", "/health")
+        return int((perf_counter() - started) * 1000)
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")

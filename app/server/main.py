@@ -1,0 +1,386 @@
+from collections import defaultdict, deque
+from time import monotonic
+
+from fastapi import Depends, FastAPI, HTTPException, Request
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .config import get_settings
+from . import models, schemas
+from .audit import write_audit
+from .database import Base, SessionLocal, engine, get_db
+from .deps import current_user, ensure_channel_member, require_permission
+from .permissions import seed_permissions, has_permission, user_permissions
+from .security import create_token, hash_password, validate_password_strength, verify_password
+
+
+settings = get_settings()
+
+app = FastAPI(title=settings.app_name)
+_rate_limits: dict[str, deque[float]] = defaultdict(deque)
+
+
+def rate_limit(key: str, limit: int, window_seconds: int) -> None:
+    now = monotonic()
+    bucket = _rate_limits[key]
+    while bucket and now - bucket[0] > window_seconds:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail="Слишком много действий. Попробуйте позже.")
+    bucket.append(now)
+
+
+def seed_database() -> None:
+    Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_permissions(db)
+        admin = db.scalar(select(models.User).where(models.User.username == "admin"))
+        admin_role = db.scalar(select(models.Role).where(models.Role.name == "Owner/System Admin"))
+        if not admin:
+            admin = models.User(
+                username="admin",
+                display_name="Администратор",
+                password_hash=hash_password(settings.bootstrap_password),
+                must_change_password=True,
+            )
+            db.add(admin)
+            db.flush()
+            if admin_role:
+                db.add(models.UserRole(user_id=admin.id, role_id=admin_role.id))
+            db.add(models.Space(name="Основное пространство", created_by=admin.id))
+            db.flush()
+            space = db.scalar(select(models.Space).where(models.Space.name == "Основное пространство"))
+            if space:
+                db.add(models.SpaceMember(space_id=space.id, user_id=admin.id))
+                lobby = models.Channel(space_id=space.id, name="Лобби", type="voice", created_by=admin.id)
+                planning = models.Channel(space_id=space.id, name="Планирование", type="voice", created_by=admin.id)
+                news = models.Channel(space_id=space.id, name="Новости", type="text", created_by=admin.id)
+                db.add_all([lobby, planning, news])
+                db.flush()
+                for channel in (lobby, planning, news):
+                    db.add(models.ChannelMember(channel_id=channel.id, user_id=admin.id))
+            write_audit(
+                db,
+                actor_id=None,
+                action="system.bootstrap",
+                target_type="user",
+                target_id=admin.id,
+                details={"username": "admin"},
+            )
+        db.commit()
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    seed_database()
+
+
+@app.get("/health", tags=["service"])
+def health() -> dict[str, str]:
+    return {"status": "ok", "encoding": "utf-8"}
+
+
+@app.post("/auth/login", response_model=schemas.TokenOut, tags=["auth"])
+def login(payload: schemas.LoginIn, request: Request, db: Session = Depends(get_db)) -> schemas.TokenOut:
+    rate_limit(f"login:{request.client.host if request.client else 'local'}:{payload.username}", 5, 300)
+    user = db.scalar(select(models.User).where(models.User.username == payload.username))
+    if not user or user.status != "active" or not verify_password(payload.password, user.password_hash):
+        write_audit(
+            db,
+            actor_id=user.id if user else None,
+            action="auth.login_failed",
+            target_type="user",
+            target_id=payload.username,
+            request=request,
+            result="failed",
+        )
+        db.commit()
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    write_audit(db, actor_id=user.id, action="auth.login", target_type="user", target_id=user.id, request=request)
+    db.commit()
+    return schemas.TokenOut(access_token=create_token(user.id), must_change_password=user.must_change_password)
+
+
+@app.get("/me", response_model=schemas.MeOut, tags=["auth"])
+def me(user: models.User = Depends(current_user), db: Session = Depends(get_db)) -> schemas.MeOut:
+    return schemas.MeOut(
+        id=user.id,
+        username=user.username,
+        display_name=user.display_name,
+        must_change_password=user.must_change_password,
+        permissions=sorted(user_permissions(db, user.id)),
+    )
+
+
+@app.post("/me/password", tags=["auth"])
+def change_password(
+    payload: schemas.PasswordChangeIn,
+    request: Request,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    if not verify_password(payload.old_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Старый пароль указан неверно")
+    validate_password_strength(payload.new_password)
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    write_audit(db, actor_id=user.id, action="auth.password_changed", target_type="user", target_id=user.id, request=request)
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/users", response_model=list[schemas.UserOut], tags=["admin"])
+def list_users(
+    _: models.User = Depends(require_permission("users.create")),
+    db: Session = Depends(get_db),
+) -> list[models.User]:
+    return list(db.scalars(select(models.User).where(models.User.status != "deleted").order_by(models.User.username)))
+
+
+@app.post("/users", response_model=schemas.UserOut, tags=["admin"])
+def create_user(
+    payload: schemas.UserCreateIn,
+    request: Request,
+    actor: models.User = Depends(require_permission("users.create")),
+    db: Session = Depends(get_db),
+) -> models.User:
+    validate_password_strength(payload.temporary_password)
+    role_name = "Owner/System Admin" if payload.is_admin else "User"
+    role = db.scalar(select(models.Role).where(models.Role.name == role_name))
+    user = models.User(
+        username=payload.username,
+        display_name=payload.display_name,
+        password_hash=hash_password(payload.temporary_password),
+        must_change_password=True,
+    )
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует") from exc
+    if role:
+        db.add(models.UserRole(user_id=user.id, role_id=role.id))
+    write_audit(db, actor_id=actor.id, action="users.create", target_type="user", target_id=user.id, request=request)
+    db.commit()
+    return user
+
+
+@app.get("/spaces", response_model=list[schemas.SpaceOut], tags=["spaces"])
+def list_spaces(user: models.User = Depends(current_user), db: Session = Depends(get_db)) -> list[models.Space]:
+    rows = db.scalars(
+        select(models.Space)
+        .join(models.SpaceMember, models.SpaceMember.space_id == models.Space.id)
+        .where(models.SpaceMember.user_id == user.id, models.Space.is_deleted.is_(False))
+        .order_by(models.Space.name)
+    )
+    return list(rows)
+
+
+@app.post("/spaces", response_model=schemas.SpaceOut, tags=["spaces"])
+def create_space(
+    payload: schemas.SpaceCreateIn,
+    request: Request,
+    actor: models.User = Depends(require_permission("spaces.create")),
+    db: Session = Depends(get_db),
+) -> models.Space:
+    space = models.Space(name=payload.name, created_by=actor.id)
+    db.add(space)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Пространство с таким названием уже существует") from exc
+    db.add(models.SpaceMember(space_id=space.id, user_id=actor.id))
+    write_audit(db, actor_id=actor.id, action="spaces.create", target_type="space", target_id=space.id, request=request)
+    db.commit()
+    return space
+
+
+@app.post("/spaces/{space_id}/members", tags=["spaces"])
+def add_space_member(
+    space_id: int,
+    payload: schemas.MemberIn,
+    request: Request,
+    actor: models.User = Depends(require_permission("spaces.members.manage")),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    if not db.get(models.Space, space_id) or not db.get(models.User, payload.user_id):
+        raise HTTPException(status_code=404, detail="Пространство или пользователь не найден")
+    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": payload.user_id}):
+        db.add(models.SpaceMember(space_id=space_id, user_id=payload.user_id))
+    write_audit(
+        db,
+        actor_id=actor.id,
+        action="spaces.members.add",
+        target_type="space",
+        target_id=space_id,
+        request=request,
+        details={"user_id": payload.user_id},
+    )
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/spaces/{space_id}/channels", response_model=list[schemas.ChannelOut], tags=["channels"])
+def list_channels(space_id: int, user: models.User = Depends(current_user), db: Session = Depends(get_db)) -> list[models.Channel]:
+    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": user.id}):
+        raise HTTPException(status_code=403, detail="Нет доступа к пространству")
+    rows = db.scalars(
+        select(models.Channel)
+        .join(models.ChannelMember, models.ChannelMember.channel_id == models.Channel.id)
+        .where(
+            models.Channel.space_id == space_id,
+            models.ChannelMember.user_id == user.id,
+            models.Channel.is_deleted.is_(False),
+        )
+        .order_by(models.Channel.type, models.Channel.name)
+    )
+    return list(rows)
+
+
+@app.post("/channels", response_model=schemas.ChannelOut, tags=["channels"])
+def create_channel(
+    payload: schemas.ChannelCreateIn,
+    request: Request,
+    actor: models.User = Depends(require_permission("channels.create")),
+    db: Session = Depends(get_db),
+) -> models.Channel:
+    if not db.get(models.SpaceMember, {"space_id": payload.space_id, "user_id": actor.id}):
+        raise HTTPException(status_code=403, detail="Нет доступа к пространству")
+    channel = models.Channel(space_id=payload.space_id, name=payload.name, type=payload.type, created_by=actor.id)
+    db.add(channel)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Канал с таким названием уже существует") from exc
+    db.add(models.ChannelMember(channel_id=channel.id, user_id=actor.id))
+    write_audit(db, actor_id=actor.id, action="channels.create", target_type="channel", target_id=channel.id, request=request)
+    db.commit()
+    return channel
+
+
+@app.post("/channels/{channel_id}/members", tags=["channels"])
+def add_channel_member(
+    channel_id: int,
+    payload: schemas.MemberIn,
+    request: Request,
+    actor: models.User = Depends(require_permission("channels.members.manage")),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    channel = db.get(models.Channel, channel_id)
+    user = db.get(models.User, payload.user_id)
+    if not channel or not user:
+        raise HTTPException(status_code=404, detail="Канал или пользователь не найден")
+    if not db.get(models.SpaceMember, {"space_id": channel.space_id, "user_id": payload.user_id}):
+        db.add(models.SpaceMember(space_id=channel.space_id, user_id=payload.user_id))
+    if not db.get(models.ChannelMember, {"channel_id": channel_id, "user_id": payload.user_id}):
+        db.add(models.ChannelMember(channel_id=channel_id, user_id=payload.user_id))
+    write_audit(
+        db,
+        actor_id=actor.id,
+        action="channels.members.add",
+        target_type="channel",
+        target_id=channel_id,
+        request=request,
+        details={"user_id": payload.user_id},
+    )
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/channels/{channel_id}/connect", response_model=schemas.VoiceStateOut, tags=["voice"])
+def connect_channel(
+    channel_id: int,
+    payload: schemas.VoiceJoinIn,
+    request: Request,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> schemas.VoiceStateOut:
+    rate_limit(f"voice:{user.id}", 30, 60)
+    channel = ensure_channel_member(db, user.id, channel_id)
+    if channel.type != "voice":
+        raise HTTPException(status_code=400, detail="Подключаться можно только к голосовому каналу")
+    if not has_permission(db, user.id, "voice.join"):
+        raise HTTPException(status_code=403, detail="Нет права подключаться к голосовым каналам")
+    existing = db.get(models.VoiceState, user.id)
+    if existing:
+        existing.channel_id = channel_id
+        existing.muted = payload.muted
+        existing.deafened = payload.deafened
+        existing.speaking = False
+        existing.status = "connected"
+        state = existing
+    else:
+        state = models.VoiceState(user_id=user.id, channel_id=channel_id, muted=payload.muted, deafened=payload.deafened)
+        db.add(state)
+    write_audit(db, actor_id=user.id, action="voice.connect", target_type="channel", target_id=channel_id, request=request)
+    db.commit()
+    return voice_state_out(db, state)
+
+
+@app.put("/channels/{channel_id}/voice-state", response_model=schemas.VoiceStateOut, tags=["voice"])
+def update_voice_state(
+    channel_id: int,
+    payload: schemas.VoiceStateIn,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> schemas.VoiceStateOut:
+    state = db.get(models.VoiceState, user.id)
+    if not state or state.channel_id != channel_id:
+        raise HTTPException(status_code=404, detail="Вы не подключены к этому каналу")
+    state.muted = payload.muted
+    state.deafened = payload.deafened
+    state.speaking = payload.speaking
+    state.status = payload.status
+    db.commit()
+    return voice_state_out(db, state)
+
+
+@app.post("/channels/{channel_id}/disconnect", tags=["voice"])
+def disconnect_channel(
+    channel_id: int,
+    request: Request,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    state = db.get(models.VoiceState, user.id)
+    if state and state.channel_id == channel_id:
+        db.delete(state)
+        write_audit(db, actor_id=user.id, action="voice.disconnect", target_type="channel", target_id=channel_id, request=request)
+        db.commit()
+    return {"status": "ok"}
+
+
+@app.get("/channels/{channel_id}/voice", response_model=list[schemas.VoiceStateOut], tags=["voice"])
+def voice_states(
+    channel_id: int,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[schemas.VoiceStateOut]:
+    ensure_channel_member(db, user.id, channel_id)
+    rows = db.scalars(select(models.VoiceState).where(models.VoiceState.channel_id == channel_id).order_by(models.VoiceState.user_id))
+    return [voice_state_out(db, row) for row in rows]
+
+
+@app.get("/audit", response_model=list[schemas.AuditOut], tags=["admin"])
+def audit_log(
+    _: models.User = Depends(require_permission("audit.view")),
+    db: Session = Depends(get_db),
+) -> list[models.AuditLog]:
+    return list(db.scalars(select(models.AuditLog).order_by(models.AuditLog.id.desc()).limit(100)))
+
+
+def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceStateOut:
+    user = db.get(models.User, state.user_id)
+    return schemas.VoiceStateOut(
+        user_id=state.user_id,
+        display_name=user.display_name if user else f"Пользователь {state.user_id}",
+        channel_id=state.channel_id,
+        muted=state.muted,
+        deafened=state.deafened,
+        speaking=state.speaking,
+        status=state.status,
+    )

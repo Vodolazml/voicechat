@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .screen_share import STOP_FRAME, ScreenShareClient
+from .settings_store import load_client_settings, save_client_settings
 from .styles import APP_STYLE
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
@@ -72,8 +73,17 @@ SCREEN_FPS_PRESETS = (
     ("10 FPS", 100),
     ("15 FPS", 67),
     ("30 FPS", 33),
+    ("60 FPS", 17),
 )
 DEFAULT_SCREEN_FPS_INTERVAL_MS = 200
+VIEWER_QUALITY_PRESETS = {
+    "source": {"label": "Исходное", "size": None},
+    "1080p": {"label": "FullHD 1080p", "size": (1920, 1080)},
+    "720p": {"label": "HD 720p", "size": (1280, 720)},
+    "540p": {"label": "540p", "size": (960, 540)},
+}
+DEFAULT_VIEWER_QUALITY = "source"
+DEFAULT_VIEWER_FPS_INTERVAL_MS = 67
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -231,8 +241,11 @@ class MainWindow(QMainWindow):
         self.screen_client: ScreenShareClient | None = None
         self.screen_viewer: ScreenShareViewer | None = None
         self.screen_sharing = False
-        self.screen_quality_key = DEFAULT_SCREEN_QUALITY
-        self.screen_fps_interval_ms = DEFAULT_SCREEN_FPS_INTERVAL_MS
+        self.client_settings = load_client_settings()
+        self.screen_quality_key = self.valid_screen_quality_key(self.client_settings.get("screen_quality_key"))
+        self.screen_fps_interval_ms = self.valid_fps_interval(self.client_settings.get("screen_fps_interval_ms"), DEFAULT_SCREEN_FPS_INTERVAL_MS)
+        self.viewer_quality_key = self.valid_viewer_quality_key(self.client_settings.get("viewer_quality_key"))
+        self.viewer_fps_interval_ms = self.valid_fps_interval(self.client_settings.get("viewer_fps_interval_ms"), DEFAULT_VIEWER_FPS_INTERVAL_MS)
         self.screen_frame_times: list[float] = []
         self.screen_stream_info = ""
         self.screen_frames: dict[int, QPixmap] = {}
@@ -474,6 +487,27 @@ class MainWindow(QMainWindow):
         widget.style().unpolish(widget)
         widget.style().polish(widget)
 
+    def valid_screen_quality_key(self, value) -> str:
+        return str(value) if value in SCREEN_QUALITY_PRESETS else DEFAULT_SCREEN_QUALITY
+
+    def valid_viewer_quality_key(self, value) -> str:
+        return str(value) if value in VIEWER_QUALITY_PRESETS else DEFAULT_VIEWER_QUALITY
+
+    def valid_fps_interval(self, value, default: int) -> int:
+        allowed = {interval for _label, interval in SCREEN_FPS_PRESETS}
+        return int(value) if isinstance(value, int) and value in allowed else default
+
+    def save_preferences(self) -> None:
+        self.client_settings.update(
+            {
+                "screen_quality_key": self.screen_quality_key,
+                "screen_fps_interval_ms": self.screen_fps_interval_ms,
+                "viewer_quality_key": self.viewer_quality_key,
+                "viewer_fps_interval_ms": self.viewer_fps_interval_ms,
+            }
+        )
+        save_client_settings(self.client_settings)
+
     def select_space_item(self, item: QListWidgetItem) -> None:
         self.select_space(item.data(Qt.UserRole))
 
@@ -598,6 +632,7 @@ class MainWindow(QMainWindow):
         self.screen_client.stopped_received.connect(self.on_screen_stop)
         self.screen_client.status_changed.connect(self.set_audio_status)
         self.screen_client.start()
+        self.send_viewer_preferences_to_server()
 
     def stop_screen_client(self) -> None:
         if self.screen_client:
@@ -621,6 +656,7 @@ class MainWindow(QMainWindow):
             return
         self.screen_quality_key = dialog.selected_quality_key()
         self.screen_fps_interval_ms = dialog.selected_fps_interval_ms()
+        self.save_preferences()
         if not self.screen_client:
             self.start_screen_client(self.connected_channel_id)
         self.screen_sharing = True
@@ -672,7 +708,7 @@ class MainWindow(QMainWindow):
         self.redraw_voice_stage()
         self.update_screen_status_label()
         if self.screen_viewer:
-            self.screen_viewer.refresh_view()
+            self.screen_viewer.mark_dirty()
 
     def encode_screen_frame(self, pixmap: QPixmap, quality: int) -> bytes:
         data = QByteArray()
@@ -701,13 +737,13 @@ class MainWindow(QMainWindow):
             self.screen_frames[user_id] = pixmap
             self.redraw_voice_stage()
             if self.screen_viewer:
-                self.screen_viewer.refresh_view()
+                self.screen_viewer.mark_dirty()
 
     def on_screen_stop(self, user_id: int) -> None:
         self.screen_frames.pop(user_id, None)
         self.redraw_voice_stage()
         if self.screen_viewer:
-            self.screen_viewer.refresh_view()
+            self.screen_viewer.mark_dirty()
 
     def apply_screen_button(self) -> None:
         self.screen_button.setToolTip("Остановить демонстрацию экрана" if self.screen_sharing else "Включить демонстрацию экрана")
@@ -729,11 +765,24 @@ class MainWindow(QMainWindow):
             lambda: list(self.current_voice_states),
             lambda: dict(self.screen_frames),
             lambda selected_user_id: self.screen_stream_info if self.me and selected_user_id == int(self.me["id"]) else "",
+            self.viewer_quality_key,
+            self.viewer_fps_interval_ms,
+            self.apply_viewer_preferences,
             self.initials,
             self.state_text,
         )
         self.screen_viewer.finished.connect(lambda _result: setattr(self, "screen_viewer", None))
         self.screen_viewer.show_fullscreen()
+
+    def apply_viewer_preferences(self, quality_key: str, fps_interval_ms: int) -> None:
+        self.viewer_quality_key = self.valid_viewer_quality_key(quality_key)
+        self.viewer_fps_interval_ms = self.valid_fps_interval(fps_interval_ms, DEFAULT_VIEWER_FPS_INTERVAL_MS)
+        self.save_preferences()
+        self.send_viewer_preferences_to_server()
+
+    def send_viewer_preferences_to_server(self) -> None:
+        if self.screen_client:
+            self.screen_client.send_viewer_settings(self.viewer_fps_interval_ms, self.viewer_quality_key)
 
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
@@ -1404,6 +1453,9 @@ class ScreenShareViewer(QDialog):
         states_provider: Callable[[], list[dict]],
         frames_provider: Callable[[], dict[int, QPixmap]],
         stream_info_provider: Callable[[int], str],
+        viewer_quality_key: str,
+        viewer_fps_interval_ms: int,
+        preferences_changed: Callable[[str, int], None],
         initials_provider: Callable[[str], str],
         state_text_provider: Callable[[dict], str],
     ) -> None:
@@ -1412,9 +1464,13 @@ class ScreenShareViewer(QDialog):
         self.states_provider = states_provider
         self.frames_provider = frames_provider
         self.stream_info_provider = stream_info_provider
+        self.viewer_quality_key = viewer_quality_key if viewer_quality_key in VIEWER_QUALITY_PRESETS else DEFAULT_VIEWER_QUALITY
+        self.viewer_fps_interval_ms = viewer_fps_interval_ms
+        self.preferences_changed = preferences_changed
         self.initials_provider = initials_provider
         self.state_text_provider = state_text_provider
         self.participants_visible = True
+        self.dirty = True
         self.setWindowTitle("Просмотр демонстрации экрана")
         self.setMinimumSize(960, 540)
 
@@ -1429,12 +1485,30 @@ class ScreenShareViewer(QDialog):
         self.hide_participants_button = QPushButton("Скрыть участников")
         self.hide_participants_button.setObjectName("secondary")
         self.hide_participants_button.clicked.connect(self.toggle_participants)
+        self.viewer_quality_combo = QComboBox()
+        self.viewer_quality_combo.setObjectName("compactCombo")
+        self.viewer_quality_combo.setToolTip("Качество просмотра только для вас")
+        for key, preset in VIEWER_QUALITY_PRESETS.items():
+            self.viewer_quality_combo.addItem(str(preset["label"]), key)
+        quality_index = self.viewer_quality_combo.findData(self.viewer_quality_key)
+        self.viewer_quality_combo.setCurrentIndex(quality_index if quality_index >= 0 else 0)
+        self.viewer_quality_combo.currentIndexChanged.connect(self.change_viewer_preferences)
+        self.viewer_fps_combo = QComboBox()
+        self.viewer_fps_combo.setObjectName("compactCombo")
+        self.viewer_fps_combo.setToolTip("Частота просмотра только для вас")
+        for label, interval_ms in SCREEN_FPS_PRESETS:
+            self.viewer_fps_combo.addItem(label, interval_ms)
+        fps_index = self.viewer_fps_combo.findData(self.viewer_fps_interval_ms)
+        self.viewer_fps_combo.setCurrentIndex(fps_index if fps_index >= 0 else self.viewer_fps_combo.findData(DEFAULT_VIEWER_FPS_INTERVAL_MS))
+        self.viewer_fps_combo.currentIndexChanged.connect(self.change_viewer_preferences)
         close_button = QPushButton("Закрыть")
         close_button.setObjectName("secondary")
         close_button.clicked.connect(self.close)
         top.addWidget(self.title)
         top.addWidget(self.subtitle)
         top.addStretch()
+        top.addWidget(self.viewer_quality_combo)
+        top.addWidget(self.viewer_fps_combo)
         top.addWidget(self.hide_participants_button)
         top.addWidget(close_button)
         root.addLayout(top)
@@ -1464,8 +1538,8 @@ class ScreenShareViewer(QDialog):
         root.addLayout(body, 1)
 
         self.timer = QTimer(self)
-        self.timer.setInterval(120)
-        self.timer.timeout.connect(self.refresh_view)
+        self.timer.setInterval(self.viewer_fps_interval_ms)
+        self.timer.timeout.connect(self.refresh_if_dirty)
         self.timer.start()
         self.refresh_view()
 
@@ -1484,7 +1558,28 @@ class ScreenShareViewer(QDialog):
             self.selected_user_id = int(user_id)
             self.refresh_view()
 
+    def change_viewer_preferences(self) -> None:
+        quality_key = str(self.viewer_quality_combo.currentData())
+        interval_ms = self.viewer_fps_combo.currentData()
+        if quality_key not in VIEWER_QUALITY_PRESETS:
+            quality_key = DEFAULT_VIEWER_QUALITY
+        if not isinstance(interval_ms, int):
+            interval_ms = DEFAULT_VIEWER_FPS_INTERVAL_MS
+        self.viewer_quality_key = quality_key
+        self.viewer_fps_interval_ms = interval_ms
+        self.timer.setInterval(interval_ms)
+        self.preferences_changed(quality_key, interval_ms)
+        self.refresh_view()
+
+    def mark_dirty(self) -> None:
+        self.dirty = True
+
+    def refresh_if_dirty(self) -> None:
+        if self.dirty:
+            self.refresh_view()
+
     def refresh_view(self) -> None:
+        self.dirty = False
         states = self.states_provider()
         frames = self.frames_provider()
         if self.selected_user_id not in frames and frames:
@@ -1498,16 +1593,14 @@ class ScreenShareViewer(QDialog):
         pixmap = frames.get(self.selected_user_id)
         if pixmap:
             fallback_info = f"{pixmap.width()}x{pixmap.height()}"
-        self.subtitle.setText(
-            stream_info
-            if stream_info
-            else fallback_info
-            if fallback_info
-            else "трансляция остановлена"
-        )
+        source_info = stream_info if stream_info else fallback_info if fallback_info else "трансляция остановлена"
+        viewer_quality = VIEWER_QUALITY_PRESETS.get(self.viewer_quality_key, VIEWER_QUALITY_PRESETS[DEFAULT_VIEWER_QUALITY])
+        viewer_fps = max(1, round(1000 / self.viewer_fps_interval_ms))
+        self.subtitle.setText(f"{source_info} · просмотр: {viewer_quality['label']}, {viewer_fps} FPS")
 
         if pixmap:
             target = self.preview.size()
+            pixmap = self.apply_viewer_quality(pixmap)
             self.preview.setPixmap(pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             self.preview.setText("")
         else:
@@ -1515,6 +1608,16 @@ class ScreenShareViewer(QDialog):
             self.preview.setText("Ожидание кадра трансляции")
 
         self.render_participants(states, frames)
+
+    def apply_viewer_quality(self, pixmap: QPixmap) -> QPixmap:
+        preset = VIEWER_QUALITY_PRESETS.get(self.viewer_quality_key, VIEWER_QUALITY_PRESETS[DEFAULT_VIEWER_QUALITY])
+        size = preset["size"]
+        if not size:
+            return pixmap
+        width, height = size
+        if pixmap.width() <= width and pixmap.height() <= height:
+            return pixmap
+        return pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
     def render_participants(self, states: list[dict], frames: dict[int, QPixmap]) -> None:
         self.participants_list.clear()

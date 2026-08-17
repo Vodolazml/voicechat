@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 from datetime import timedelta
+import json
 from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -21,6 +22,7 @@ from .voice_relay import voice_relay
 
 settings = get_settings()
 SCREEN_FRAME_LIMIT_BYTES = 2_800_000
+SCREEN_ALLOWED_VIEWER_INTERVALS_MS = {17, 33, 67, 100, 200, 500}
 
 app = FastAPI(title=settings.app_name)
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
@@ -482,6 +484,17 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
                 break
+            text = message.get("text")
+            if text:
+                try:
+                    control = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if control.get("type") == "viewer_settings":
+                    interval_ms = control.get("fps_interval_ms")
+                    if isinstance(interval_ms, int) and interval_ms in SCREEN_ALLOWED_VIEWER_INTERVALS_MS:
+                        await screen_relay.set_viewer_interval(channel_id, payload.user_id, interval_ms)
+                continue
             data = message.get("bytes")
             if data is None:
                 continue

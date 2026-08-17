@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import queue
 import threading
+from typing import Union
 
 from PySide6.QtCore import QObject, Signal
 import websockets
@@ -20,7 +22,7 @@ class ScreenShareClient(QObject):
     def __init__(self, ws_url: str) -> None:
         super().__init__()
         self.ws_url = ws_url
-        self._send_queue: queue.Queue[bytes] = queue.Queue(maxsize=4)
+        self._send_queue: queue.Queue[Union[bytes, str]] = queue.Queue(maxsize=4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -41,15 +43,30 @@ class ScreenShareClient(QObject):
     def send_frame(self, frame: bytes) -> None:
         if not frame:
             return
+        self._put_latest(frame)
+
+    def send_viewer_settings(self, fps_interval_ms: int, quality_key: str) -> None:
+        self._put_latest(
+            json.dumps(
+                {
+                    "type": "viewer_settings",
+                    "fps_interval_ms": fps_interval_ms,
+                    "quality_key": quality_key,
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    def _put_latest(self, item: Union[bytes, str]) -> None:
         try:
-            self._send_queue.put_nowait(frame)
+            self._send_queue.put_nowait(item)
         except queue.Full:
             try:
                 self._send_queue.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self._send_queue.put_nowait(frame)
+                self._send_queue.put_nowait(item)
             except queue.Full:
                 pass
 

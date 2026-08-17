@@ -5,8 +5,8 @@ from collections.abc import Callable
 from functools import partial
 from time import monotonic
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QRectF, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRectF, QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QPainter, QPen, QPixmap, QPolygon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -646,6 +646,15 @@ class MainWindow(QMainWindow):
 
     def toggle_screen_share(self) -> None:
         if self.screen_sharing:
+            answer = QMessageBox.question(
+                self,
+                "Остановить трансляцию",
+                "Вы действительно хотите остановить демонстрацию экрана?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
             self.stop_screen_share()
             return
         if not self.connected_channel_id:
@@ -695,6 +704,7 @@ class MainWindow(QMainWindow):
         used_quality = 0
         for width, height, quality in preset["captures"]:
             pixmap = source.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.paint_cursor_on_frame(pixmap, source, screen)
             frame = self.encode_screen_frame(pixmap, quality)
             if frame and len(frame) <= SCREEN_FRAME_LIMIT_BYTES:
                 used_quality = quality
@@ -717,6 +727,38 @@ class MainWindow(QMainWindow):
             return b""
         pixmap.save(buffer, "JPG", quality)
         return bytes(data)
+
+    def paint_cursor_on_frame(self, pixmap: QPixmap, source: QPixmap, screen) -> None:
+        cursor_pos = QCursor.pos()
+        geometry = screen.geometry()
+        if not geometry.contains(cursor_pos):
+            return
+        rel_x = cursor_pos.x() - geometry.x()
+        rel_y = cursor_pos.y() - geometry.y()
+        if geometry.width() <= 0 or geometry.height() <= 0 or source.width() <= 0 or source.height() <= 0:
+            return
+        source_x = rel_x * source.width() / geometry.width()
+        source_y = rel_y * source.height() / geometry.height()
+        x = int(source_x * pixmap.width() / source.width())
+        y = int(source_y * pixmap.height() / source.height())
+        scale = max(0.8, min(1.8, pixmap.width() / 1280))
+        points = QPolygon(
+            [
+                QPoint(x, y),
+                QPoint(x + int(18 * scale), y + int(8 * scale)),
+                QPoint(x + int(10 * scale), y + int(11 * scale)),
+                QPoint(x + int(15 * scale), y + int(23 * scale)),
+                QPoint(x + int(10 * scale), y + int(25 * scale)),
+                QPoint(x + int(5 * scale), y + int(13 * scale)),
+                QPoint(x, y + int(19 * scale)),
+            ]
+        )
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#111214"), max(2, int(3 * scale))))
+        painter.setBrush(QColor("#f2f3f5"))
+        painter.drawPolygon(points)
+        painter.end()
 
     def update_screen_stream_info(self, pixmap: QPixmap, frame_size: int, jpeg_quality: int) -> None:
         now = monotonic()

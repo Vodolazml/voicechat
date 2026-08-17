@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     client_download_sha256: str = ""
     client_update_required: bool = False
     client_release_notes_url: str = ""
+    downloads_dir: str = "downloads"
 
     model_config = SettingsConfigDict(env_prefix="VOICECHAT_", env_file=".env")
 

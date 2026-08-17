@@ -144,6 +144,33 @@ Compress-Archive -Path dist\PrivateVoiceChat\* -DestinationPath dist\PrivateVoic
 3. Вводит логин и временный пароль.
 4. Меняет пароль при первом входе.
 
+## 5.1. Раздать архив через сервер
+
+На сервере создайте папку:
+
+```bash
+mkdir -p ~/voicechat/downloads
+```
+
+С компьютера разработчика загрузите архив:
+
+```powershell
+scp dist\PrivateVoiceChat-0.1.0-ip.zip root@72.35.246.230:/root/voicechat/downloads/
+```
+
+После перезапуска контейнера файл будет доступен по ссылке:
+
+```text
+http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.0-ip.zip
+```
+
+Для автообновления можно прописать в `.env.ip`:
+
+```env
+VOICECHAT_CLIENT_DOWNLOAD_URL=http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.0-ip.zip
+VOICECHAT_CLIENT_DOWNLOAD_SHA256=<sha256 архива>
+```
+
 ## 6. После теста
 
 Когда появится домен, переключитесь на HTTPS-сценарий из `docs/EXPERIMENT_DEPLOY.md`.

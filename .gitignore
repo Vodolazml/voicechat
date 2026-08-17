@@ -36,6 +36,7 @@ voicechat.db
 logs/
 storage/
 backups/
+downloads/
 
 # IDE / OS
 .idea/

@@ -5,6 +5,7 @@ from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -32,6 +33,7 @@ SCREEN_ALLOWED_VIEWER_INTERVALS_MS = {17, 33, 67, 100, 200, 500}
 MAX_WS_TEXT_CHARS = 2048
 
 app = FastAPI(title=settings.app_name)
+app.mount("/downloads", StaticFiles(directory=settings.downloads_dir, check_dir=False), name="downloads")
 if settings.allowed_hosts and "*" not in settings.allowed_hosts:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
 if settings.cors_origins:

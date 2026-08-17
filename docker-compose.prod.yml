@@ -13,6 +13,7 @@ services:
       - "8765"
     volumes:
       - voicechat_data:/data
+      - ./downloads:/data/downloads
     command:
       - python
       - -m

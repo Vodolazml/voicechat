@@ -22,5 +22,6 @@ voicechat.db
 logs
 storage
 backups
+downloads
 dist
 build

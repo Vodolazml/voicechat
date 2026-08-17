@@ -307,6 +307,7 @@ class MainWindow(QMainWindow):
         self.deafened = False
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
+        self.client_settings = load_client_settings()
         self.e2ee_identity = E2EEIdentity(self.client_settings)
         save_client_settings(self.client_settings)
         self.channel_e2ee: dict[int, ChannelE2EE] = {}
@@ -315,7 +316,6 @@ class MainWindow(QMainWindow):
         self.screen_client: ScreenShareClient | None = None
         self.screen_viewer: ScreenShareViewer | None = None
         self.screen_sharing = False
-        self.client_settings = load_client_settings()
         self.screen_quality_key = self.valid_screen_quality_key(self.client_settings.get("screen_quality_key"))
         self.screen_fps_interval_ms = self.valid_fps_interval(self.client_settings.get("screen_fps_interval_ms"), DEFAULT_SCREEN_FPS_INTERVAL_MS)
         self.viewer_quality_key = self.valid_viewer_quality_key(self.client_settings.get("viewer_quality_key"))

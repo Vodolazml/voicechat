@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ApiClient, ApiError
+from .client_config import load_client_config
 from .e2ee import ChannelE2EE, E2EEIdentity
 from .screen_share import STOP_FRAME, ScreenShareClient
 from .settings_store import load_client_settings, save_client_settings
@@ -128,10 +129,14 @@ class LoginDialog(QDialog):
         super().__init__()
         self.api = api
         self.client_settings = load_client_settings()
+        self.packaged_config = load_client_config()
+        configured_server_url = self.packaged_config.server_url
         saved_server_url = self.client_settings.get("server_url")
-        if isinstance(saved_server_url, str):
+        if not configured_server_url and isinstance(saved_server_url, str):
+            configured_server_url = saved_server_url
+        if configured_server_url:
             try:
-                self.api.set_base_url(saved_server_url)
+                self.api.set_base_url(configured_server_url)
             except ApiError:
                 pass
         self.setWindowTitle("Вход")
@@ -141,6 +146,9 @@ class LoginDialog(QDialog):
         self.password.setEchoMode(QLineEdit.Password)
         self.password.setPlaceholderText("Пароль")
         self.server = QLineEdit(api.base_url)
+        if self.packaged_config.lock_server_url:
+            self.server.setReadOnly(True)
+            self.server.setToolTip("Адрес сервера задан администратором в client_config.json")
         self.error = QLabel("")
         self.error.setObjectName("warn")
 
@@ -162,14 +170,18 @@ class LoginDialog(QDialog):
 
     def try_login(self) -> None:
         try:
-            self.api.set_base_url(self.server.text())
+            if self.packaged_config.server_url and self.packaged_config.lock_server_url:
+                self.api.set_base_url(self.packaged_config.server_url)
+            else:
+                self.api.set_base_url(self.server.text())
             data = self.api.login(self.username.text().strip(), self.password.text())
             if data.get("must_change_password"):
                 dialog = PasswordDialog(self.api, self.password.text())
                 if dialog.exec() != QDialog.Accepted:
                     self.error.setText("Перед работой нужно сменить временный пароль.")
                     return
-            self.client_settings["server_url"] = self.api.base_url
+            if not self.packaged_config.lock_server_url:
+                self.client_settings["server_url"] = self.api.base_url
             save_client_settings(self.client_settings)
             self.accept()
         except ApiError as exc:

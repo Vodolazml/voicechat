@@ -5,6 +5,7 @@
 .env.*
 !.env.example
 !.env.production.example
+client_config.json
 .venv
 venv
 env

@@ -53,6 +53,8 @@ python -m app.client.main
 
 Экспериментальный деплой на сервер: [docs/EXPERIMENT_DEPLOY.md](docs/EXPERIMENT_DEPLOY.md).
 
+Для раздачи клиента без ручного ввода домена используйте `client_config.example.json`: скопируйте его в `client_config.json`, впишите свой `server_url` и оставьте `lock_server_url: true`.
+
 ## Порядок разработки
 
 1. Основа программы: GUI, пространства, каналы, подключение/отключение от каналов, роли и permissions.

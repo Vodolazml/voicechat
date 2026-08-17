@@ -322,7 +322,7 @@ QLabel#pillLive {
     padding: 4px 10px;
 }
 QLabel#pillSpeaking {
-    background: #5865f2;
+    background: #23a559;
     border-radius: 10px;
     color: #ffffff;
     font-size: 11px;
@@ -346,13 +346,26 @@ QFrame#voiceCard:hover {
     background: #3a3c42;
 }
 QFrame#voiceCardSpeaking {
-    background: #3a3d55;
-    border: 2px solid #5865f2;
+    background: #303b34;
+    border: 3px solid #23a559;
     border-radius: 8px;
 }
 QFrame#memberRowSpeaking {
-    background: #3a3d55;
+    background: #303b34;
+    border-left: 3px solid #23a559;
     border-radius: 6px;
+}
+QProgressBar {
+    background: #1e1f22;
+    border: 1px solid #3f4147;
+    border-radius: 6px;
+    color: #dbdee1;
+    text-align: center;
+    height: 18px;
+}
+QProgressBar::chunk {
+    background: #23a559;
+    border-radius: 5px;
 }
 QFrame#emptyState {
     background: #2b2d31;

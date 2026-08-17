@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QMenu,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .styles import APP_STYLE
-from .voice_audio import AudioDevice, VoiceAudioClient, audio_devices, device_display_name
+from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
 
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
@@ -192,6 +193,7 @@ class MainWindow(QMainWindow):
         self.audio_status = "audio idle"
         self.input_device_id: int | None = None
         self.output_device_id: int | None = None
+        self.noise_suppression = True
         self.last_speaking = False
         self.last_voice_sync_at = 0.0
 
@@ -514,6 +516,7 @@ class MainWindow(QMainWindow):
                 is_deafened=lambda: self.deafened,
                 is_locally_muted=lambda user_id: user_id in self.local_mutes,
                 local_volume=lambda user_id: self.local_volumes.get(user_id, 100),
+                noise_suppression=lambda: self.noise_suppression,
                 status_callback=self.set_audio_status,
                 input_device=self.input_device_id,
                 output_device=self.output_device_id,
@@ -550,10 +553,11 @@ class MainWindow(QMainWindow):
             pass
 
     def open_audio_settings(self) -> None:
-        dialog = AudioSettingsDialog(self, self.input_device_id, self.output_device_id)
+        dialog = AudioSettingsDialog(self, self.input_device_id, self.output_device_id, self.noise_suppression)
         if dialog.exec() != QDialog.Accepted:
             return
         self.input_device_id, self.output_device_id = dialog.selected_devices()
+        self.noise_suppression = dialog.noise_suppression_enabled()
         self.update_audio_device_label()
         if self.connected_channel_id:
             channel_id = self.connected_channel_id
@@ -958,8 +962,56 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Ошибка", text)
 
 
+class MicTestDialog(QDialog):
+    def __init__(self, parent: QWidget, input_device_id: int | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Тест микрофона")
+        self.setMinimumWidth(420)
+        self.monitor = MicTestMonitor(input_device_id)
+        self.level = QProgressBar()
+        self.level.setRange(0, 100)
+        self.level.setValue(0)
+        self.status = QLabel("Говорите в микрофон.")
+        self.status.setObjectName("muted")
+        self.timer = QTimer(self)
+        self.timer.setInterval(80)
+        self.timer.timeout.connect(self.refresh_level)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Тест микрофона")
+        title.setObjectName("title")
+        layout.addWidget(title)
+        layout.addWidget(self.level)
+        layout.addWidget(self.status)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        try:
+            self.monitor.start()
+            self.timer.start()
+        except Exception as exc:
+            self.status.setObjectName("warn")
+            self.status.setText(f"Не удалось открыть микрофон: {exc}")
+
+    def refresh_level(self) -> None:
+        self.level.setValue(self.monitor.level)
+        self.status.setText("Голос обнаружен" if self.monitor.speaking else "Тишина или фоновый шум")
+        self.status.setObjectName("ok" if self.monitor.speaking else "muted")
+        self.status.style().unpolish(self.status)
+        self.status.style().polish(self.status)
+
+    def closeEvent(self, event) -> None:
+        self.monitor.stop()
+        event.accept()
+
+    def reject(self) -> None:
+        self.monitor.stop()
+        super().reject()
+
+
 class AudioSettingsDialog(QDialog):
-    def __init__(self, parent: QWidget, input_device_id: int | None, output_device_id: int | None) -> None:
+    def __init__(self, parent: QWidget, input_device_id: int | None, output_device_id: int | None, noise_suppression: bool) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки аудио")
         self.setMinimumWidth(520)
@@ -976,14 +1028,24 @@ class AudioSettingsDialog(QDialog):
 
         self.input_combo = QComboBox()
         self.output_combo = QComboBox()
+        self.noise_box = QCheckBox("Шумоподавление")
+        self.noise_box.setChecked(noise_suppression)
         self.advanced_box = QCheckBox("Показать системные и виртуальные устройства")
         self.advanced_box.stateChanged.connect(self.reload_devices)
+        self.test_button = QPushButton("Тест микрофона")
+        self.test_button.setObjectName("secondary")
+        self.test_button.clicked.connect(self.open_mic_test)
         self.fill_combo(self.input_combo, self.inputs, input_device_id, "Системный микрофон")
         self.fill_combo(self.output_combo, self.outputs, output_device_id, "Системное устройство вывода")
 
         form = QFormLayout()
         form.addRow("Микрофон", self.input_combo)
         form.addRow("Вывод", self.output_combo)
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(self.noise_box)
+        noise_row.addStretch()
+        noise_row.addWidget(self.test_button)
+        form.addRow("Голос", noise_row)
         form.addRow("", self.advanced_box)
 
         hint = QLabel(self.error_text or "По умолчанию показаны обычные устройства. Расширенный список нужен для виртуальных кабелей, line-in и системных endpoints.")
@@ -1028,6 +1090,13 @@ class AudioSettingsDialog(QDialog):
 
     def selected_devices(self) -> tuple[int | None, int | None]:
         return self.input_combo.currentData(), self.output_combo.currentData()
+
+    def noise_suppression_enabled(self) -> bool:
+        return self.noise_box.isChecked()
+
+    def open_mic_test(self) -> None:
+        dialog = MicTestDialog(self, self.input_combo.currentData())
+        dialog.exec()
 
 
 class ChannelDialog(QDialog):

@@ -122,6 +122,47 @@ def device_display_name(device_id: int) -> str:
     return simplify_device_name(str(raw["name"]))
 
 
+class MicTestMonitor:
+    def __init__(self, input_device: int | None = None) -> None:
+        self.input_device = input_device
+        self.level = 0
+        self.speaking = False
+        self._last_voice_at = 0.0
+        self._stream: sd.RawInputStream | None = None
+
+    def start(self) -> None:
+        self._stream = sd.RawInputStream(
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype="int16",
+            blocksize=BLOCKSIZE,
+            device=self.input_device,
+            callback=self._callback,
+        )
+        self._stream.start()
+
+    def stop(self) -> None:
+        if not self._stream:
+            return
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except sd.PortAudioError:
+            pass
+        self._stream = None
+
+    def _callback(self, indata, frames, time_info, status) -> None:
+        data = bytes(indata)
+        rms = audioop.rms(data, SAMPLE_WIDTH) if data else 0
+        self.level = max(0, min(100, int(rms / 30)))
+        now = monotonic()
+        if rms >= SPEAKING_RMS:
+            self._last_voice_at = now
+            self.speaking = True
+        elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
+            self.speaking = False
+
+
 class VoiceAudioClient:
     def __init__(
         self,
@@ -131,6 +172,7 @@ class VoiceAudioClient:
         is_deafened: Callable[[], bool],
         is_locally_muted: Callable[[int], bool],
         local_volume: Callable[[int], int],
+        noise_suppression: Callable[[], bool],
         status_callback: Callable[[str], None] | None = None,
         input_device: int | None = None,
         output_device: int | None = None,
@@ -140,6 +182,7 @@ class VoiceAudioClient:
         self.is_deafened = is_deafened
         self.is_locally_muted = is_locally_muted
         self.local_volume = local_volume
+        self.noise_suppression = noise_suppression
         self.status_callback = status_callback
         self.input_device = input_device
         self.output_device = output_device
@@ -208,6 +251,8 @@ class VoiceAudioClient:
             self.speaking = True
         elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
             self.speaking = False
+        if self.noise_suppression() and not self.speaking:
+            return
         self._put_latest(self.capture_queue, data)
 
     def _playback_callback(self, outdata, frames, time_info, status) -> None:

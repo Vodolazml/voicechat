@@ -42,6 +42,28 @@ QPushButton#voiceConnected:hover {
 QPushButton#danger {
     background: #d83c3e;
 }
+QToolButton#iconButton {
+    background: transparent;
+    border: none;
+    border-radius: 16px;
+    padding: 7px;
+    min-width: 32px;
+    min-height: 32px;
+}
+QToolButton#iconButton:hover {
+    background: #3f4147;
+}
+QToolButton#iconDanger {
+    background: #da373c;
+    border: none;
+    border-radius: 16px;
+    padding: 7px;
+    min-width: 32px;
+    min-height: 32px;
+}
+QToolButton#iconDanger:hover {
+    background: #a12828;
+}
 QListWidget {
     background: transparent;
     border: none;
@@ -112,6 +134,10 @@ QLabel#channelName {
 QLabel#channelMeta {
     color: #949ba4;
     font-size: 12px;
+}
+QLabel#menuLabel {
+    color: #dbdee1;
+    padding: 8px 12px 4px 12px;
 }
 QLabel#voiceBadge {
     background: #248046;
@@ -204,6 +230,20 @@ QScrollArea {
 }
 QScrollArea QWidget {
     background: transparent;
+}
+QMenu {
+    background: #111214;
+    color: #dbdee1;
+    border: 1px solid #3f4147;
+    border-radius: 6px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 8px 22px;
+    border-radius: 4px;
+}
+QMenu::item:selected {
+    background: #5865f2;
 }
 QCheckBox {
     spacing: 8px;

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+from functools import partial
 
 from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -11,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -19,16 +22,46 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
     QSizePolicy,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from .api import ApiClient, ApiError
 from .styles import APP_STYLE
+
+
+def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
+    paths = {
+        "mic": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
+        "mic_off": '<path d="m2 2 20 20"/><path d="M9 9v3a3 3 0 0 0 5 2.2"/><path d="M15 9.3V6a3 3 0 0 0-5.1-2.1"/><path d="M5 10v2a7 7 0 0 0 11.7 5.2"/><path d="M19 10v2a7 7 0 0 1-.7 3"/><path d="M12 19v3"/><path d="M8 22h8"/>',
+        "headphones": '<path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M5 14h3v7H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Z"/><path d="M16 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2h-3v-7Z"/>',
+        "headphones_off": '<path d="m2 2 20 20"/><path d="M3 14v-2a9 9 0 0 1 13.2-8"/><path d="M20.6 13.2A9 9 0 0 0 19 8.5"/><path d="M5 14h3v7H5a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2Z"/><path d="M16 14h3a2 2 0 0 1 2 2v3"/>',
+        "voice": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
+        "settings": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
+        "plus": '<path d="M12 5v14"/><path d="M5 12h14"/>',
+        "refresh": '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 3v5h-5"/><path d="M6 21v-5h5"/>',
+    }
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{paths[name]}</svg>'
+    pixmap = QPixmap()
+    pixmap.loadFromData(svg.encode("utf-8"), "SVG")
+    return QIcon(pixmap)
+
+
+def icon_button(icon: str, tooltip: str, *, danger: bool = False) -> QToolButton:
+    button = QToolButton()
+    button.setIcon(svg_icon(icon, "#ffffff" if danger else "#dbdee1"))
+    button.setIconSize(QSize(22, 22))
+    button.setToolTip(tooltip)
+    button.setObjectName("iconDanger" if danger else "iconButton")
+    button.setCursor(Qt.PointingHandCursor)
+    return button
 
 
 class LoginDialog(QDialog):
@@ -127,6 +160,8 @@ class MainWindow(QMainWindow):
         self.connected_channel_id: int | None = None
         self.muted = False
         self.deafened = False
+        self.local_mutes: set[int] = set()
+        self.local_volumes: dict[int, int] = {}
 
         self.setWindowTitle("Private VoiceChat")
         self.resize(1180, 720)
@@ -215,10 +250,10 @@ class MainWindow(QMainWindow):
         self.stage_scroll.setWidgetResizable(True)
         self.stage_scroll.setFrameShape(QFrame.NoFrame)
         self.stage_body = QWidget()
-        self.stage_members_layout = QVBoxLayout(self.stage_body)
+        self.stage_members_layout = QGridLayout(self.stage_body)
         self.stage_members_layout.setContentsMargins(0, 0, 0, 0)
-        self.stage_members_layout.setSpacing(10)
-        self.stage_members_layout.addStretch()
+        self.stage_members_layout.setHorizontalSpacing(12)
+        self.stage_members_layout.setVerticalSpacing(12)
         self.stage_scroll.setWidget(self.stage_body)
         stage_layout.addWidget(self.stage_scroll, 1)
         top = QHBoxLayout()
@@ -259,20 +294,21 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         self.user_label = QLabel("Пользователь")
         self.user_label.setObjectName("ok")
-        self.mute_box = QCheckBox("Микрофон выключен")
-        self.mute_box.stateChanged.connect(self.update_voice_flags)
-        self.deafen_box = QCheckBox("Без звука")
-        self.deafen_box.stateChanged.connect(self.update_voice_flags)
+        self.mute_button = icon_button("mic", "Выключить микрофон")
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.deafen_button = icon_button("headphones", "Отключить входящий звук")
+        self.deafen_button.clicked.connect(self.toggle_deafen)
+        self.settings_button = icon_button("settings", "Настройки")
         create_user = QPushButton("Создать пользователя")
         create_user.setObjectName("secondary")
         create_user.clicked.connect(self.create_user)
-        refresh = QPushButton("Обновить")
-        refresh.setObjectName("secondary")
+        refresh = icon_button("refresh", "Обновить")
         refresh.clicked.connect(self.reload_all)
         layout.addWidget(self.user_label)
         layout.addStretch()
-        layout.addWidget(self.mute_box)
-        layout.addWidget(self.deafen_box)
+        layout.addWidget(self.mute_button)
+        layout.addWidget(self.deafen_button)
+        layout.addWidget(self.settings_button)
         layout.addWidget(create_user)
         layout.addWidget(refresh)
         return bar
@@ -362,14 +398,31 @@ class MainWindow(QMainWindow):
         except ApiError as exc:
             self.show_error(str(exc))
 
-    def update_voice_flags(self) -> None:
-        self.muted = self.mute_box.isChecked()
-        self.deafened = self.deafen_box.isChecked()
+    def toggle_mute(self) -> None:
+        self.muted = not self.muted
+        self.apply_audio_buttons()
+        self.update_voice_flags()
+
+    def toggle_deafen(self) -> None:
+        self.deafened = not self.deafened
         if self.deafened and not self.muted:
-            self.mute_box.blockSignals(True)
-            self.mute_box.setChecked(True)
-            self.mute_box.blockSignals(False)
             self.muted = True
+        self.apply_audio_buttons()
+        self.update_voice_flags()
+
+    def apply_audio_buttons(self) -> None:
+        self.mute_button.setIcon(svg_icon("mic_off" if self.muted else "mic"))
+        self.mute_button.setToolTip("Включить микрофон" if self.muted else "Выключить микрофон")
+        self.mute_button.setObjectName("iconDanger" if self.muted else "iconButton")
+        self.mute_button.style().unpolish(self.mute_button)
+        self.mute_button.style().polish(self.mute_button)
+        self.deafen_button.setIcon(svg_icon("headphones_off" if self.deafened else "headphones"))
+        self.deafen_button.setToolTip("Включить звук" if self.deafened else "Отключить входящий звук")
+        self.deafen_button.setObjectName("iconDanger" if self.deafened else "iconButton")
+        self.deafen_button.style().unpolish(self.deafen_button)
+        self.deafen_button.style().polish(self.deafen_button)
+
+    def update_voice_flags(self) -> None:
         if self.connected_channel_id:
             try:
                 self.api.update_voice(self.connected_channel_id, self.muted, self.deafened)
@@ -399,7 +452,7 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem()
                 item.setSizeHint(QSize(290, 64))
                 self.member_list.addItem(item)
-                self.member_list.setItemWidget(item, self.voice_member_widget(state, compact=False, with_volume=True))
+                self.member_list.setItemWidget(item, self.voice_member_widget(state, compact=False))
                 self.add_stage_member(state)
             self.render_channels()
         except ApiError:
@@ -456,16 +509,18 @@ class MainWindow(QMainWindow):
         item.setFlags(Qt.NoItemFlags)
         item.setSizeHint(QSize(260, 32))
         self.channel_list.addItem(item)
-        self.channel_list.setItemWidget(item, self.voice_member_widget(state, compact=True, with_volume=False))
+        self.channel_list.setItemWidget(item, self.voice_member_widget(state, compact=True))
 
     def channel_widget(self, channel: dict, *, active: bool, connected: bool) -> QWidget:
         row = QFrame()
         row.setObjectName("channelRowActive" if active else "channelRow")
         layout = QHBoxLayout(row)
         layout.setContentsMargins(10, 6, 8, 6)
-        icon = QLabel("#" if channel["type"] == "text" else "VOICE")
+        icon = QLabel("#")
+        if channel["type"] == "voice":
+            icon.setPixmap(svg_icon("voice").pixmap(QSize(17, 17)))
         icon.setObjectName("muted")
-        icon.setFixedWidth(42)
+        icon.setFixedWidth(22)
         name = QLabel(channel["name"])
         name.setObjectName("channelName")
         layout.addWidget(icon)
@@ -482,15 +537,18 @@ class MainWindow(QMainWindow):
             layout.addWidget(meta)
         return row
 
-    def voice_member_widget(self, state: dict, *, compact: bool, with_volume: bool) -> QWidget:
+    def voice_member_widget(self, state: dict, *, compact: bool) -> QWidget:
         subtitle = self.state_text(state)
         if compact:
-            return self.member_widget(f"    {state['display_name']}", subtitle, muted=state["muted"] or state["deafened"], compact=True, with_volume=False)
-        return self.member_widget(state["display_name"], subtitle, muted=state["muted"] or state["deafened"], compact=False, with_volume=with_volume)
+            return self.member_widget(f"    {state['display_name']}", subtitle, muted=state["muted"] or state["deafened"], compact=True, state=state)
+        return self.member_widget(state["display_name"], subtitle, muted=state["muted"] or state["deafened"], compact=False, state=state)
 
-    def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False, with_volume: bool = False) -> QWidget:
+    def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False, state: dict | None = None) -> QWidget:
         row = QFrame()
         row.setObjectName("memberRow")
+        if state:
+            row.setContextMenuPolicy(Qt.CustomContextMenu)
+            row.customContextMenuRequested.connect(partial(self.show_member_menu, row, state))
         layout = QHBoxLayout(row)
         layout.setContentsMargins(8, 3 if compact else 8, 8, 3 if compact else 8)
         layout.setSpacing(8)
@@ -510,48 +568,92 @@ class MainWindow(QMainWindow):
         texts.addWidget(title)
         texts.addWidget(sub)
         layout.addLayout(texts, 1)
-        if with_volume:
-            volume = QSlider(Qt.Horizontal)
-            volume.setRange(0, 200)
-            volume.setValue(100)
-            volume.setToolTip("Локальная громкость участника")
-            volume.setFixedWidth(72)
-            layout.addWidget(volume)
+        if state and state["user_id"] in self.local_mutes:
+            badge = QLabel("LOCAL MUTE")
+            badge.setObjectName("pillMuted")
+            layout.addWidget(badge)
         return row
 
     def add_stage_member(self, state: dict) -> None:
         card = QFrame()
         card.setObjectName("voiceCard")
-        card_layout = QHBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
-        card_layout.setSpacing(14)
+        card.setFixedSize(210, 150)
+        card.setContextMenuPolicy(Qt.CustomContextMenu)
+        card.customContextMenuRequested.connect(partial(self.show_member_menu, card, state))
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 14, 14, 14)
+        card_layout.setSpacing(8)
         avatar = QLabel(self.initials(state["display_name"]))
         avatar.setObjectName("bigAvatar")
         avatar.setAlignment(Qt.AlignCenter)
-        card_layout.addWidget(avatar)
-        texts = QVBoxLayout()
-        texts.setSpacing(4)
+        card_layout.addWidget(avatar, 0, Qt.AlignCenter)
         name = QLabel(state["display_name"])
         name.setObjectName("stageMemberName")
+        name.setAlignment(Qt.AlignCenter)
+        name.setWordWrap(True)
         status = QLabel(self.state_text(state))
         status.setObjectName("muted" if state["muted"] or state["deafened"] else "ok")
-        texts.addWidget(name)
-        texts.addWidget(status)
-        card_layout.addLayout(texts, 1)
+        status.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(name)
+        card_layout.addWidget(status)
+        card_layout.addStretch()
+        bottom = QHBoxLayout()
+        bottom.addStretch()
         badge = QLabel("MUTE" if state["muted"] else "LIVE")
         badge.setObjectName("pillMuted" if state["muted"] else "pillLive")
-        card_layout.addWidget(badge)
-        self.stage_members_layout.insertWidget(self.stage_members_layout.count() - 1, card)
+        bottom.addWidget(badge)
+        if state["user_id"] in self.local_mutes:
+            local = QLabel("LOCAL")
+            local.setObjectName("pillMuted")
+            bottom.addWidget(local)
+        bottom.addStretch()
+        card_layout.addLayout(bottom)
+        index = self.stage_members_layout.count()
+        self.stage_members_layout.addWidget(card, index // 4, index % 4)
+
+    def show_member_menu(self, parent: QWidget, state: dict, point) -> None:
+        menu = QMenu(parent)
+        user_id = int(state["user_id"])
+        muted_locally = user_id in self.local_mutes
+        mute_action = QAction("Включить локально" if muted_locally else "Заглушить локально", menu)
+        mute_action.triggered.connect(lambda: self.toggle_local_mute(user_id))
+        menu.addAction(mute_action)
+        menu.addSeparator()
+        volume_label = QLabel(f"Громкость: {self.local_volumes.get(user_id, 100)}%")
+        volume_label.setObjectName("menuLabel")
+        volume_action = QWidgetAction(menu)
+        volume_action.setDefaultWidget(volume_label)
+        menu.addAction(volume_action)
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 200)
+        slider.setValue(self.local_volumes.get(user_id, 100))
+        slider.setMinimumWidth(180)
+        slider.valueChanged.connect(lambda value: self.set_local_volume(user_id, value, volume_label))
+        slider_action = QWidgetAction(menu)
+        slider_action.setDefaultWidget(slider)
+        menu.addAction(slider_action)
+        menu.exec(parent.mapToGlobal(point))
+
+    def toggle_local_mute(self, user_id: int) -> None:
+        if user_id in self.local_mutes:
+            self.local_mutes.remove(user_id)
+        else:
+            self.local_mutes.add(user_id)
+        self.refresh_voice()
+
+    def set_local_volume(self, user_id: int, value: int, label: QLabel) -> None:
+        self.local_volumes[user_id] = value
+        label.setText(f"Громкость: {value}%")
 
     def add_stage_empty(self, text: str) -> None:
         empty = QLabel(text)
         empty.setObjectName("emptyText")
         empty.setAlignment(Qt.AlignCenter)
         empty.setWordWrap(True)
-        self.stage_members_layout.insertWidget(0, empty)
+        self.stage_members_layout.addWidget(empty, 0, 0, 1, 4)
 
     def clear_stage_members(self) -> None:
-        while self.stage_members_layout.count() > 1:
+        while self.stage_members_layout.count():
             item = self.stage_members_layout.takeAt(0)
             widget = item.widget()
             if widget:

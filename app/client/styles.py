@@ -67,6 +67,11 @@ QFrame#mainArea {
 QFrame#rightPanel {
     background: #2b2d31;
 }
+QFrame#voiceStage {
+    background: #2b2d31;
+    border: 1px solid #3f4147;
+    border-radius: 8px;
+}
 QFrame#bottomBar {
     background: #232428;
     border-top: 1px solid #1e1f22;
@@ -89,6 +94,16 @@ QLabel#section {
     font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
+}
+QLabel#stageTitle {
+    color: #f2f3f5;
+    font-size: 28px;
+    font-weight: 800;
+}
+QLabel#stageMemberName {
+    color: #f2f3f5;
+    font-size: 17px;
+    font-weight: 700;
 }
 QLabel#channelName {
     color: #dbdee1;
@@ -134,14 +149,61 @@ QLabel#avatar {
     max-height: 28px;
     font-weight: 700;
 }
+QLabel#bigAvatar {
+    background: #5865f2;
+    color: white;
+    border-radius: 24px;
+    min-width: 48px;
+    min-height: 48px;
+    max-width: 48px;
+    max-height: 48px;
+    font-size: 18px;
+    font-weight: 800;
+}
 QLabel#statusDot {
     color: #23a559;
     font-size: 16px;
+}
+QLabel#emptyText {
+    color: #949ba4;
+    font-size: 16px;
+    padding: 28px;
+}
+QLabel#pillLive {
+    background: #248046;
+    border-radius: 10px;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+}
+QLabel#pillMuted {
+    background: #4e5058;
+    border-radius: 10px;
+    color: #dbdee1;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 4px 10px;
+}
+QFrame#voiceCard {
+    background: #35373c;
+    border: 1px solid #404249;
+    border-radius: 8px;
+}
+QFrame#voiceCard:hover {
+    background: #3a3c42;
 }
 QFrame#emptyState {
     background: #2b2d31;
     border: 1px solid #3f4147;
     border-radius: 8px;
+}
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QScrollArea QWidget {
+    background: transparent;
 }
 QCheckBox {
     spacing: 8px;

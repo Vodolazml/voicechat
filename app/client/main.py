@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -145,12 +147,13 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         self.space_list = QListWidget()
-        self.space_list.setFixedWidth(78)
+        self.space_list.setFixedWidth(74)
         self.space_list.itemClicked.connect(self.select_space_item)
         space_frame = QFrame()
         space_frame.setObjectName("sidebar")
         space_layout = QVBoxLayout(space_frame)
-        space_layout.setContentsMargins(8, 8, 8, 8)
+        space_layout.setContentsMargins(8, 10, 8, 10)
+        space_layout.setSpacing(8)
         add_space = QPushButton("+")
         add_space.setToolTip("Создать пространство")
         add_space.clicked.connect(self.create_space)
@@ -161,8 +164,10 @@ class MainWindow(QMainWindow):
         self.channel_list.itemClicked.connect(self.select_channel_item)
         channel_frame = QFrame()
         channel_frame.setObjectName("panel")
-        channel_frame.setFixedWidth(250)
+        channel_frame.setFixedWidth(300)
         channel_layout = QVBoxLayout(channel_frame)
+        channel_layout.setContentsMargins(10, 12, 10, 10)
+        channel_layout.setSpacing(8)
         self.space_title = QLabel("Пространство")
         self.space_title.setObjectName("title")
         add_channel = QPushButton("Новый канал")
@@ -179,7 +184,8 @@ class MainWindow(QMainWindow):
         center = QFrame()
         center.setObjectName("mainArea")
         center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(22, 16, 22, 0)
+        center_layout.setContentsMargins(24, 18, 24, 0)
+        center_layout.setSpacing(12)
         self.channel_title = QLabel("Выберите канал")
         self.channel_title.setObjectName("title")
         self.channel_status = QLabel("Готово к работе")
@@ -190,34 +196,52 @@ class MainWindow(QMainWindow):
         self.connect_button = QPushButton("Подключиться")
         self.connect_button.clicked.connect(self.toggle_connection)
         self.connect_button.setEnabled(False)
-        self.placeholder = QLabel("Выберите голосовой канал слева, чтобы подключиться и увидеть участников.")
-        self.placeholder.setWordWrap(True)
-        self.placeholder.setAlignment(Qt.AlignCenter)
-        self.placeholder.setObjectName("muted")
-        self.empty_frame = QFrame()
-        self.empty_frame.setObjectName("emptyState")
-        empty_layout = QVBoxLayout(self.empty_frame)
-        empty_layout.setContentsMargins(28, 28, 28, 28)
-        empty_layout.addStretch()
-        empty_layout.addWidget(self.placeholder)
-        empty_layout.addStretch()
+        self.stage = QFrame()
+        self.stage.setObjectName("voiceStage")
+        stage_layout = QVBoxLayout(self.stage)
+        stage_layout.setContentsMargins(28, 26, 28, 26)
+        stage_layout.setSpacing(18)
+        self.stage_eyebrow = QLabel("ГОЛОСОВОЙ КАНАЛ")
+        self.stage_eyebrow.setObjectName("section")
+        self.stage_title = QLabel("Выберите канал")
+        self.stage_title.setObjectName("stageTitle")
+        self.stage_subtitle = QLabel("Здесь появятся участники после подключения к голосовому каналу.")
+        self.stage_subtitle.setObjectName("muted")
+        self.stage_subtitle.setWordWrap(True)
+        stage_layout.addWidget(self.stage_eyebrow)
+        stage_layout.addWidget(self.stage_title)
+        stage_layout.addWidget(self.stage_subtitle)
+        self.stage_scroll = QScrollArea()
+        self.stage_scroll.setWidgetResizable(True)
+        self.stage_scroll.setFrameShape(QFrame.NoFrame)
+        self.stage_body = QWidget()
+        self.stage_members_layout = QVBoxLayout(self.stage_body)
+        self.stage_members_layout.setContentsMargins(0, 0, 0, 0)
+        self.stage_members_layout.setSpacing(10)
+        self.stage_members_layout.addStretch()
+        self.stage_scroll.setWidget(self.stage_body)
+        stage_layout.addWidget(self.stage_scroll, 1)
         top = QHBoxLayout()
+        top.setSpacing(10)
         top.addWidget(self.channel_title)
         top.addWidget(self.voice_badge)
         top.addStretch()
         top.addWidget(self.connect_button)
         center_layout.addLayout(top)
         center_layout.addWidget(self.channel_status)
-        center_layout.addWidget(self.empty_frame, 1)
+        center_layout.addWidget(self.stage, 1)
         center_layout.addWidget(self.bottom_bar())
 
         member_frame = QFrame()
         member_frame.setObjectName("rightPanel")
-        member_frame.setFixedWidth(260)
+        member_frame.setFixedWidth(330)
         member_layout = QVBoxLayout(member_frame)
+        member_layout.setContentsMargins(12, 14, 12, 12)
+        member_layout.setSpacing(10)
         member_title = QLabel("Участники")
         member_title.setObjectName("title")
         self.member_list = QListWidget()
+        self.member_list.setSpacing(4)
         member_layout.addWidget(member_title)
         member_layout.addWidget(self.member_list)
 
@@ -231,6 +255,8 @@ class MainWindow(QMainWindow):
         bar = QFrame()
         bar.setObjectName("bottomBar")
         layout = QHBoxLayout(bar)
+        layout.setContentsMargins(12, 10, 10, 10)
+        layout.setSpacing(10)
         self.user_label = QLabel("Пользователь")
         self.user_label.setObjectName("ok")
         self.mute_box = QCheckBox("Микрофон выключен")
@@ -306,10 +332,14 @@ class MainWindow(QMainWindow):
         self.connect_button.style().polish(self.connect_button)
         self.voice_badge.setVisible(connected_here)
         self.voice_badge.setText("В ГОЛОСЕ" if connected_here else "НЕ ПОДКЛЮЧЕНО")
-        self.placeholder.setText(
-            "Голосовой канал готов. Участники отображаются слева под каналом и справа в списке."
+        self.stage_eyebrow.setText("ГОЛОСОВОЙ КАНАЛ" if channel["type"] == "voice" else "ТЕКСТОВЫЙ КАНАЛ")
+        self.stage_title.setText(channel["name"])
+        self.stage_subtitle.setText(
+            "Вы подключены. Здесь видны участники, локальные состояния микрофона и готовность будущего аудио."
+            if connected_here
+            else "Нажмите «Подключиться», чтобы войти в канал и увидеть себя среди участников."
             if channel["type"] == "voice"
-            else "Текстовый чат будет добавлен следующим этапом. Сейчас этот канал уже участвует в системе доступа."
+            else "Текстовый чат будет реализован следующим этапом. Модель доступа уже готова."
         )
         self.render_channels()
         self.refresh_voice()
@@ -351,7 +381,9 @@ class MainWindow(QMainWindow):
 
     def refresh_voice(self) -> None:
         self.member_list.clear()
+        self.clear_stage_members()
         if not self.current_channel or self.current_channel["type"] != "voice":
+            self.add_stage_empty("Для текстовых каналов скоро появится полноценный чат.")
             return
         try:
             states = self.api.voice_states(self.current_channel["id"])
@@ -361,16 +393,19 @@ class MainWindow(QMainWindow):
                 item.setSizeHint(QSize(220, 46))
                 self.member_list.addItem(item)
                 self.member_list.setItemWidget(item, self.member_widget("Пока никого нет", "Ожидание подключения", muted=True))
+                self.add_stage_empty("В канале пока никого нет. Подключитесь первым.")
                 return
             for state in states:
                 item = QListWidgetItem()
-                item.setSizeHint(QSize(220, 58))
+                item.setSizeHint(QSize(290, 64))
                 self.member_list.addItem(item)
-                self.member_list.setItemWidget(item, self.voice_member_widget(state, compact=False))
+                self.member_list.setItemWidget(item, self.voice_member_widget(state, compact=False, with_volume=True))
+                self.add_stage_member(state)
             self.render_channels()
         except ApiError:
             if self.current_channel and self.current_channel["type"] == "voice":
                 self.member_list.addItem("Не удалось обновить участников")
+                self.add_stage_empty("Не удалось обновить участников. Проверьте соединение с сервером.")
 
     def refresh_space_voice_cache(self) -> None:
         self.voice_cache = {}
@@ -419,17 +454,18 @@ class MainWindow(QMainWindow):
     def add_voice_child(self, state: dict) -> None:
         item = QListWidgetItem()
         item.setFlags(Qt.NoItemFlags)
-        item.setSizeHint(QSize(220, 34))
+        item.setSizeHint(QSize(260, 32))
         self.channel_list.addItem(item)
-        self.channel_list.setItemWidget(item, self.voice_member_widget(state, compact=True))
+        self.channel_list.setItemWidget(item, self.voice_member_widget(state, compact=True, with_volume=False))
 
     def channel_widget(self, channel: dict, *, active: bool, connected: bool) -> QWidget:
         row = QFrame()
         row.setObjectName("channelRowActive" if active else "channelRow")
         layout = QHBoxLayout(row)
         layout.setContentsMargins(10, 6, 8, 6)
-        icon = QLabel("#" if channel["type"] == "text" else "🔊")
+        icon = QLabel("#" if channel["type"] == "text" else "VOICE")
         icon.setObjectName("muted")
+        icon.setFixedWidth(42)
         name = QLabel(channel["name"])
         name.setObjectName("channelName")
         layout.addWidget(icon)
@@ -446,38 +482,80 @@ class MainWindow(QMainWindow):
             layout.addWidget(meta)
         return row
 
-    def voice_member_widget(self, state: dict, *, compact: bool) -> QWidget:
+    def voice_member_widget(self, state: dict, *, compact: bool, with_volume: bool) -> QWidget:
         subtitle = self.state_text(state)
         if compact:
-            return self.member_widget(f"    {state['display_name']}", subtitle, muted=state["muted"] or state["deafened"], compact=True)
-        return self.member_widget(state["display_name"], subtitle, muted=state["muted"] or state["deafened"], compact=False)
+            return self.member_widget(f"    {state['display_name']}", subtitle, muted=state["muted"] or state["deafened"], compact=True, with_volume=False)
+        return self.member_widget(state["display_name"], subtitle, muted=state["muted"] or state["deafened"], compact=False, with_volume=with_volume)
 
-    def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False) -> QWidget:
+    def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False, with_volume: bool = False) -> QWidget:
         row = QFrame()
         row.setObjectName("memberRow")
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(8, 4 if compact else 8, 8, 4 if compact else 8)
+        layout.setContentsMargins(8, 3 if compact else 8, 8, 3 if compact else 8)
+        layout.setSpacing(8)
         if not compact:
             avatar = QLabel(self.initials(name))
             avatar.setObjectName("avatar")
             avatar.setAlignment(Qt.AlignCenter)
             layout.addWidget(avatar)
         texts = QVBoxLayout()
+        texts.setSpacing(1)
         title = QLabel(name)
         title.setObjectName("channelName")
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         sub = QLabel(subtitle)
         sub.setObjectName("muted" if muted else "ok")
+        sub.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         texts.addWidget(title)
         texts.addWidget(sub)
         layout.addLayout(texts, 1)
-        if not compact:
+        if with_volume:
             volume = QSlider(Qt.Horizontal)
             volume.setRange(0, 200)
             volume.setValue(100)
             volume.setToolTip("Локальная громкость участника")
-            volume.setFixedWidth(80)
+            volume.setFixedWidth(72)
             layout.addWidget(volume)
         return row
+
+    def add_stage_member(self, state: dict) -> None:
+        card = QFrame()
+        card.setObjectName("voiceCard")
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(14)
+        avatar = QLabel(self.initials(state["display_name"]))
+        avatar.setObjectName("bigAvatar")
+        avatar.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(avatar)
+        texts = QVBoxLayout()
+        texts.setSpacing(4)
+        name = QLabel(state["display_name"])
+        name.setObjectName("stageMemberName")
+        status = QLabel(self.state_text(state))
+        status.setObjectName("muted" if state["muted"] or state["deafened"] else "ok")
+        texts.addWidget(name)
+        texts.addWidget(status)
+        card_layout.addLayout(texts, 1)
+        badge = QLabel("MUTE" if state["muted"] else "LIVE")
+        badge.setObjectName("pillMuted" if state["muted"] else "pillLive")
+        card_layout.addWidget(badge)
+        self.stage_members_layout.insertWidget(self.stage_members_layout.count() - 1, card)
+
+    def add_stage_empty(self, text: str) -> None:
+        empty = QLabel(text)
+        empty.setObjectName("emptyText")
+        empty.setAlignment(Qt.AlignCenter)
+        empty.setWordWrap(True)
+        self.stage_members_layout.insertWidget(0, empty)
+
+    def clear_stage_members(self) -> None:
+        while self.stage_members_layout.count() > 1:
+            item = self.stage_members_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
 
     def state_text(self, state: dict) -> str:
         if state["deafened"]:

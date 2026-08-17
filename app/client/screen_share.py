@@ -91,9 +91,8 @@ class ScreenShareClient(QObject):
     async def _send_loop(self, websocket) -> None:
         while not self._stop.is_set():
             try:
-                frame = self._send_queue.get_nowait()
+                frame = await asyncio.to_thread(self._send_queue.get, True, 0.05)
             except queue.Empty:
-                await asyncio.sleep(0.03)
                 continue
             await websocket.send(frame)
 

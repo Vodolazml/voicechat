@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
@@ -67,10 +66,14 @@ class ApiClient:
     def ws_headers(self) -> dict[str, str]:
         return self._headers()
 
-    def media_key(self, channel_id: int) -> bytes:
-        data = self.request("GET", f"/channels/{channel_id}/media-key")
-        key = str(data["key"])
-        return base64.urlsafe_b64decode(key + "=" * (-len(key) % 4))
+    def set_device_key(self, public_key: str, fingerprint: str) -> None:
+        self.request("PUT", "/me/device-key", json={"public_key": public_key, "fingerprint": fingerprint})
+
+    def e2ee_state(self, channel_id: int) -> dict[str, Any]:
+        return self.request("GET", f"/channels/{channel_id}/e2ee")
+
+    def publish_sender_key(self, channel_id: int, key_id: str, envelopes: dict[int, str]) -> None:
+        self.request("PUT", f"/channels/{channel_id}/e2ee/sender-key", json={"key_id": key_id, "envelopes": envelopes})
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")

@@ -222,7 +222,8 @@ class VoiceAudioClient:
         *,
         ws_url: str,
         ws_headers: dict[str, str],
-        media_key: bytes,
+        outgoing_media_key: bytes,
+        media_key_for_sender: Callable[[int], bytes | None],
         is_muted: Callable[[], bool],
         is_deafened: Callable[[], bool],
         is_locally_muted: Callable[[int], bool],
@@ -235,7 +236,8 @@ class VoiceAudioClient:
     ) -> None:
         self.ws_url = ws_url
         self.ws_headers = ws_headers
-        self.media_key = media_key
+        self.outgoing_media_key = outgoing_media_key
+        self.media_key_for_sender = media_key_for_sender
         self.is_muted = is_muted
         self.is_deafened = is_deafened
         self.is_locally_muted = is_locally_muted
@@ -349,7 +351,7 @@ class VoiceAudioClient:
             except queue.Empty:
                 await asyncio.sleep(0.004)
                 continue
-            await websocket.send(encrypt_frame(self.media_key, frame, VOICE_AAD))
+            await websocket.send(encrypt_frame(self.outgoing_media_key, frame, VOICE_AAD))
 
     async def _receive_loop(self, websocket) -> None:
         async for message in websocket:
@@ -360,8 +362,11 @@ class VoiceAudioClient:
             user_id = int.from_bytes(message[:4], "big")
             if self.is_deafened() or self.is_locally_muted(user_id):
                 continue
+            media_key = self.media_key_for_sender(user_id)
+            if not media_key:
+                continue
             try:
-                pcm = decrypt_frame(self.media_key, message[4:], VOICE_AAD)
+                pcm = decrypt_frame(media_key, message[4:], VOICE_AAD)
             except ValueError:
                 continue
             volume = max(0, min(200, self.local_volume(user_id)))

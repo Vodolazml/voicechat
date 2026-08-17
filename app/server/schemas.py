@@ -69,10 +69,31 @@ class ChannelOut(OrmModel):
     type: str
 
 
-class MediaKeyOut(BaseModel):
+class DeviceKeyIn(BaseModel):
+    public_key: str = Field(min_length=43, max_length=44, pattern=r"^[A-Za-z0-9_-]+={0,2}$")
+    fingerprint: str = Field(min_length=16, max_length=32, pattern=r"^[A-F0-9:]+$")
+
+
+class E2EEUserKeyOut(BaseModel):
+    user_id: int
+    public_key: str
+    fingerprint: str
+
+
+class E2EEKeySetOut(BaseModel):
+    sender_id: int
     key_id: str
-    key: str
-    algorithm: str = "AES-256-GCM"
+    envelope: str
+
+
+class E2EEStateOut(BaseModel):
+    users: list[E2EEUserKeyOut]
+    key_sets: list[E2EEKeySetOut]
+
+
+class SenderKeyIn(BaseModel):
+    key_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    envelopes: dict[int, str] = Field(default_factory=dict)
 
 
 class MemberIn(OrmModel):

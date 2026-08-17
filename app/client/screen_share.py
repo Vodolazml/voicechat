@@ -4,6 +4,7 @@ import asyncio
 import json
 import queue
 import threading
+from collections.abc import Callable
 from typing import Union
 
 from PySide6.QtCore import QObject, Signal
@@ -22,11 +23,18 @@ class ScreenShareClient(QObject):
     stopped_received = Signal(int)
     status_changed = Signal(str)
 
-    def __init__(self, ws_url: str, ws_headers: dict[str, str], media_key: bytes) -> None:
+    def __init__(
+        self,
+        ws_url: str,
+        ws_headers: dict[str, str],
+        outgoing_media_key: bytes,
+        media_key_for_sender: Callable[[int], bytes | None],
+    ) -> None:
         super().__init__()
         self.ws_url = ws_url
         self.ws_headers = ws_headers
-        self.media_key = media_key
+        self.outgoing_media_key = outgoing_media_key
+        self.media_key_for_sender = media_key_for_sender
         self._send_queue: queue.Queue[Union[bytes, str]] = queue.Queue(maxsize=4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -104,7 +112,7 @@ class ScreenShareClient(QObject):
             except queue.Empty:
                 continue
             if isinstance(frame, bytes) and frame != STOP_FRAME:
-                frame = encrypt_frame(self.media_key, frame, SCREEN_AAD)
+                frame = encrypt_frame(self.outgoing_media_key, frame, SCREEN_AAD)
             await websocket.send(frame)
 
     async def _receive_loop(self, websocket) -> None:
@@ -118,8 +126,11 @@ class ScreenShareClient(QObject):
             if frame == STOP_FRAME:
                 self.stopped_received.emit(user_id)
             else:
+                media_key = self.media_key_for_sender(user_id)
+                if not media_key:
+                    continue
                 try:
-                    plaintext = decrypt_frame(self.media_key, frame, SCREEN_AAD)
+                    plaintext = decrypt_frame(media_key, frame, SCREEN_AAD)
                 except ValueError:
                     continue
                 self.frame_received.emit(user_id, plaintext)

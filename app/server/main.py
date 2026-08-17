@@ -15,10 +15,12 @@ from .config import get_settings
 from . import models, schemas
 from .audit import write_audit
 from .database import Base, SessionLocal, engine, get_db
+from .e2ee_state import e2ee_state
+from ..e2ee_crypto import public_key_fingerprint
 from ..media_crypto import ENCRYPTED_FRAME_PREFIX
 from .deps import current_user, ensure_channel_member, require_permission, user_from_token
 from .permissions import seed_permissions, has_permission, user_permissions
-from .security import create_token, encode_secret, hash_password, media_key_for_channel, media_key_id, validate_password_strength, verify_password
+from .security import create_token, hash_password, validate_password_strength, verify_password
 from .screen_relay import screen_relay
 from .voice_relay import voice_relay
 
@@ -85,6 +87,29 @@ def websocket_token(websocket: WebSocket, query_token: str) -> str:
     if authorization.startswith("Bearer "):
         return authorization.removeprefix("Bearer ").strip()
     return query_token.strip()
+
+
+def channel_participant_ids(db: Session, channel_id: int) -> set[int]:
+    return set(
+        db.scalars(
+            select(models.ChannelMember.user_id)
+            .join(models.User, models.User.id == models.ChannelMember.user_id)
+            .where(models.ChannelMember.channel_id == channel_id, models.User.status == "active")
+        )
+    )
+
+
+def ensure_media_e2ee_access(db: Session, user_id: int, channel_id: int) -> models.Channel:
+    channel = ensure_channel_member(db, user_id, channel_id)
+    if channel.type != "voice":
+        raise HTTPException(status_code=400, detail="E2EE доступен только для голосового канала")
+    if not (
+        has_permission(db, user_id, "voice.join")
+        or has_permission(db, user_id, "screen_share.view")
+        or has_permission(db, user_id, "screen_share.start")
+    ):
+        raise HTTPException(status_code=403, detail="Нет права на E2EE медиа")
+    return channel
 
 
 def seed_database() -> None:
@@ -299,25 +324,47 @@ def list_channels(space_id: int, user: models.User = Depends(current_user), db: 
     return list(rows)
 
 
-@app.get("/channels/{channel_id}/media-key", response_model=schemas.MediaKeyOut, tags=["security"])
-def channel_media_key(
+@app.put("/me/device-key", tags=["security"])
+def set_device_key(
+    payload: schemas.DeviceKeyIn,
+    user: models.User = Depends(current_user),
+) -> dict[str, str]:
+    try:
+        expected_fingerprint = public_key_fingerprint(payload.public_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Некорректный public key") from exc
+    if expected_fingerprint != payload.fingerprint:
+        raise HTTPException(status_code=400, detail="Отпечаток public key не совпадает")
+    e2ee_state.set_public_key(user.id, payload.public_key, payload.fingerprint)
+    return {"status": "ok"}
+
+
+@app.get("/channels/{channel_id}/e2ee", response_model=schemas.E2EEStateOut, tags=["security"])
+def channel_e2ee_state(
     channel_id: int,
     user: models.User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> schemas.MediaKeyOut:
-    channel = ensure_channel_member(db, user.id, channel_id)
-    if channel.type != "voice":
-        raise HTTPException(status_code=400, detail="Медиа-ключ доступен только для голосового канала")
-    if not (
-        has_permission(db, user.id, "voice.join")
-        or has_permission(db, user.id, "screen_share.view")
-        or has_permission(db, user.id, "screen_share.start")
-    ):
-        raise HTTPException(status_code=403, detail="Нет права получать медиа-ключ")
-    return schemas.MediaKeyOut(
-        key_id=media_key_id(channel_id),
-        key=encode_secret(media_key_for_channel(channel_id)),
+) -> dict[str, object]:
+    ensure_media_e2ee_access(db, user.id, channel_id)
+    return e2ee_state.channel_state(channel_id, channel_participant_ids(db, channel_id), user.id)
+
+
+@app.put("/channels/{channel_id}/e2ee/sender-key", tags=["security"])
+def publish_sender_key(
+    channel_id: int,
+    payload: schemas.SenderKeyIn,
+    user: models.User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    ensure_media_e2ee_access(db, user.id, channel_id)
+    e2ee_state.set_sender_key(
+        channel_id,
+        user.id,
+        payload.key_id,
+        payload.envelopes,
+        channel_participant_ids(db, channel_id),
     )
+    return {"status": "ok"}
 
 
 @app.post("/channels", response_model=schemas.ChannelOut, tags=["channels"])

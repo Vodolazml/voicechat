@@ -7,6 +7,14 @@ from app.server import models
 from app.server.database import Base
 from app.server.deps import user_from_token
 from app.server.security import create_token, decode_token, hash_password, validate_password_strength, verify_password
+from app.e2ee_crypto import (
+    decrypt_sender_media_key,
+    encrypt_sender_media_key,
+    generate_media_key,
+    generate_private_key_b64,
+    media_key_id,
+    public_key_b64,
+)
 from app.media_crypto import decrypt_frame, encrypt_frame
 
 
@@ -69,3 +77,44 @@ def test_media_frames_are_encrypted_and_authenticated() -> None:
         decrypt_frame(key, packet, b"screen")
     with pytest.raises(ValueError):
         decrypt_frame(key, plaintext, b"voice")
+
+
+def test_sender_media_key_envelope_is_client_side_only() -> None:
+    sender_private = generate_private_key_b64()
+    recipient_private = generate_private_key_b64()
+    other_private = generate_private_key_b64()
+    recipient_public = public_key_b64(recipient_private)
+    sender_public = public_key_b64(sender_private)
+    media_key = generate_media_key()
+    key_id = media_key_id(media_key)
+
+    envelope = encrypt_sender_media_key(
+        private_key_b64=sender_private,
+        recipient_public_key=recipient_public,
+        media_key=media_key,
+        channel_id=7,
+        sender_id=1,
+        recipient_id=2,
+        key_id=key_id,
+    )
+
+    assert decrypt_sender_media_key(
+        private_key_b64=recipient_private,
+        sender_public_key=sender_public,
+        envelope=envelope,
+        channel_id=7,
+        sender_id=1,
+        recipient_id=2,
+        key_id=key_id,
+    ) == media_key
+
+    with pytest.raises(ValueError):
+        decrypt_sender_media_key(
+            private_key_b64=other_private,
+            sender_public_key=sender_public,
+            envelope=envelope,
+            channel_id=7,
+            sender_id=1,
+            recipient_id=2,
+            key_id=key_id,
+        )

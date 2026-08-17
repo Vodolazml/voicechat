@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .api import ApiClient, ApiError
+from .e2ee import ChannelE2EE, E2EEIdentity
 from .screen_share import STOP_FRAME, ScreenShareClient
 from .settings_store import load_client_settings, save_client_settings
 from .styles import APP_STYLE
@@ -242,7 +243,10 @@ class MainWindow(QMainWindow):
         self.deafened = False
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
-        self.media_keys: dict[int, bytes] = {}
+        self.e2ee_identity = E2EEIdentity(self.client_settings)
+        save_client_settings(self.client_settings)
+        self.channel_e2ee: dict[int, ChannelE2EE] = {}
+        self.last_e2ee_sync_at: dict[int, float] = {}
         self.voice_audio: VoiceAudioClient | None = None
         self.screen_client: ScreenShareClient | None = None
         self.screen_viewer: ScreenShareViewer | None = None
@@ -449,6 +453,7 @@ class MainWindow(QMainWindow):
     def reload_all(self) -> None:
         try:
             self.me = self.api.me()
+            self.api.set_device_key(self.e2ee_identity.public_key, self.e2ee_identity.fingerprint)
             self.user_label.setText(f"{self.me['display_name']}  @{self.me['username']}")
             self.spaces = self.api.spaces()
             self.space_list.clear()
@@ -586,7 +591,8 @@ class MainWindow(QMainWindow):
                 self.stop_audio()
                 self.api.disconnect(channel_id)
                 self.connected_channel_id = None
-                self.media_keys.pop(channel_id, None)
+                self.channel_e2ee.pop(channel_id, None)
+                self.last_e2ee_sync_at.pop(channel_id, None)
                 self.channel_status.setText("Отключено")
             else:
                 self.stop_screen_share()
@@ -594,6 +600,7 @@ class MainWindow(QMainWindow):
                 self.stop_audio()
                 state = self.api.connect(channel_id, self.muted, self.deafened)
                 self.connected_channel_id = state["channel_id"]
+                self.ensure_e2ee_for_channel(channel_id, force=True)
                 self.start_audio(channel_id)
                 self.start_screen_client(channel_id)
                 self.channel_status.setText("Подключено")
@@ -612,11 +619,13 @@ class MainWindow(QMainWindow):
 
     def start_audio(self, channel_id: int) -> None:
         try:
-            media_key = self.channel_media_key(channel_id)
+            e2ee = self.ensure_e2ee_for_channel(channel_id, force=True)
+            _key_id, outgoing_key = e2ee.ensure_outgoing_key()
             self.voice_audio = VoiceAudioClient(
                 ws_url=self.api.voice_ws_url(channel_id),
                 ws_headers=self.api.ws_headers(),
-                media_key=media_key,
+                outgoing_media_key=outgoing_key,
+                media_key_for_sender=lambda user_id: self.media_key_for_sender(channel_id, user_id),
                 is_muted=lambda: self.muted,
                 is_deafened=lambda: self.deafened,
                 is_locally_muted=lambda user_id: user_id in self.local_mutes,
@@ -639,10 +648,13 @@ class MainWindow(QMainWindow):
         self.last_speaking = False
 
     def start_screen_client(self, channel_id: int) -> None:
+        e2ee = self.ensure_e2ee_for_channel(channel_id)
+        _key_id, outgoing_key = e2ee.ensure_outgoing_key()
         self.screen_client = ScreenShareClient(
             self.api.screen_ws_url(channel_id),
             self.api.ws_headers(),
-            self.channel_media_key(channel_id),
+            outgoing_key,
+            lambda user_id: self.media_key_for_sender(channel_id, user_id),
         )
         self.screen_client.frame_received.connect(self.on_screen_frame)
         self.screen_client.stopped_received.connect(self.on_screen_stop)
@@ -660,12 +672,51 @@ class MainWindow(QMainWindow):
             self.screen_viewer = None
         self.redraw_voice_stage()
 
-    def channel_media_key(self, channel_id: int) -> bytes:
-        media_key = self.media_keys.get(channel_id)
-        if media_key is None:
-            media_key = self.api.media_key(channel_id)
-            self.media_keys[channel_id] = media_key
-        return media_key
+    def media_key_for_sender(self, channel_id: int, user_id: int) -> bytes | None:
+        channel_state = self.channel_e2ee.get(channel_id)
+        if not channel_state:
+            return None
+        return channel_state.sender_keys.get(user_id)
+
+    def ensure_e2ee_for_channel(self, channel_id: int, *, force: bool = False) -> ChannelE2EE:
+        channel_state = self.channel_e2ee.setdefault(channel_id, ChannelE2EE())
+        now = monotonic()
+        if not force and now - self.last_e2ee_sync_at.get(channel_id, 0) < 5:
+            return channel_state
+        if not self.me:
+            return channel_state
+        state = self.api.e2ee_state(channel_id)
+        users = list(state.get("users", []))
+        users_by_id = {int(user["user_id"]): user for user in users}
+        my_id = int(self.me["id"])
+        channel_state.load_sender_keys(
+            identity=self.e2ee_identity,
+            channel_id=channel_id,
+            recipient_id=my_id,
+            users_by_id=users_by_id,
+            key_sets=list(state.get("key_sets", [])),
+        )
+        envelopes = channel_state.envelopes_for(
+            identity=self.e2ee_identity,
+            channel_id=channel_id,
+            sender_id=my_id,
+            users=users,
+        )
+        if envelopes:
+            key_id, _media_key = channel_state.ensure_outgoing_key()
+            self.api.publish_sender_key(channel_id, key_id, envelopes)
+            channel_state.mark_published(set(envelopes))
+            state = self.api.e2ee_state(channel_id)
+            users_by_id = {int(user["user_id"]): user for user in state.get("users", [])}
+            channel_state.load_sender_keys(
+                identity=self.e2ee_identity,
+                channel_id=channel_id,
+                recipient_id=my_id,
+                users_by_id=users_by_id,
+                key_sets=list(state.get("key_sets", [])),
+            )
+        self.last_e2ee_sync_at[channel_id] = now
+        return channel_state
 
     def toggle_screen_share(self) -> None:
         if self.screen_sharing:
@@ -962,6 +1013,11 @@ class MainWindow(QMainWindow):
             states = self.api.voice_states(self.current_channel["id"])
             self.current_voice_states = states
             self.voice_cache[self.current_channel["id"]] = states
+            if self.connected_channel_id == self.current_channel["id"]:
+                try:
+                    self.ensure_e2ee_for_channel(self.current_channel["id"])
+                except ApiError:
+                    pass
             if not states:
                 item = QListWidgetItem()
                 item.setSizeHint(QSize(220, 46))

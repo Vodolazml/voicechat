@@ -71,6 +71,7 @@ SCREEN_FPS_PRESETS = (
     ("5 FPS", 200),
     ("10 FPS", 100),
     ("15 FPS", 67),
+    ("30 FPS", 33),
 )
 DEFAULT_SCREEN_FPS_INTERVAL_MS = 200
 
@@ -400,20 +401,6 @@ class MainWindow(QMainWindow):
         self.deafen_button.clicked.connect(self.toggle_deafen)
         self.screen_button = icon_button("screen", "Включить демонстрацию экрана")
         self.screen_button.clicked.connect(self.toggle_screen_share)
-        self.screen_quality_combo = QComboBox()
-        self.screen_quality_combo.setObjectName("compactCombo")
-        self.screen_quality_combo.setToolTip("Качество демонстрации экрана")
-        for key, preset in SCREEN_QUALITY_PRESETS.items():
-            self.screen_quality_combo.addItem(str(preset["label"]), key)
-        self.screen_quality_combo.setCurrentIndex(self.screen_quality_combo.findData(self.screen_quality_key))
-        self.screen_quality_combo.currentIndexChanged.connect(self.change_screen_quality)
-        self.screen_fps_combo = QComboBox()
-        self.screen_fps_combo.setObjectName("compactCombo")
-        self.screen_fps_combo.setToolTip("Частота кадров демонстрации экрана")
-        for label, interval_ms in SCREEN_FPS_PRESETS:
-            self.screen_fps_combo.addItem(label, interval_ms)
-        self.screen_fps_combo.setCurrentIndex(self.screen_fps_combo.findData(self.screen_fps_interval_ms))
-        self.screen_fps_combo.currentIndexChanged.connect(self.change_screen_fps)
         self.ping_label = QLabel("ping --")
         self.ping_label.setObjectName("pingUnknown")
         self.ping_label.setToolTip("Задержка API до сервера")
@@ -430,8 +417,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.mute_button)
         layout.addWidget(self.deafen_button)
         layout.addWidget(self.screen_button)
-        layout.addWidget(self.screen_quality_combo)
-        layout.addWidget(self.screen_fps_combo)
         layout.addWidget(self.ping_label)
         layout.addWidget(self.settings_button)
         layout.addWidget(create_user)
@@ -629,6 +614,11 @@ class MainWindow(QMainWindow):
         if not self.connected_channel_id:
             self.show_error("Сначала подключитесь к голосовому каналу.")
             return
+        dialog = ScreenShareStartDialog(self, self.screen_quality_key, self.screen_fps_interval_ms)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.screen_quality_key = dialog.selected_quality_key()
+        self.screen_fps_interval_ms = dialog.selected_fps_interval_ms()
         if not self.screen_client:
             self.start_screen_client(self.connected_channel_id)
         self.screen_sharing = True
@@ -696,23 +686,6 @@ class MainWindow(QMainWindow):
         self.screen_button.setToolTip("Остановить демонстрацию экрана" if self.screen_sharing else "Включить демонстрацию экрана")
         self.screen_button.setObjectName("iconActive" if self.screen_sharing else "iconButton")
         self.repolish(self.screen_button)
-
-    def change_screen_quality(self) -> None:
-        key = self.screen_quality_combo.currentData()
-        if key in SCREEN_QUALITY_PRESETS:
-            self.screen_quality_key = str(key)
-            preset = SCREEN_QUALITY_PRESETS[self.screen_quality_key]
-            self.screen_quality_combo.setToolTip(f"Качество демонстрации: {preset['tooltip']}")
-            if self.screen_sharing:
-                self.capture_screen_frame()
-
-    def change_screen_fps(self) -> None:
-        interval_ms = self.screen_fps_combo.currentData()
-        if isinstance(interval_ms, int):
-            self.screen_fps_interval_ms = interval_ms
-            self.screen_timer.setInterval(interval_ms)
-            fps = max(1, round(1000 / interval_ms))
-            self.screen_fps_combo.setToolTip(f"Частота демонстрации: {fps} кадров/сек")
 
     def open_screen_viewer(self, user_id: int) -> None:
         if user_id not in self.screen_frames:
@@ -1294,6 +1267,98 @@ class VoiceThresholdMeter(QWidget):
 
         painter.setPen(QColor("#949ba4"))
         painter.drawText(rect.adjusted(0, 21, 0, 18), Qt.AlignRight, "порог")
+
+
+class ScreenShareStartDialog(QDialog):
+    def __init__(self, parent: QWidget, quality_key: str, fps_interval_ms: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Демонстрация экрана")
+        self.setMinimumWidth(560)
+
+        self.preview = QLabel("Предпросмотр экрана")
+        self.preview.setObjectName("screenStartPreview")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setFixedSize(520, 292)
+
+        self.quality_combo = QComboBox()
+        for key, preset in SCREEN_QUALITY_PRESETS.items():
+            self.quality_combo.addItem(str(preset["label"]), key)
+        quality_index = self.quality_combo.findData(quality_key)
+        self.quality_combo.setCurrentIndex(quality_index if quality_index >= 0 else 0)
+        self.quality_combo.currentIndexChanged.connect(self.update_quality_hint)
+
+        self.fps_combo = QComboBox()
+        for label, interval_ms in SCREEN_FPS_PRESETS:
+            self.fps_combo.addItem(label, interval_ms)
+        fps_index = self.fps_combo.findData(fps_interval_ms)
+        self.fps_combo.setCurrentIndex(fps_index if fps_index >= 0 else self.fps_combo.findData(DEFAULT_SCREEN_FPS_INTERVAL_MS))
+
+        self.quality_hint = QLabel("")
+        self.quality_hint.setObjectName("muted")
+        self.quality_hint.setWordWrap(True)
+
+        start_button = QPushButton("Начать трансляцию")
+        start_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setObjectName("secondary")
+        cancel_button.clicked.connect(self.reject)
+
+        form = QFormLayout()
+        form.addRow("Разрешение", self.quality_combo)
+        form.addRow("Частота кадров", self.fps_combo)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(start_button)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Поделиться экраном")
+        title.setObjectName("title")
+        layout.addWidget(title)
+        layout.addWidget(self.preview, 0, Qt.AlignCenter)
+        layout.addLayout(form)
+        layout.addWidget(self.quality_hint)
+        layout.addLayout(buttons)
+
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setInterval(350)
+        self.preview_timer.timeout.connect(self.refresh_preview)
+        self.update_quality_hint()
+        self.refresh_preview()
+        self.preview_timer.start()
+
+    def selected_quality_key(self) -> str:
+        return str(self.quality_combo.currentData())
+
+    def selected_fps_interval_ms(self) -> int:
+        interval_ms = self.fps_combo.currentData()
+        return int(interval_ms) if isinstance(interval_ms, int) else DEFAULT_SCREEN_FPS_INTERVAL_MS
+
+    def update_quality_hint(self) -> None:
+        preset = SCREEN_QUALITY_PRESETS.get(self.selected_quality_key(), SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
+        self.quality_hint.setText(str(preset["tooltip"]))
+
+    def refresh_preview(self) -> None:
+        screen = QApplication.primaryScreen()
+        if not screen:
+            self.preview.setText("Экран недоступен")
+            return
+        pixmap = screen.grabWindow(0).scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview.setPixmap(pixmap)
+        self.preview.setText("")
+
+    def accept(self) -> None:
+        self.preview_timer.stop()
+        super().accept()
+
+    def reject(self) -> None:
+        self.preview_timer.stop()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self.preview_timer.stop()
+        event.accept()
 
 
 class ScreenShareViewer(QDialog):

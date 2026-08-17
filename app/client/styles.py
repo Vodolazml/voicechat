@@ -383,6 +383,12 @@ QLabel#screenPreview {
     border: 1px solid #1e1f22;
     border-radius: 6px;
 }
+QLabel#screenStartPreview {
+    background: #111214;
+    border: 1px solid #3f4147;
+    border-radius: 8px;
+    color: #949ba4;
+}
 QLabel#screenLargePreview {
     background: #111214;
     border: 1px solid #3f4147;

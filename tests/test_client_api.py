@@ -18,6 +18,10 @@ def test_rejects_remote_http() -> None:
         normalize_base_url("http://voice.example.com")
 
 
+def test_allows_remote_http_when_explicitly_enabled() -> None:
+    assert normalize_base_url("http://203.0.113.10:8765", allow_insecure_http=True) == "http://203.0.113.10:8765"
+
+
 def test_loads_packaged_client_config(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("VOICECHAT_SERVER_URL", raising=False)
     monkeypatch.delenv("VOICECHAT_LOCK_SERVER_URL", raising=False)
@@ -31,6 +35,23 @@ def test_loads_packaged_client_config(tmp_path, monkeypatch) -> None:
 
     assert config.server_url == "https://voice.example.com"
     assert config.lock_server_url is True
+
+
+def test_loads_insecure_http_flag_from_packaged_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("VOICECHAT_SERVER_URL", raising=False)
+    monkeypatch.delenv("VOICECHAT_LOCK_SERVER_URL", raising=False)
+    monkeypatch.delenv("VOICECHAT_ALLOW_INSECURE_HTTP", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "client_config.json").write_text(
+        '{"server_url":"http://203.0.113.10:8765","lock_server_url":true,"allow_insecure_http":true}',
+        encoding="utf-8",
+    )
+
+    config = load_client_config()
+
+    assert config.server_url == "http://203.0.113.10:8765"
+    assert config.lock_server_url is True
+    assert config.allow_insecure_http is True
 
 
 def test_update_file_name_uses_url_name() -> None:

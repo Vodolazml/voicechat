@@ -1,4 +1,5 @@
 {
-  "server_url": "https://voice.example.com",
-  "lock_server_url": true
+  "server_url": "http://YOUR_SERVER_IP:8765",
+  "lock_server_url": true,
+  "allow_insecure_http": true
 }

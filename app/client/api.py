@@ -15,7 +15,7 @@ class ApiError(RuntimeError):
     pass
 
 
-def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765") -> str:
+def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765", *, allow_insecure_http: bool = False) -> str:
     raw = value.strip().rstrip("/") or default
     if "://" not in raw:
         raw = f"{'http' if raw.startswith(('127.', 'localhost')) else 'https'}://{raw}"
@@ -24,8 +24,8 @@ def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765") -> st
         raise ApiError("Адрес сервера должен быть вида https://example.com")
     hostname = parsed.hostname or ""
     is_local = hostname in {"127.0.0.1", "localhost", "::1"}
-    if parsed.scheme == "http" and not is_local:
-        raise ApiError("Для удалённого сервера используйте HTTPS.")
+    if parsed.scheme == "http" and not is_local and not allow_insecure_http:
+        raise ApiError("Для удалённого сервера используйте HTTPS или включите insecure-режим в client_config.json.")
     return raw
 
 
@@ -35,8 +35,8 @@ class ApiClient:
     token: str | None = None
     _client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=8), init=False)
 
-    def set_base_url(self, value: str) -> None:
-        self.base_url = normalize_base_url(value, self.base_url)
+    def set_base_url(self, value: str, *, allow_insecure_http: bool = False) -> None:
+        self.base_url = normalize_base_url(value, self.base_url, allow_insecure_http=allow_insecure_http)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}

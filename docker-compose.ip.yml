@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env.ip
+    environment:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "UTF-8"
+      VOICECHAT_DATABASE_URL: "sqlite:////data/voicechat.db"
+    ports:
+      - "8765:8765"
+    volumes:
+      - voicechat_data:/data
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.server.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+
+volumes:
+  voicechat_data:

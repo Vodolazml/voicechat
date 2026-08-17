@@ -137,7 +137,7 @@ class LoginDialog(QDialog):
             configured_server_url = saved_server_url
         if configured_server_url:
             try:
-                self.api.set_base_url(configured_server_url)
+                self.api.set_base_url(configured_server_url, allow_insecure_http=self.packaged_config.allow_insecure_http)
             except ApiError:
                 pass
         self.setWindowTitle("Вход")
@@ -173,9 +173,12 @@ class LoginDialog(QDialog):
     def try_login(self) -> None:
         try:
             if self.packaged_config.server_url and self.packaged_config.lock_server_url:
-                self.api.set_base_url(self.packaged_config.server_url)
+                self.api.set_base_url(
+                    self.packaged_config.server_url,
+                    allow_insecure_http=self.packaged_config.allow_insecure_http,
+                )
             else:
-                self.api.set_base_url(self.server.text())
+                self.api.set_base_url(self.server.text(), allow_insecure_http=self.packaged_config.allow_insecure_http)
             if not self.ensure_update_checked():
                 return
             data = self.api.login(self.username.text().strip(), self.password.text())

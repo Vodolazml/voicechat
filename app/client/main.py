@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from functools import partial
 from time import monotonic
 
@@ -50,6 +51,7 @@ def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
         "voice": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
         "settings": '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 1 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 1 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
         "screen": '<path d="M3 5h18v12H3z"/><path d="M8 21h8"/><path d="M12 17v4"/>',
+        "maximize": '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>',
         "plus": '<path d="M12 5v14"/><path d="M5 12h14"/>',
         "refresh": '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 3v5h-5"/><path d="M6 21v-5h5"/>',
         "join": '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>',
@@ -193,6 +195,7 @@ class MainWindow(QMainWindow):
         self.local_volumes: dict[int, int] = {}
         self.voice_audio: VoiceAudioClient | None = None
         self.screen_client: ScreenShareClient | None = None
+        self.screen_viewer: ScreenShareViewer | None = None
         self.screen_sharing = False
         self.screen_frames: dict[int, QPixmap] = {}
         self.current_voice_states: list[dict] = []
@@ -563,6 +566,9 @@ class MainWindow(QMainWindow):
             self.screen_client.stop()
             self.screen_client = None
         self.screen_frames.clear()
+        if self.screen_viewer:
+            self.screen_viewer.close()
+            self.screen_viewer = None
         self.redraw_voice_stage()
 
     def toggle_screen_share(self) -> None:
@@ -621,15 +627,35 @@ class MainWindow(QMainWindow):
         if pixmap.loadFromData(frame, "JPG"):
             self.screen_frames[user_id] = pixmap
             self.redraw_voice_stage()
+            if self.screen_viewer:
+                self.screen_viewer.refresh_view()
 
     def on_screen_stop(self, user_id: int) -> None:
         self.screen_frames.pop(user_id, None)
         self.redraw_voice_stage()
+        if self.screen_viewer:
+            self.screen_viewer.refresh_view()
 
     def apply_screen_button(self) -> None:
         self.screen_button.setToolTip("Остановить демонстрацию экрана" if self.screen_sharing else "Включить демонстрацию экрана")
         self.screen_button.setObjectName("iconActive" if self.screen_sharing else "iconButton")
         self.repolish(self.screen_button)
+
+    def open_screen_viewer(self, user_id: int) -> None:
+        if user_id not in self.screen_frames:
+            return
+        if self.screen_viewer:
+            self.screen_viewer.close()
+        self.screen_viewer = ScreenShareViewer(
+            self,
+            user_id,
+            lambda: list(self.current_voice_states),
+            lambda: dict(self.screen_frames),
+            self.initials,
+            self.state_text,
+        )
+        self.screen_viewer.finished.connect(lambda _result: setattr(self, "screen_viewer", None))
+        self.screen_viewer.show_fullscreen()
 
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
@@ -930,6 +956,9 @@ class MainWindow(QMainWindow):
             preview.setAlignment(Qt.AlignCenter)
             preview.setFixedSize(202, 86)
             preview.setPixmap(screen_pixmap.scaled(preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            preview.setCursor(Qt.PointingHandCursor)
+            preview.setToolTip("Открыть трансляцию на весь экран")
+            preview.mousePressEvent = lambda event, selected_user_id=user_id: self.open_screen_viewer(selected_user_id)
             card_layout.addWidget(preview, 0, Qt.AlignCenter)
         else:
             avatar = QLabel(self.initials(state["display_name"]))
@@ -955,6 +984,10 @@ class MainWindow(QMainWindow):
         if screen_pixmap:
             badge.setText("SCREEN")
             badge.setObjectName("pillScreen")
+            open_button = icon_button("maximize", "Открыть трансляцию на весь экран")
+            open_button.setObjectName("channelAction")
+            open_button.clicked.connect(lambda _checked=False, selected_user_id=user_id: self.open_screen_viewer(selected_user_id))
+            bottom.addWidget(open_button)
         if state["user_id"] in self.local_mutes:
             local = QLabel("LOCAL")
             local.setObjectName("pillMuted")
@@ -999,6 +1032,9 @@ class MainWindow(QMainWindow):
         label.setText(f"Громкость: {value}%")
 
     def closeEvent(self, event) -> None:
+        if self.screen_viewer:
+            self.screen_viewer.close()
+            self.screen_viewer = None
         self.stop_screen_share()
         self.stop_screen_client()
         self.stop_audio()
@@ -1185,6 +1221,153 @@ class VoiceThresholdMeter(QWidget):
 
         painter.setPen(QColor("#949ba4"))
         painter.drawText(rect.adjusted(0, 21, 0, 18), Qt.AlignRight, "порог")
+
+
+class ScreenShareViewer(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        selected_user_id: int,
+        states_provider: Callable[[], list[dict]],
+        frames_provider: Callable[[], dict[int, QPixmap]],
+        initials_provider: Callable[[str], str],
+        state_text_provider: Callable[[dict], str],
+    ) -> None:
+        super().__init__(parent)
+        self.selected_user_id = selected_user_id
+        self.states_provider = states_provider
+        self.frames_provider = frames_provider
+        self.initials_provider = initials_provider
+        self.state_text_provider = state_text_provider
+        self.participants_visible = True
+        self.setWindowTitle("Просмотр демонстрации экрана")
+        self.setMinimumSize(960, 540)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 14)
+        root.setSpacing(10)
+        top = QHBoxLayout()
+        self.title = QLabel("Демонстрация экрана")
+        self.title.setObjectName("title")
+        self.subtitle = QLabel("")
+        self.subtitle.setObjectName("muted")
+        self.hide_participants_button = QPushButton("Скрыть участников")
+        self.hide_participants_button.setObjectName("secondary")
+        self.hide_participants_button.clicked.connect(self.toggle_participants)
+        close_button = QPushButton("Закрыть")
+        close_button.setObjectName("secondary")
+        close_button.clicked.connect(self.close)
+        top.addWidget(self.title)
+        top.addWidget(self.subtitle)
+        top.addStretch()
+        top.addWidget(self.hide_participants_button)
+        top.addWidget(close_button)
+        root.addLayout(top)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        self.preview = QLabel("Ожидание кадра трансляции")
+        self.preview.setObjectName("screenLargePreview")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumSize(640, 360)
+        self.preview.setScaledContents(False)
+        body.addWidget(self.preview, 1)
+
+        self.participants_panel = QFrame()
+        self.participants_panel.setObjectName("viewerParticipants")
+        self.participants_panel.setFixedWidth(280)
+        participants_layout = QVBoxLayout(self.participants_panel)
+        participants_layout.setContentsMargins(10, 10, 10, 10)
+        participants_layout.setSpacing(8)
+        participants_title = QLabel("Участники")
+        participants_title.setObjectName("title")
+        self.participants_list = QListWidget()
+        self.participants_list.itemClicked.connect(self.select_participant)
+        participants_layout.addWidget(participants_title)
+        participants_layout.addWidget(self.participants_list, 1)
+        body.addWidget(self.participants_panel)
+        root.addLayout(body, 1)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(120)
+        self.timer.timeout.connect(self.refresh_view)
+        self.timer.start()
+        self.refresh_view()
+
+    def show_fullscreen(self) -> None:
+        self.showFullScreen()
+
+    def toggle_participants(self) -> None:
+        self.participants_visible = not self.participants_visible
+        self.participants_panel.setVisible(self.participants_visible)
+        self.hide_participants_button.setText("Скрыть участников" if self.participants_visible else "Показать участников")
+        self.refresh_view()
+
+    def select_participant(self, item: QListWidgetItem) -> None:
+        user_id = item.data(Qt.UserRole)
+        if user_id in self.frames_provider():
+            self.selected_user_id = int(user_id)
+            self.refresh_view()
+
+    def refresh_view(self) -> None:
+        states = self.states_provider()
+        frames = self.frames_provider()
+        if self.selected_user_id not in frames and frames:
+            self.selected_user_id = next(iter(frames))
+
+        selected_state = next((state for state in states if int(state["user_id"]) == self.selected_user_id), None)
+        display_name = selected_state["display_name"] if selected_state else "Трансляция"
+        self.title.setText(display_name)
+        self.subtitle.setText("демонстрирует экран" if self.selected_user_id in frames else "трансляция остановлена")
+
+        pixmap = frames.get(self.selected_user_id)
+        if pixmap:
+            target = self.preview.size()
+            self.preview.setPixmap(pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.preview.setText("")
+        else:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText("Ожидание кадра трансляции")
+
+        self.render_participants(states, frames)
+
+    def render_participants(self, states: list[dict], frames: dict[int, QPixmap]) -> None:
+        self.participants_list.clear()
+        for state in states:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, int(state["user_id"]))
+            item.setSizeHint(QSize(250, 54))
+            self.participants_list.addItem(item)
+            row = QFrame()
+            row.setObjectName("viewerParticipantActive" if int(state["user_id"]) == self.selected_user_id else "memberRowSpeaking" if state.get("speaking") else "memberRow")
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(8, 6, 8, 6)
+            layout.setSpacing(8)
+            avatar = QLabel(self.initials_provider(state["display_name"]))
+            avatar.setObjectName("avatar")
+            avatar.setAlignment(Qt.AlignCenter)
+            layout.addWidget(avatar)
+            text = QVBoxLayout()
+            text.setSpacing(1)
+            name = QLabel(state["display_name"])
+            name.setObjectName("channelName")
+            status_text = "показывает экран" if int(state["user_id"]) in frames else self.state_text_provider(state)
+            status = QLabel(status_text)
+            status.setObjectName("ok" if int(state["user_id"]) in frames or state.get("speaking") else "muted")
+            text.addWidget(name)
+            text.addWidget(status)
+            layout.addLayout(text, 1)
+            self.participants_list.setItemWidget(item, row)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        self.timer.stop()
+        event.accept()
 
 
 class AudioSettingsDialog(QDialog):

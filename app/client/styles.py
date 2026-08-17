@@ -374,6 +374,23 @@ QLabel#screenPreview {
     border: 1px solid #1e1f22;
     border-radius: 6px;
 }
+QLabel#screenLargePreview {
+    background: #111214;
+    border: 1px solid #3f4147;
+    border-radius: 8px;
+    color: #949ba4;
+    font-size: 18px;
+}
+QFrame#viewerParticipants {
+    background: #2b2d31;
+    border: 1px solid #3f4147;
+    border-radius: 8px;
+}
+QFrame#viewerParticipantActive {
+    background: #404249;
+    border-left: 3px solid #5865f2;
+    border-radius: 6px;
+}
 QFrame#memberRowSpeaking {
     background: #303b34;
     border-left: 3px solid #23a559;

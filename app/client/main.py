@@ -42,6 +42,10 @@ from .styles import APP_STYLE
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
 
 
+SCREEN_FRAME_LIMIT_BYTES = 1_500_000
+SCREEN_CAPTURE_PRESETS = ((1920, 1080, 82), (1600, 900, 76), (1280, 720, 68))
+
+
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
     paths = {
         "mic": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
@@ -226,7 +230,7 @@ class MainWindow(QMainWindow):
         self.speaking_timer.timeout.connect(self.sync_speaking_state)
         self.speaking_timer.start()
         self.screen_timer = QTimer(self)
-        self.screen_timer.setInterval(450)
+        self.screen_timer.setInterval(250)
         self.screen_timer.timeout.connect(self.capture_screen_frame)
 
         self.reload_all()
@@ -602,25 +606,28 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         if not screen:
             return
-        pixmap = screen.grabWindow(0).scaled(640, 360, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        data = QByteArray()
-        buffer = QBuffer(data)
-        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+        source = screen.grabWindow(0)
+        pixmap = source
+        frame = b""
+        for width, height, quality in SCREEN_CAPTURE_PRESETS:
+            pixmap = source.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            frame = self.encode_screen_frame(pixmap, quality)
+            if frame and len(frame) <= SCREEN_FRAME_LIMIT_BYTES:
+                break
+        if not frame or len(frame) > SCREEN_FRAME_LIMIT_BYTES:
             return
-        pixmap.save(buffer, "JPG", 55)
-        frame = bytes(data)
-        if len(frame) > 256_000:
-            pixmap = pixmap.scaled(480, 270, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            data = QByteArray()
-            buffer = QBuffer(data)
-            if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
-                return
-            pixmap.save(buffer, "JPG", 45)
-            frame = bytes(data)
         if self.me:
             self.screen_frames[int(self.me["id"])] = pixmap
         self.screen_client.send_frame(frame)
         self.redraw_voice_stage()
+
+    def encode_screen_frame(self, pixmap: QPixmap, quality: int) -> bytes:
+        data = QByteArray()
+        buffer = QBuffer(data)
+        if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+            return b""
+        pixmap.save(buffer, "JPG", quality)
+        return bytes(data)
 
     def on_screen_frame(self, user_id: int, frame: bytes) -> None:
         pixmap = QPixmap()

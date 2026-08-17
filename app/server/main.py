@@ -20,6 +20,7 @@ from .voice_relay import voice_relay
 
 
 settings = get_settings()
+SCREEN_FRAME_LIMIT_BYTES = 1_500_000
 
 app = FastAPI(title=settings.app_name)
 _rate_limits: dict[str, deque[float]] = defaultdict(deque)
@@ -486,7 +487,7 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str) ->
                 continue
             if not can_send:
                 continue
-            if len(data) > 256_000:
+            if len(data) > SCREEN_FRAME_LIMIT_BYTES:
                 continue
             await screen_relay.broadcast_frame(channel_id, payload.user_id, data)
     except WebSocketDisconnect:

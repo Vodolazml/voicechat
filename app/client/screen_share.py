@@ -9,6 +9,7 @@ import websockets
 
 
 STOP_FRAME = b"__STOP__"
+SCREEN_WS_MAX_BYTES = 2_000_000
 
 
 class ScreenShareClient(QObject):
@@ -60,7 +61,7 @@ class ScreenShareClient(QObject):
                 self.status_changed.emit(f"screen error: {exc}")
 
     async def _socket_loop(self) -> None:
-        async with websockets.connect(self.ws_url, max_size=512_000) as websocket:
+        async with websockets.connect(self.ws_url, max_size=SCREEN_WS_MAX_BYTES) as websocket:
             self.status_changed.emit("screen connected")
             sender = asyncio.create_task(self._send_loop(websocket))
             receiver = asyncio.create_task(self._receive_loop(websocket))

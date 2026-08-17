@@ -233,6 +233,8 @@ class MainWindow(QMainWindow):
         self.screen_sharing = False
         self.screen_quality_key = DEFAULT_SCREEN_QUALITY
         self.screen_fps_interval_ms = DEFAULT_SCREEN_FPS_INTERVAL_MS
+        self.screen_frame_times: list[float] = []
+        self.screen_stream_info = ""
         self.screen_frames: dict[int, QPixmap] = {}
         self.current_voice_states: list[dict] = []
         self.audio_status = "audio idle"
@@ -622,6 +624,8 @@ class MainWindow(QMainWindow):
         if not self.screen_client:
             self.start_screen_client(self.connected_channel_id)
         self.screen_sharing = True
+        self.screen_frame_times.clear()
+        self.screen_stream_info = ""
         self.screen_timer.setInterval(self.screen_fps_interval_ms)
         self.screen_timer.start()
         self.apply_screen_button()
@@ -630,12 +634,16 @@ class MainWindow(QMainWindow):
     def stop_screen_share(self) -> None:
         was_sharing = self.screen_sharing
         self.screen_sharing = False
+        self.screen_stream_info = ""
+        self.screen_frame_times.clear()
         self.screen_timer.stop()
         if self.screen_client and was_sharing:
             self.screen_client.send_frame(STOP_FRAME)
         if self.me:
             self.screen_frames.pop(int(self.me["id"]), None)
         self.apply_screen_button()
+        if self.current_channel and self.connected_channel_id == self.current_channel["id"]:
+            self.channel_status.setText(f"Вы подключены к каналу «{self.current_channel['name']}».")
         self.redraw_voice_stage()
 
     def capture_screen_frame(self) -> None:
@@ -648,17 +656,23 @@ class MainWindow(QMainWindow):
         pixmap = source
         frame = b""
         preset = SCREEN_QUALITY_PRESETS.get(self.screen_quality_key, SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
+        used_quality = 0
         for width, height, quality in preset["captures"]:
             pixmap = source.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             frame = self.encode_screen_frame(pixmap, quality)
             if frame and len(frame) <= SCREEN_FRAME_LIMIT_BYTES:
+                used_quality = quality
                 break
         if not frame or len(frame) > SCREEN_FRAME_LIMIT_BYTES:
             return
         if self.me:
             self.screen_frames[int(self.me["id"])] = pixmap
         self.screen_client.send_frame(frame)
+        self.update_screen_stream_info(pixmap, len(frame), used_quality)
         self.redraw_voice_stage()
+        self.update_screen_status_label()
+        if self.screen_viewer:
+            self.screen_viewer.refresh_view()
 
     def encode_screen_frame(self, pixmap: QPixmap, quality: int) -> bytes:
         data = QByteArray()
@@ -667,6 +681,19 @@ class MainWindow(QMainWindow):
             return b""
         pixmap.save(buffer, "JPG", quality)
         return bytes(data)
+
+    def update_screen_stream_info(self, pixmap: QPixmap, frame_size: int, jpeg_quality: int) -> None:
+        now = monotonic()
+        self.screen_frame_times = [stamp for stamp in self.screen_frame_times if now - stamp <= 1.2]
+        self.screen_frame_times.append(now)
+        actual_fps = len(self.screen_frame_times) / max(0.1, self.screen_frame_times[-1] - self.screen_frame_times[0] or 1)
+        target_fps = max(1, round(1000 / self.screen_fps_interval_ms))
+        preset = SCREEN_QUALITY_PRESETS.get(self.screen_quality_key, SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
+        self.screen_stream_info = (
+            f"{preset['label']} · {pixmap.width()}x{pixmap.height()} · "
+            f"{target_fps} FPS выбрано · {actual_fps:.1f} FPS факт · "
+            f"JPEG {jpeg_quality} · {frame_size // 1024} KB"
+        )
 
     def on_screen_frame(self, user_id: int, frame: bytes) -> None:
         pixmap = QPixmap()
@@ -687,6 +714,10 @@ class MainWindow(QMainWindow):
         self.screen_button.setObjectName("iconActive" if self.screen_sharing else "iconButton")
         self.repolish(self.screen_button)
 
+    def update_screen_status_label(self) -> None:
+        if self.screen_sharing and self.screen_stream_info and self.current_channel and self.connected_channel_id == self.current_channel["id"]:
+            self.channel_status.setText(f"Трансляция: {self.screen_stream_info}")
+
     def open_screen_viewer(self, user_id: int) -> None:
         if user_id not in self.screen_frames:
             return
@@ -697,6 +728,7 @@ class MainWindow(QMainWindow):
             user_id,
             lambda: list(self.current_voice_states),
             lambda: dict(self.screen_frames),
+            lambda selected_user_id: self.screen_stream_info if self.me and selected_user_id == int(self.me["id"]) else "",
             self.initials,
             self.state_text,
         )
@@ -1292,6 +1324,7 @@ class ScreenShareStartDialog(QDialog):
             self.fps_combo.addItem(label, interval_ms)
         fps_index = self.fps_combo.findData(fps_interval_ms)
         self.fps_combo.setCurrentIndex(fps_index if fps_index >= 0 else self.fps_combo.findData(DEFAULT_SCREEN_FPS_INTERVAL_MS))
+        self.fps_combo.currentIndexChanged.connect(self.update_quality_hint)
 
         self.quality_hint = QLabel("")
         self.quality_hint.setObjectName("muted")
@@ -1337,7 +1370,9 @@ class ScreenShareStartDialog(QDialog):
 
     def update_quality_hint(self) -> None:
         preset = SCREEN_QUALITY_PRESETS.get(self.selected_quality_key(), SCREEN_QUALITY_PRESETS[DEFAULT_SCREEN_QUALITY])
-        self.quality_hint.setText(str(preset["tooltip"]))
+        fps = max(1, round(1000 / self.selected_fps_interval_ms()))
+        width, height, quality = preset["captures"][0]
+        self.quality_hint.setText(f"Будет отправляться: {width}x{height}, {fps} FPS, JPEG {quality}. {preset['tooltip']}")
 
     def refresh_preview(self) -> None:
         screen = QApplication.primaryScreen()
@@ -1368,6 +1403,7 @@ class ScreenShareViewer(QDialog):
         selected_user_id: int,
         states_provider: Callable[[], list[dict]],
         frames_provider: Callable[[], dict[int, QPixmap]],
+        stream_info_provider: Callable[[int], str],
         initials_provider: Callable[[str], str],
         state_text_provider: Callable[[dict], str],
     ) -> None:
@@ -1375,6 +1411,7 @@ class ScreenShareViewer(QDialog):
         self.selected_user_id = selected_user_id
         self.states_provider = states_provider
         self.frames_provider = frames_provider
+        self.stream_info_provider = stream_info_provider
         self.initials_provider = initials_provider
         self.state_text_provider = state_text_provider
         self.participants_visible = True
@@ -1456,9 +1493,19 @@ class ScreenShareViewer(QDialog):
         selected_state = next((state for state in states if int(state["user_id"]) == self.selected_user_id), None)
         display_name = selected_state["display_name"] if selected_state else "Трансляция"
         self.title.setText(display_name)
-        self.subtitle.setText("демонстрирует экран" if self.selected_user_id in frames else "трансляция остановлена")
-
+        stream_info = self.stream_info_provider(self.selected_user_id)
+        fallback_info = ""
         pixmap = frames.get(self.selected_user_id)
+        if pixmap:
+            fallback_info = f"{pixmap.width()}x{pixmap.height()}"
+        self.subtitle.setText(
+            stream_info
+            if stream_info
+            else fallback_info
+            if fallback_info
+            else "трансляция остановлена"
+        )
+
         if pixmap:
             target = self.preview.size()
             self.preview.setPixmap(pixmap.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -11,11 +12,28 @@ class ApiError(RuntimeError):
     pass
 
 
+def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765") -> str:
+    raw = value.strip().rstrip("/") or default
+    if "://" not in raw:
+        raw = f"{'http' if raw.startswith(('127.', 'localhost')) else 'https'}://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ApiError("Адрес сервера должен быть вида https://example.com")
+    hostname = parsed.hostname or ""
+    is_local = hostname in {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme == "http" and not is_local:
+        raise ApiError("Для удалённого сервера используйте HTTPS.")
+    return raw
+
+
 @dataclass
 class ApiClient:
     base_url: str = "http://127.0.0.1:8765"
     token: str | None = None
     _client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=8), init=False)
+
+    def set_base_url(self, value: str) -> None:
+        self.base_url = normalize_base_url(value, self.base_url)
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
@@ -55,12 +73,12 @@ class ApiClient:
 
     def voice_ws_url(self, channel_id: int) -> str:
         scheme = "wss" if self.base_url.startswith("https://") else "ws"
-        host = self.base_url.split("://", 1)[1].rstrip("/")
+        host = urlparse(self.base_url).netloc
         return f"{scheme}://{host}/voice/ws/{channel_id}"
 
     def screen_ws_url(self, channel_id: int) -> str:
         scheme = "wss" if self.base_url.startswith("https://") else "ws"
-        host = self.base_url.split("://", 1)[1].rstrip("/")
+        host = urlparse(self.base_url).netloc
         return f"{scheme}://{host}/screen/ws/{channel_id}"
 
     def ws_headers(self) -> dict[str, str]:

@@ -127,6 +127,13 @@ class LoginDialog(QDialog):
     def __init__(self, api: ApiClient) -> None:
         super().__init__()
         self.api = api
+        self.client_settings = load_client_settings()
+        saved_server_url = self.client_settings.get("server_url")
+        if isinstance(saved_server_url, str):
+            try:
+                self.api.set_base_url(saved_server_url)
+            except ApiError:
+                pass
         self.setWindowTitle("Вход")
         self.setMinimumWidth(380)
         self.username = QLineEdit("admin")
@@ -154,14 +161,16 @@ class LoginDialog(QDialog):
         layout.addWidget(self.login_button)
 
     def try_login(self) -> None:
-        self.api.base_url = self.server.text().strip() or self.api.base_url
         try:
+            self.api.set_base_url(self.server.text())
             data = self.api.login(self.username.text().strip(), self.password.text())
             if data.get("must_change_password"):
                 dialog = PasswordDialog(self.api, self.password.text())
                 if dialog.exec() != QDialog.Accepted:
                     self.error.setText("Перед работой нужно сменить временный пароль.")
                     return
+            self.client_settings["server_url"] = self.api.base_url
+            save_client_settings(self.client_settings)
             self.accept()
         except ApiError as exc:
             self.error.setText(str(exc))

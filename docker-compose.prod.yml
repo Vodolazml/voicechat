@@ -1,0 +1,46 @@
+services:
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "UTF-8"
+      VOICECHAT_DATABASE_URL: "sqlite:////data/voicechat.db"
+    expose:
+      - "8765"
+    volumes:
+      - voicechat_data:/data
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.server.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --proxy-headers
+      - --forwarded-allow-ips=*
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    env_file:
+      - .env.production
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  voicechat_data:
+  caddy_data:
+  caddy_config:

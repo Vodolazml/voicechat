@@ -51,6 +51,8 @@ python -m app.client.main
 
 Подробный текущий аудит: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
 
+Экспериментальный деплой на сервер: [docs/EXPERIMENT_DEPLOY.md](docs/EXPERIMENT_DEPLOY.md).
+
 ## Порядок разработки
 
 1. Основа программы: GUI, пространства, каналы, подключение/отключение от каналов, роли и permissions.

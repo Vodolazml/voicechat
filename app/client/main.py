@@ -125,6 +125,181 @@ def icon_button(icon: str, tooltip: str, *, danger: bool = False) -> QToolButton
     return button
 
 
+class UpdateStepsDialog(QDialog):
+    """Диалог с пошаговым процессом обновления."""
+    
+    def __init__(self, api: ApiClient) -> None:
+        super().__init__()
+        self.api = api
+        self.setWindowTitle("Private VoiceChat")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(350)
+        self.update_result: UpdateResult | None = None
+        
+        # Создаем UI
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("Private VoiceChat")
+        title.setObjectName("title")
+        layout.addWidget(title)
+        
+        # Шаг 1: Проверка обновлений
+        self.step1_label = QLabel("Шаг 1/4: Проверка обновлений...")
+        self.step1_label.setObjectName("section")
+        self.step1_progress = QProgressBar()
+        self.step1_progress.setRange(0, 0)  # Индикатор
+        layout.addWidget(self.step1_label)
+        layout.addWidget(self.step1_progress)
+        
+        # Шаг 2: Скачивание
+        self.step2_label = QLabel("Шаг 2/4: Скачивание обновления...")
+        self.step2_label.setObjectName("section")
+        self.step2_progress = QProgressBar()
+        self.step2_progress.setRange(0, 100)
+        layout.addWidget(self.step2_label)
+        layout.addWidget(self.step2_progress)
+        
+        # Шаг 3: Установка
+        self.step3_label = QLabel("Шаг 3/4: Установка обновлений...")
+        self.step3_label.setObjectName("section")
+        self.step3_progress = QProgressBar()
+        self.step3_progress.setRange(0, 100)
+        layout.addWidget(self.step3_label)
+        layout.addWidget(self.step3_progress)
+        
+        # Шаг 4: Перезапуск
+        self.step4_label = QLabel("Шаг 4/4: Перезапуск...")
+        self.step4_label.setObjectName("section")
+        self.step4_progress = QProgressBar()
+        self.step4_progress.setRange(0, 0)
+        layout.addWidget(self.step4_label)
+        layout.addWidget(self.step4_progress)
+        
+        # Сообщение об ошибке / успехе
+        self.result_label = QLabel("")
+        self.result_label.setObjectName("warn")
+        self.result_label.setWordWrap(True)
+        layout.addWidget(self.result_label)
+        
+        # Кнопки
+        self.buttons_layout = QHBoxLayout()
+        self.continue_button = QPushButton("Продолжить без обновления")
+        self.continue_button.setObjectName("secondary")
+        self.continue_button.clicked.connect(self.on_continue_without_update)
+        self.ok_button = QPushButton("OK")
+        self.ok_button.setVisible(False)
+        self.ok_button.clicked.connect(self.accept)
+        
+        self.buttons_layout.addStretch()
+        self.buttons_layout.addWidget(self.continue_button)
+        self.buttons_layout.addWidget(self.ok_button)
+        layout.addLayout(self.buttons_layout)
+    
+    def on_continue_without_update(self) -> None:
+        self.update_result = UpdateResult(
+            success=True, step="skipped",
+            message="Продолжение работы без обновления",
+        )
+        self.accept()
+    
+    def run_update_workflow(self) -> bool:
+        """Запускает полный цикл обновления. Возвращает True если нужно продолжить."""
+        from .auto_updater import UpdateWorkflow
+        
+        workflow = UpdateWorkflow(progress_callback=self.on_progress)
+        
+        # Шаг 1: Проверка
+        self.step1_label.setText("Шаг 1/4: Проверка обновлений...")
+        self.step1_progress.setValue(50)
+        QApplication.processEvents()
+        
+        result = workflow.check(self.api.base_url)
+        
+        if not result.update_available or result.step == "skipped":
+            self.step1_label.setText(f"✓ {result.message}")
+            self.step1_progress.setValue(100)
+            self.result_label.setText("Установлена последняя версия. Можно продолжить.")
+            self.result_label.setObjectName("ok")
+            self.ok_button.setVisible(True)
+            self.continue_button.setVisible(False)
+            return True
+        
+        # Обновление найдено - скачиваем
+        self.step1_label.setText(f"✓ Найдена новая версия: {result.new_version}")
+        self.step1_progress.setValue(100)
+        
+        self.step2_label.setText("Шаг 2/4: Скачивание обновления...")
+        self.step2_progress.setValue(0)
+        QApplication.processEvents()
+        
+        download_result = workflow.download(result)
+        if not download_result.success:
+            self.result_label.setText(f"Ошибка скачивания: {download_result.message}")
+            self.ok_button.setVisible(True)
+            return False
+        
+        # Установка
+        self.step2_label.setText("✓ Скачано")
+        self.step2_progress.setValue(100)
+        self.step3_label.setText("Шаг 3/4: Установка обновлений...")
+        self.step3_progress.setValue(0)
+        QApplication.processEvents()
+        
+        install_result = workflow.install(download_result.download_path)
+        if not install_result.success:
+            self.result_label.setText(f"Ошибка установки: {install_result.message}")
+            if install_result.rollback_path:
+                self.continue_button.setVisible(True)
+                self.continue_button.setText("Откатить и продолжить")
+                self.continue_button.clicked.connect(
+                    lambda: self.on_rollback(install_result.rollback_path)
+                )
+            return False
+        
+        self.step3_label.setText("✓ Установлено")
+        self.step3_progress.setValue(100)
+        
+        # Перезапуск
+        self.step4_label.setText("Шаг 4/4: Перезапуск...")
+        QApplication.processEvents()
+        
+        verify_result = workflow.verify_and_restart(result.new_version, result.old_version)
+        if verify_result.success:
+            self.result_label.setText(f"✓ {verify_result.message}")
+            self.result_label.setObjectName("ok")
+            self.accept()
+            return True
+        else:
+            self.result_label.setText(f"Ошибка перезапуска: {verify_result.message}")
+            self.continue_button.setVisible(True)
+            self.continue_button.setText("Продолжить на старой версии")
+            return False
+    
+    def on_rollback(self, rollback_path: str) -> None:
+        from .auto_updater import UpdateWorkflow
+        workflow = UpdateWorkflow()
+        result = workflow.rollback(Path(rollback_path))
+        if result.success:
+            self.result_label.setText(f"Откат выполнен: {result.message}")
+            self.result_label.setObjectName("ok")
+            self.ok_button.setVisible(True)
+    
+    def on_progress(self, progress: "UpdateProgress") -> None:
+        """Обработчик прогресса обновления."""
+        if progress.step == "checking":
+            self.step1_label.setText(f"Шаг 1/4: {progress.message}")
+            self.step1_progress.setValue(int(progress.percentage))
+        elif progress.step == "downloading":
+            self.step2_label.setText(f"Шаг 2/4: {progress.message}")
+            self.step2_progress.setValue(int(progress.percentage))
+        elif progress.step == "installing":
+            self.step3_label.setText(f"Шаг 3/4: {progress.message}")
+            self.step3_progress.setValue(int(progress.percentage))
+        elif progress.step == "verifying":
+            self.step4_label.setText(f"Шаг 4/4: {progress.message}")
+        QApplication.processEvents()
+
+
 class LoginDialog(QDialog):
     def __init__(self, api: ApiClient) -> None:
         super().__init__()
@@ -140,9 +315,13 @@ class LoginDialog(QDialog):
                 self.api.set_base_url(configured_server_url, allow_insecure_http=self.packaged_config.allow_insecure_http)
             except ApiError:
                 pass
+        
+        # Загружаем запомненный логин
+        remembered_username = self.client_settings.get("remembered_username", "admin")
+        
         self.setWindowTitle("Вход")
         self.setMinimumWidth(380)
-        self.username = QLineEdit("admin")
+        self.username = QLineEdit(remembered_username)
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         self.password.setPlaceholderText("Пароль")
@@ -153,6 +332,8 @@ class LoginDialog(QDialog):
         self.error = QLabel("")
         self.error.setObjectName("warn")
         self.update_checked_for = ""
+        self.remember_me_checkbox = QCheckBox("Запомнить меня")
+        self.remember_me_checkbox.setChecked(self.client_settings.get("remember_me", False))
 
         form = QFormLayout()
         form.addRow("Сервер", self.server)
@@ -167,6 +348,13 @@ class LoginDialog(QDialog):
         title.setObjectName("title")
         layout.addWidget(title)
         layout.addLayout(form)
+        
+        # Чекбокс "Запомнить меня"
+        remember_layout = QHBoxLayout()
+        remember_layout.addWidget(self.remember_me_checkbox)
+        remember_layout.addStretch()
+        layout.addLayout(remember_layout)
+        
         layout.addWidget(self.error)
         layout.addWidget(self.login_button)
 
@@ -187,6 +375,15 @@ class LoginDialog(QDialog):
                 if dialog.exec() != QDialog.Accepted:
                     self.error.setText("Перед работой нужно сменить временный пароль.")
                     return
+            # Сохраняем "запомнить меня"
+            if self.remember_me_checkbox.isChecked():
+                self.client_settings["remembered_username"] = self.username.text().strip()
+                self.client_settings["remember_me"] = True
+                # В будущем здесь можно сохранить encrypted token
+            else:
+                self.client_settings.pop("remembered_username", None)
+                self.client_settings.pop("remember_me", None)
+            
             if not self.packaged_config.lock_server_url:
                 self.client_settings["server_url"] = self.api.base_url
             save_client_settings(self.client_settings)

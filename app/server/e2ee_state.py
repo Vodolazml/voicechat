@@ -35,7 +35,7 @@ class E2EEState:
         self._public_keys: dict[int, PublicIdentity] = {}
         self._sender_keys: dict[int, dict[int, SenderKeySet]] = {}
         self._lock = RLock()
-        self._last_cleanup: float = field(default_factory=monotonic)
+        self._last_cleanup = monotonic()
 
     def set_public_key(self, user_id: int, public_key: str, fingerprint: str) -> None:
         with self._lock:

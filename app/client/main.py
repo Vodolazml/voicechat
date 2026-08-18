@@ -885,6 +885,8 @@ class MainWindow(QMainWindow):
             self.voice_audio = VoiceAudioClient(
                 ws_url=self.api.voice_ws_url(channel_id),
                 ws_headers=self.api.ws_headers(),
+                channel_id=channel_id,
+                user_id=int(self.me["id"]) if self.me else 0,
                 outgoing_media_key=outgoing_key,
                 media_key_for_sender=lambda user_id: self.media_key_for_sender(channel_id, user_id),
                 is_muted=lambda: self.muted,

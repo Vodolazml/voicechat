@@ -126,14 +126,14 @@ dist\PrivateVoiceChat\client_config.json
 Потом архивируйте папку:
 
 ```powershell
-Compress-Archive -Path dist\PrivateVoiceChat\* -DestinationPath dist\PrivateVoiceChat-0.1.2-ip.zip -Force
+Compress-Archive -Path dist\PrivateVoiceChat\* -DestinationPath dist\PrivateVoiceChat-0.1.3-ip.zip -Force
 ```
 
 ## 5. Что дать двум пользователям
 
 Передайте каждому:
 
-- архив `PrivateVoiceChat-0.1.2-ip.zip`;
+- архив `PrivateVoiceChat-0.1.3-ip.zip`;
 - логин;
 - временный пароль.
 
@@ -155,19 +155,19 @@ mkdir -p ~/voicechat/downloads
 С компьютера разработчика загрузите архив:
 
 ```powershell
-scp dist\PrivateVoiceChat-0.1.2-ip.zip root@72.35.246.230:/root/voicechat/downloads/
+scp dist\PrivateVoiceChat-0.1.3-ip.zip root@72.35.246.230:/root/voicechat/downloads/
 ```
 
 После перезапуска контейнера файл будет доступен по ссылке:
 
 ```text
-http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.2-ip.zip
+http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.3-ip.zip
 ```
 
 Для автообновления можно прописать в `.env.ip`:
 
 ```env
-VOICECHAT_CLIENT_DOWNLOAD_URL=http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.2-ip.zip
+VOICECHAT_CLIENT_DOWNLOAD_URL=http://72.35.246.230:8765/downloads/PrivateVoiceChat-0.1.3-ip.zip
 VOICECHAT_CLIENT_DOWNLOAD_SHA256=<sha256 архива>
 ```
 

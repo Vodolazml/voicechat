@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -270,32 +271,29 @@ def install_update(
         # Распаковываем zip в временную папку
         with tempfile.TemporaryDirectory(prefix="pvchat_setup_") as temp_dir:
             temp_path = Path(temp_dir)
-            
-            progress.message = "Распаковка файлов..."
-            if progress_callback:
-                progress_callback(progress)
-            
-            import zipfile
-            with zipfile.ZipFile(download_path, 'r') as zf:
-                zf.extractall(temp_path)
-            
-            # Ищем setup.exe
-            setup_files = list(temp_path.glob("*setup*.exe")) + list(temp_path.glob("*.exe"))
-            if not setup_files:
-                return UpdateResult(
-                    success=False,
-                    step="error",
-                    message="Не найден setup.exe в пакете обновления",
-                    error="No setup.exe found",
-                )
-            
-            setup_exe = setup_files[0]
-            
-            # Создаем бэкап текущей установки
-            progress.message = "Создание резервной копии..."
-            if progress_callback:
-                progress_callback(progress)
-            
+
+            if download_path.suffix.lower() == ".exe":
+                setup_exe = download_path
+            else:
+                progress.message = "Unpacking update files..."
+                if progress_callback:
+                    progress_callback(progress)
+
+                with zipfile.ZipFile(download_path, "r") as zf:
+                    zf.extractall(temp_path)
+
+                setup_files = list(temp_path.glob("*setup*.exe")) + list(temp_path.glob("*.exe"))
+                if not setup_files:
+                    return UpdateResult(
+                        success=False,
+                        step="error",
+                        message="setup.exe not found in update package",
+                        error="No setup.exe found",
+                    )
+
+                setup_exe = setup_files[0]
+
+            # Create a backup of the current installation.
             backup_dir = Path.home() / ".private_voicechat" / "backup"
             backup_dir.mkdir(parents=True, exist_ok=True)
             

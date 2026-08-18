@@ -1,115 +1,77 @@
 @echo off
-REM Скрипт сборки PrivateVoiceChat установщика
-REM Требования: Python 3.12+, Inno Setup 6+ (https://jrsoftware.org/isdl.php)
-REM                PyInstaller (pip install pyinstaller)
-
 setlocal enabledelayedexpansion
 
-echo ========================================
-echo PrivateVoiceChat - Сборка установщика
-echo ========================================
-echo.
+set "ROOT=%~dp0.."
+pushd "%ROOT%" || exit /b 1
 
-REM Проверка Inno Setup
+for /f "usebackq delims=" %%a in (`python -c "from app.version import APP_VERSION; print(APP_VERSION)"`) do set "VERSION=%%a"
+if "%VERSION%"=="" (
+    echo Failed to read app version.
+    popd
+    exit /b 1
+)
+
+if "%VOICECHAT_RELEASE_SERVER_URL%"=="" set "VOICECHAT_RELEASE_SERVER_URL=http://72.35.246.230:8765"
+
+set "ISCC="
 where iscc >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ОШИБКА] Inno Setup не найден!
-    echo Установите Inno Setup с https://jrsoftware.org/isdl.php
-    pause
+if not errorlevel 1 set "ISCC=iscc"
+if "%ISCC%"=="" if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if "%ISCC%"=="" (
+    echo Inno Setup compiler is not installed or is not in PATH.
+    echo Install Inno Setup 6, then run this script again.
+    popd
     exit /b 1
 )
 
-REM Проверка PyInstaller
-pip show pyinstaller >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ИНФО] Установка PyInstaller...
-    pip install pyinstaller
-)
+python -m pip show pyinstaller >nul 2>&1
+if errorlevel 1 python -m pip install pyinstaller
 
-REM Получаем версию из app/version.py
-for /f "tokens=*" %%a in ('python -c "from app.version import APP_VERSION; print(APP_VERSION)"') do set VERSION=%%a
-
-if "!VERSION!" == "" (
-    echo [ОШИБКА] Не удалось получить версию из app/version.py
-    pause
+echo Building PrivateVoiceChat %VERSION%
+python -m PyInstaller -y --clean PrivateVoiceChat.spec
+if errorlevel 1 (
+    echo PyInstaller failed.
+    popd
     exit /b 1
 )
 
-echo [ИНФО] Версия приложения: !VERSION!
-echo.
-
-REM Создаем временную папку для сборки
-set BUILD_DIR=build\temp-build-!VERSION!
-if exist "!BUILD_DIR!" rmdir /s /q "!BUILD_DIR!"
-mkdir "!BUILD_DIR!"
-
-echo [1/6] Создание portable версии...
-pyinstaller --onefile ^
-    --name PrivateVoiceChat ^
-    --add-data "app\client\client_config.example.json;app\client" ^
-    --add-data "app\version.py;app" ^
-    --icon=NONE ^
-    --noconsole ^
-    --distdir "!BUILD_DIR!\portable" ^
-    run_client.py
-
-if %errorlevel% neq 0 (
-    echo [ОШИБКА] PyInstaller завершился с ошибкой
-    pause
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$cfg=[ordered]@{server_url=$env:VOICECHAT_RELEASE_SERVER_URL;lock_server_url=$true;allow_insecure_http=$true}|ConvertTo-Json; Set-Content -Encoding UTF8 -Path 'dist\PrivateVoiceChat\client_config.json' -Value $cfg"
+if errorlevel 1 (
+    echo Failed to write client_config.json.
+    popd
     exit /b 1
 )
 
-echo [2/6] Копирование файлов для установщика...
-mkdir "!BUILD_DIR!\portable-files"
-xcopy "!BUILD_DIR!\portable\*" "!BUILD_DIR!\portable-files\" /E /I /Y
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "Set-Content -Encoding UTF8 -Path 'dist\PrivateVoiceChat\version.txt' -Value '%VERSION%'"
 
-REM Создаем version.txt
-echo !VERSION! > "!BUILD_DIR!\portable-files\version.txt"
-
-echo [3/6] Создание ZIP пакета для автообновления...
-set ZIP_FILE=dist\PrivateVoiceChat-!VERSION!.zip
-if exist "!ZIP_FILE!" del /q "!ZIP_FILE!"
-
-cd /d "!BUILD_DIR!\portable-files"
-powershell -Command "Compress-Archive -Path * -DestinationPath '!ZIP_FILE!' -Force"
-cd /d %~dp0
-
-echo [4/6] Создание установщика...
-set SETUP_FILE=dist\PrivateVoiceChat-!VERSION!-setup.exe
-if exist "!SETUP_FILE!" del /q "!SETUP_FILE!"
-
-REM Модифицируем setup.iss для текущей версии
-set ISS_FILE=build\setup-temp.iss
-powershell -Command "(Get-Content 'build\setup.iss') -replace '1\.0\.0', '!VERSION!' | Set-Content '!ISS_FILE!'"
-
-iscc "!ISS_FILE!" /Odist /F"PrivateVoiceChat-!VERSION!-setup"
-
-if %errorlevel% neq 0 (
-    echo [ОШИБКА] Inno Setup завершился с ошибкой
-    pause
+set "PORTABLE_ZIP=dist\PrivateVoiceChat-%VERSION%-ip.zip"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop'; for ($i=1; $i -le 5; $i++) { try { Compress-Archive -Path 'dist\PrivateVoiceChat\*' -DestinationPath '%PORTABLE_ZIP%' -Force; exit 0 } catch { if ($i -eq 5) { throw }; Start-Sleep -Seconds 2 } }"
+if errorlevel 1 (
+    echo Failed to create portable zip.
+    popd
     exit /b 1
 )
 
-echo [5/6] Генерация SHA256 хэшей...
-powershell -Command "Get-Hash -Algorithm SHA256 -FilePath 'dist\PrivateVoiceChat-!VERSION!.zip' | Format-Hex | Select-Object -First 1 | ForEach-Object { $_.Hash }" > dist\PrivateVoiceChat-!VERSION!.zip.sha256
+"%ISCC%" /DMyAppVersion=%VERSION% build\setup.iss
+if errorlevel 1 (
+    echo Inno Setup failed.
+    popd
+    exit /b 1
+)
 
-powershell -Command "Get-Hash -Algorithm SHA256 -FilePath 'dist\PrivateVoiceChat-!VERSION!-setup.exe' | Format-Hex | Select-Object -First 1 | ForEach-Object { $_.Hash }" > dist\PrivateVoiceChat-!VERSION!-setup.exe.sha256
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "(Get-FileHash '%PORTABLE_ZIP%' -Algorithm SHA256).Hash | Set-Content -Encoding ascii '%PORTABLE_ZIP%.sha256'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "(Get-FileHash 'dist\PrivateVoiceChat-%VERSION%-setup.exe' -Algorithm SHA256).Hash | Set-Content -Encoding ascii 'dist\PrivateVoiceChat-%VERSION%-setup.exe.sha256'"
 
-echo [6/6] Очистка временных файлов...
-rmdir /s /q "!BUILD_DIR!"
-del /q build\setup-temp.iss >nul 2>&1
+echo.
+echo Build complete:
+echo   dist\PrivateVoiceChat-%VERSION%-setup.exe
+echo   dist\PrivateVoiceChat-%VERSION%-setup.exe.sha256
+echo   %PORTABLE_ZIP%
+echo   %PORTABLE_ZIP%.sha256
 
-echo.
-echo ========================================
-echo Сборка завершена успешно!
-echo ========================================
-echo.
-echo Файлы в dist\:
-dir /b dist\*
-echo.
-echo Для деплоя загрузите в папку /downloads на сервере:
-echo   - PrivateVoiceChat-!VERSION!.zip
-echo   - PrivateVoiceChat-!VERSION!-setup.exe
-echo   - *.sha256 файлы (для верификации)
-echo.
-pause
+popd

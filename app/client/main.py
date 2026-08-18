@@ -1326,7 +1326,16 @@ class MainWindow(QMainWindow):
         self.stage_members_layout.addWidget(card, index // 4, index % 4)
 
     def show_member_menu(self, parent: QWidget, state: dict, point) -> None:
+        """Показывает контекстное меню участника с регулировкой громкости.
+        
+        Меню сохраняется как атрибут self._current_member_menu чтобы предотвратить
+        premature garbage collection Qt объекта. Без этого QMenu уничтожается
+        сразу после закрытия и slider перестает работать.
+        """
         menu = QMenu(parent)
+        # Сохраняем ссылку чтобы предотвратить GC
+        self._current_member_menu = menu
+        
         user_id = int(state["user_id"])
         muted_locally = user_id in self.local_mutes
         mute_action = QAction("Включить локально" if muted_locally else "Заглушить локально", menu)
@@ -1347,6 +1356,9 @@ class MainWindow(QMainWindow):
         slider_action.setDefaultWidget(slider)
         menu.addAction(slider_action)
         menu.exec(parent.mapToGlobal(point))
+        
+        # Очищаем ссылку после закрытия меню
+        self._current_member_menu = None
 
     def toggle_local_mute(self, user_id: int) -> None:
         if user_id in self.local_mutes:

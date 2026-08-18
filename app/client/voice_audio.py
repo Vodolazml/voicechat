@@ -398,7 +398,7 @@ class VoiceAudioClient:
                 pcm = decrypt_frame(media_key, encrypted_data, aad)
             except ValueError:
                 continue
-            volume = max(0, min(200, self.local_volume(user_id)))
+            volume = max(0, min(200, self.local_volume(sender_id)))
             if volume != 100:
                 pcm = audioop.mul(pcm, SAMPLE_WIDTH, volume / 100)
             self._put_latest(self.playback_queue, pcm)

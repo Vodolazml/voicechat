@@ -69,6 +69,13 @@ async def security_middleware(request: Request, call_next):
 
 
 def rate_limit(key: str, limit: int, window_seconds: int) -> None:
+    """Простой rate limiter на основе sliding window.
+    
+ Args:
+        key: уникальный ключ ограничения (например, 'login:192.168.1.1:username')
+        limit: максимальное количество запросов за окно
+        window_seconds: размер окна в секундах
+    """
     now = monotonic()
     bucket = _rate_limits[key]
     while bucket and now - bucket[0] > window_seconds:
@@ -76,6 +83,17 @@ def rate_limit(key: str, limit: int, window_seconds: int) -> None:
     if len(bucket) >= limit:
         raise HTTPException(status_code=429, detail="Слишком много действий. Попробуйте позже.")
     bucket.append(now)
+
+
+def get_rate_limit_remaining(key: str, window_seconds: int) -> int:
+    """Возвращает оставшееся количество запросов для ключа."""
+    now = monotonic()
+    bucket = _rate_limits.get(key)
+    if not bucket:
+        return 0
+    while bucket and now - bucket[0] > window_seconds:
+        bucket.popleft()
+    return max(0, len(bucket))
 
 
 def websocket_origin_allowed(websocket: WebSocket) -> bool:
@@ -260,6 +278,9 @@ def create_user(
     actor: models.User = Depends(require_permission("users.create")),
     db: Session = Depends(get_db),
 ) -> models.User:
+    # Rate limiting для создания пользователей: максимум 10 в минуту с одного IP
+    client_ip = request.client.host if request.client else "local"
+    rate_limit(f"create_user:{client_ip}", 10, 60)
     validate_password_strength(payload.temporary_password)
     role_name = "Owner/System Admin" if payload.is_admin else "User"
     role = db.scalar(select(models.Role).where(models.Role.name == role_name))
@@ -558,6 +579,11 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = ""
         await websocket.close(code=1008, reason="bad origin")
         return
 
+    # Rate limiting для WebSocket подключений
+    ws_client = websocket.client
+    client_host = ws_client.host if ws_client else "unknown"
+    rate_limit(f"ws_voice:{client_host}", 5, 60)
+
     with SessionLocal() as db:
         try:
             user = user_from_token(db, websocket_token(websocket, token))
@@ -607,6 +633,11 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str = "
     if not websocket_origin_allowed(websocket):
         await websocket.close(code=1008, reason="bad origin")
         return
+
+    # Rate limiting для screen share WebSocket
+    ws_client = websocket.client
+    client_host = ws_client.host if ws_client else "unknown"
+    rate_limit(f"ws_screen:{client_host}", 5, 60)
 
     can_send = False
     with SessionLocal() as db:

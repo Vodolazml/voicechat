@@ -20,10 +20,18 @@ CHANNELS = 1
 SAMPLE_WIDTH = 2
 BLOCKSIZE = 320
 FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
-VOICE_AAD = b"private-voicechat:voice:v1"
 SPEAKING_RMS = 450
 SPEAKING_HOLD_SECONDS = 0.35
 MIC_TEST_DELAY_FRAMES = 18
+
+
+def make_voice_aad(channel_id: int, sender_id: int, recipient_id: int) -> bytes:
+    """Создаёт AAD, привязанный к channel_id, sender_id и recipient_id.
+    
+    Это предотвращает пересылку зашифрованных кадров между разными каналами
+    или между разными парами отправитель/получатель.
+    """
+    return f"private-voicechat:voice:v2:{channel_id}:{sender_id}:{recipient_id}".encode()
 
 
 @dataclass(frozen=True)
@@ -222,6 +230,8 @@ class VoiceAudioClient:
         *,
         ws_url: str,
         ws_headers: dict[str, str],
+        channel_id: int,
+        user_id: int,
         outgoing_media_key: bytes,
         media_key_for_sender: Callable[[int], bytes | None],
         is_muted: Callable[[], bool],
@@ -236,6 +246,8 @@ class VoiceAudioClient:
     ) -> None:
         self.ws_url = ws_url
         self.ws_headers = ws_headers
+        self.channel_id = channel_id
+        self.user_id = user_id
         self.outgoing_media_key = outgoing_media_key
         self.media_key_for_sender = media_key_for_sender
         self.is_muted = is_muted
@@ -351,7 +363,12 @@ class VoiceAudioClient:
             except queue.Empty:
                 await asyncio.sleep(0.004)
                 continue
-            await websocket.send(encrypt_frame(self.outgoing_media_key, frame, VOICE_AAD))
+            # AAD привязан к channel_id и user_id для защиты от пересылки между каналами
+            aad = make_voice_aad(self.channel_id, self.user_id, 0)
+            encrypted = encrypt_frame(self.outgoing_media_key, frame, aad)
+            # Добавляем sender_id в начало пакета
+            packet = self.user_id.to_bytes(4, "big") + encrypted
+            await websocket.send(packet)
 
     async def _receive_loop(self, websocket) -> None:
         async for message in websocket:
@@ -359,14 +376,26 @@ class VoiceAudioClient:
                 break
             if not isinstance(message, bytes) or len(message) <= 4:
                 continue
-            user_id = int.from_bytes(message[:4], "big")
-            if self.is_deafened() or self.is_locally_muted(user_id):
+            sender_id = int.from_bytes(message[:4], "big")
+            # Проверяем что пакет не от нас самих
+            if sender_id == self.user_id:
                 continue
-            media_key = self.media_key_for_sender(user_id)
+            
+            # Извлекаем зашифрованную часть (пропускаем 4 байта sender_id)
+            encrypted_data = message[4:]
+            
+            if len(encrypted_data) <= len(b"PVCM1") + 12:
+                continue
+            
+            if self.is_deafened() or self.is_locally_muted(sender_id):
+                continue
+            media_key = self.media_key_for_sender(sender_id)
             if not media_key:
                 continue
+            # AAD привязан к channel_id, sender_id и recipient_id
+            aad = make_voice_aad(self.channel_id, sender_id, self.user_id)
             try:
-                pcm = decrypt_frame(media_key, message[4:], VOICE_AAD)
+                pcm = decrypt_frame(media_key, encrypted_data, aad)
             except ValueError:
                 continue
             volume = max(0, min(200, self.local_volume(user_id)))

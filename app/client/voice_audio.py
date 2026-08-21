@@ -6,6 +6,7 @@ import queue
 import re
 import threading
 from collections import deque
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from time import monotonic
 from collections.abc import Callable
@@ -266,6 +267,8 @@ class VoiceAudioClient:
         self.playback_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._websocket = None
         self._input_stream: sd.RawInputStream | None = None
         self._output_stream: sd.RawOutputStream | None = None
         self._stream_lock = threading.RLock()
@@ -280,6 +283,9 @@ class VoiceAudioClient:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._reset_capture_state()
+        self._drain(self.capture_queue)
+        self._drain(self.playback_queue)
         self._input_stream, self._output_stream = self._open_streams(self.input_device, self.output_device)
         self._thread = threading.Thread(target=self._run_loop, name="voice-audio", daemon=True)
         self._thread.start()
@@ -338,6 +344,7 @@ class VoiceAudioClient:
 
     def stop(self) -> None:
         self._stop.set()
+        self._close_active_websocket()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         with self._stream_lock:
@@ -348,6 +355,7 @@ class VoiceAudioClient:
         self._drain(self.capture_queue)
         self._drain(self.playback_queue)
         self.consume_audible_users()
+        self._reset_capture_state()
         self._status("audio disconnected")
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:
@@ -400,20 +408,32 @@ class VoiceAudioClient:
         outdata[:] = data[: len(outdata)]
 
     def _run_loop(self) -> None:
-        asyncio.run(self._socket_loop())
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        try:
+            loop.run_until_complete(self._socket_loop())
+        finally:
+            self._loop = None
+            loop.close()
 
     async def _socket_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 async with websockets.connect(self.ws_url, max_size=8192, additional_headers=self.ws_headers) as websocket:
+                    self._websocket = websocket
                     self._status("audio connected")
                     sender = asyncio.create_task(self._send_loop(websocket))
                     receiver = asyncio.create_task(self._receive_loop(websocket))
-                    done, pending = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    for task in done:
-                        task.result()
+                    try:
+                        done, pending = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED)
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        for task in done:
+                            task.result()
+                    finally:
+                        if self._websocket is websocket:
+                            self._websocket = None
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -512,9 +532,29 @@ class VoiceAudioClient:
         if self.status_callback:
             self.status_callback(text)
 
+    async def _close_websocket_async(self) -> None:
+        websocket = self._websocket
+        if websocket is not None:
+            await websocket.close()
+
+    def _close_active_websocket(self) -> None:
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._close_websocket_async(), loop)
+            future.result(timeout=1)
+        except (RuntimeError, FutureTimeoutError):
+            pass
+
     def _drain(self, target: queue.Queue[bytes]) -> None:
         while True:
             try:
                 target.get_nowait()
             except queue.Empty:
                 return
+
+    def _reset_capture_state(self) -> None:
+        self.speaking = False
+        self._last_voice_at = 0.0
+        self._preroll_frames.clear()

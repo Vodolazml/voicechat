@@ -23,6 +23,7 @@ FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
 SPEAKING_RMS = 450
 SPEAKING_HOLD_SECONDS = 0.35
 MIC_TEST_DELAY_FRAMES = 18
+RECONNECT_DELAY_SECONDS = 0.75
 
 
 def make_voice_aad(channel_id: int, sender_id: int, recipient_id: int) -> bytes:
@@ -265,6 +266,7 @@ class VoiceAudioClient:
         self._thread: threading.Thread | None = None
         self._input_stream: sd.RawInputStream | None = None
         self._output_stream: sd.RawOutputStream | None = None
+        self._stream_lock = threading.RLock()
         self.speaking = False
         self._last_voice_at = 0.0
         self._audible_users: set[int] = set()
@@ -275,41 +277,71 @@ class VoiceAudioClient:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._input_stream = sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=BLOCKSIZE,
-            device=self.input_device,
-            callback=self._capture_callback,
-        )
-        self._output_stream = sd.RawOutputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=BLOCKSIZE,
-            device=self.output_device,
-            callback=self._playback_callback,
-        )
-        self._input_stream.start()
-        self._output_stream.start()
+        self._input_stream, self._output_stream = self._open_streams(self.input_device, self.output_device)
         self._thread = threading.Thread(target=self._run_loop, name="voice-audio", daemon=True)
         self._thread.start()
         self._status("audio connected")
+
+    def _open_streams(
+        self,
+        input_device: int | None,
+        output_device: int | None,
+    ) -> tuple[sd.RawInputStream, sd.RawOutputStream]:
+        input_stream: sd.RawInputStream | None = None
+        output_stream: sd.RawOutputStream | None = None
+        try:
+            input_stream = sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=BLOCKSIZE,
+                device=input_device,
+                callback=self._capture_callback,
+            )
+            output_stream = sd.RawOutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                blocksize=BLOCKSIZE,
+                device=output_device,
+                callback=self._playback_callback,
+            )
+            input_stream.start()
+            output_stream.start()
+            return input_stream, output_stream
+        except Exception:
+            self._close_streams(input_stream, output_stream)
+            raise
+
+    def restart_devices(self, input_device: int | None, output_device: int | None) -> None:
+        with self._stream_lock:
+            new_input, new_output = self._open_streams(input_device, output_device)
+            old_input, old_output = self._input_stream, self._output_stream
+            self._input_stream, self._output_stream = new_input, new_output
+            self.input_device = input_device
+            self.output_device = output_device
+        self._close_streams(old_input, old_output)
+        self._status("audio devices changed")
+
+    def _close_streams(self, *streams) -> None:
+        for stream in streams:
+            if not stream:
+                continue
+            try:
+                stream.stop()
+                stream.close()
+            except sd.PortAudioError:
+                pass
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
-        for stream in (self._input_stream, self._output_stream):
-            if stream:
-                try:
-                    stream.stop()
-                    stream.close()
-                except sd.PortAudioError:
-                    pass
-        self._input_stream = None
-        self._output_stream = None
+        with self._stream_lock:
+            input_stream, output_stream = self._input_stream, self._output_stream
+            self._input_stream = None
+            self._output_stream = None
+        self._close_streams(input_stream, output_stream)
         self._drain(self.capture_queue)
         self._drain(self.playback_queue)
         self.consume_audible_users()
@@ -345,20 +377,27 @@ class VoiceAudioClient:
         outdata[:] = data[: len(outdata)]
 
     def _run_loop(self) -> None:
-        try:
-            asyncio.run(self._socket_loop())
-        except Exception as exc:
-            self._status(f"audio error: {exc}")
+        asyncio.run(self._socket_loop())
 
     async def _socket_loop(self) -> None:
-        async with websockets.connect(self.ws_url, max_size=8192, additional_headers=self.ws_headers) as websocket:
-            sender = asyncio.create_task(self._send_loop(websocket))
-            receiver = asyncio.create_task(self._receive_loop(websocket))
-            done, pending = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            for task in done:
-                task.result()
+        while not self._stop.is_set():
+            try:
+                async with websockets.connect(self.ws_url, max_size=8192, additional_headers=self.ws_headers) as websocket:
+                    self._status("audio connected")
+                    sender = asyncio.create_task(self._send_loop(websocket))
+                    receiver = asyncio.create_task(self._receive_loop(websocket))
+                    done, pending = await asyncio.wait([sender, receiver], return_when=asyncio.FIRST_COMPLETED)
+                    for task in pending:
+                        task.cancel()
+                    for task in done:
+                        task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self._stop.is_set():
+                    break
+                self._status(f"audio reconnecting: {exc}")
+                await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
     async def _send_loop(self, websocket) -> None:
         while not self._stop.is_set():

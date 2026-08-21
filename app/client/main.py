@@ -1304,12 +1304,19 @@ class MainWindow(QMainWindow):
         self.update_audio_device_label()
         device_changed = previous_devices != (self.input_device_id, self.output_device_id)
         if self.connected_channel_id and device_changed:
-            channel_id = self.connected_channel_id
-            self.stop_audio()
-            try:
-                self.start_audio(channel_id)
-            except RuntimeError as exc:
-                self.show_error(str(exc))
+            if self.voice_audio:
+                try:
+                    self.voice_audio.restart_devices(self.input_device_id, self.output_device_id)
+                except Exception as exc:
+                    self.input_device_id, self.output_device_id = previous_devices
+                    self.save_preferences()
+                    self.update_audio_device_label()
+                    self.show_error(f"Не удалось переключить аудиоустройство: {exc}")
+            else:
+                try:
+                    self.start_audio(self.connected_channel_id)
+                except RuntimeError as exc:
+                    self.show_error(str(exc))
 
     def update_audio_device_label(self) -> None:
         input_name = device_display_name(self.input_device_id) if self.input_device_id is not None else "системный микрофон"

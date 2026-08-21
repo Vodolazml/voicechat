@@ -135,6 +135,51 @@ def test_noise_settings_do_not_restart_active_audio(tmp_path, monkeypatch) -> No
     app.processEvents()
 
 
+def test_device_settings_restart_streams_without_rejoining_voice(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    app = QApplication.instance() or QApplication([])
+    calls = {}
+
+    class FakeAudio:
+        def restart_devices(self, input_device_id, output_device_id) -> None:
+            calls["restart_devices"] = (input_device_id, output_device_id)
+
+        def stop(self) -> None:
+            raise AssertionError("full audio restart is not expected")
+
+    class FakeDialog:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.Accepted
+
+        def selected_devices(self) -> tuple[int, int]:
+            return 11, 12
+
+        def noise_suppression_enabled(self) -> bool:
+            return True
+
+        def selected_threshold(self) -> int:
+            return 500
+
+    monkeypatch.setattr("app.client.main.AudioSettingsDialog", FakeDialog)
+    window = MainWindow(FakeApi())
+    window.connected_channel_id = 7
+    window.voice_audio = FakeAudio()
+    monkeypatch.setattr(window, "start_audio", lambda channel_id: (_ for _ in ()).throw(AssertionError("full audio restart is not expected")))
+
+    window.open_audio_settings()
+
+    assert calls["restart_devices"] == (11, 12)
+    assert window.input_device_id == 11
+    assert window.output_device_id == 12
+    window.voice_audio = None
+    window.connected_channel_id = None
+    window.close()
+    app.processEvents()
+
+
 def test_login_dialog_locked_server_is_not_editable(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setattr(

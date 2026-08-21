@@ -65,6 +65,31 @@ def test_voice_receive_frame_decrypts_server_prefixed_packet() -> None:
     assert receiver.consume_audible_users() == {sender_id}
 
 
+def test_voice_receive_ignores_own_server_prefixed_packet() -> None:
+    key = b"v" * 32
+    user_id = 9
+    receiver = make_client(user_id=user_id, key=key)
+    pcm = b"\x01\x02" * 320
+    encrypted = encrypt_frame(key, pcm, make_voice_aad(11, user_id, 0))
+    packet = user_id.to_bytes(4, "big") + encrypted
+
+    class FakeWebsocket:
+        def __aiter__(self):
+            self._items = iter([packet])
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._items)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    asyncio.run(receiver._receive_loop(FakeWebsocket()))
+
+    assert receiver.playback_queue.empty()
+    assert receiver.consume_audible_users() == set()
+
+
 def test_voice_receive_frame_with_zero_local_volume_is_not_audible() -> None:
     key = b"v" * 32
     sender_id = 5

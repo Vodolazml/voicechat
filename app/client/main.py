@@ -48,6 +48,7 @@ from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_de
 
 
 SCREEN_FRAME_LIMIT_BYTES = 2_800_000
+REMOTE_AUDIBLE_HOLD_SECONDS = 0.55
 SCREEN_QUALITY_PRESETS = {
     "1080p_high": {
         "label": "FullHD высокое",
@@ -556,6 +557,7 @@ class MainWindow(QMainWindow):
         self.screen_frames: dict[int, QPixmap] = {}
         self.last_screen_stage_update_at = 0.0
         self.current_voice_states: list[dict] = []
+        self.remote_audible_until: dict[int, float] = {}
         self.audio_status = "audio idle"
         self.input_device_id: int | None = None
         self.output_device_id: int | None = None
@@ -563,6 +565,7 @@ class MainWindow(QMainWindow):
         self.noise_threshold = 450
         self.last_speaking = False
         self.last_voice_sync_at = 0.0
+        self.last_audible_state: set[int] = set()
 
         self.setWindowTitle("Private VoiceChat")
         self.resize(1180, 720)
@@ -943,6 +946,8 @@ class MainWindow(QMainWindow):
             self.voice_audio.stop()
             self.voice_audio = None
         self.last_speaking = False
+        self.remote_audible_until.clear()
+        self.last_audible_state.clear()
 
     def start_screen_client(self, channel_id: int) -> None:
         e2ee = self.ensure_e2ee_for_channel(channel_id)
@@ -1216,9 +1221,34 @@ class MainWindow(QMainWindow):
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
 
+    def is_user_audible(self, user_id: int) -> bool:
+        return monotonic() < self.remote_audible_until.get(user_id, 0.0)
+
+    def sync_remote_audible_state(self) -> None:
+        now = monotonic()
+        if self.voice_audio:
+            key_problem_users = self.voice_audio.consume_key_problem_users()
+            if key_problem_users and self.connected_channel_id:
+                try:
+                    self.ensure_e2ee_for_channel(self.connected_channel_id, force=True)
+                except ApiError:
+                    pass
+            for user_id in self.voice_audio.consume_audible_users():
+                self.remote_audible_until[int(user_id)] = now + REMOTE_AUDIBLE_HOLD_SECONDS
+        active = {user_id for user_id, until in self.remote_audible_until.items() if until > now}
+        if len(active) != len(self.remote_audible_until):
+            self.remote_audible_until = {user_id: until for user_id, until in self.remote_audible_until.items() if until > now}
+        if active == self.last_audible_state:
+            return
+        self.last_audible_state = active
+        if self.current_channel and self.connected_channel_id == self.current_channel["id"]:
+            self.redraw_voice_stage()
+            self.refresh_member_list_widgets()
+
     def sync_speaking_state(self) -> None:
         if not self.connected_channel_id:
             return
+        self.sync_remote_audible_state()
         now = monotonic()
         speaking = bool(self.voice_audio and self.voice_audio.speaking and not self.muted and not self.deafened)
         needs_heartbeat = now - self.last_voice_sync_at >= 5
@@ -1347,6 +1377,14 @@ class MainWindow(QMainWindow):
         for state in self.current_voice_states:
             self.add_stage_member(state)
 
+    def refresh_member_list_widgets(self) -> None:
+        self.member_list.clear()
+        for state in self.current_voice_states:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(290, 64))
+            self.member_list.addItem(item)
+            self.member_list.setItemWidget(item, self.voice_member_widget(state, compact=False))
+
     def refresh_space_voice_cache(self) -> None:
         self.voice_cache = {}
         for channel in self.channels:
@@ -1471,7 +1509,7 @@ class MainWindow(QMainWindow):
 
     def member_widget(self, name: str, subtitle: str, *, muted: bool, compact: bool = False, state: dict | None = None) -> QWidget:
         row = QFrame()
-        row.setObjectName("memberRowSpeaking" if state and state.get("speaking") else "memberRow")
+        row.setObjectName("memberRowSpeaking" if state and self.is_user_audible(int(state["user_id"])) else "memberRow")
         if state:
             row.setContextMenuPolicy(Qt.CustomContextMenu)
             row.customContextMenuRequested.connect(partial(self.show_member_menu, row, state))
@@ -1502,7 +1540,8 @@ class MainWindow(QMainWindow):
 
     def add_stage_member(self, state: dict) -> None:
         card = QFrame()
-        card.setObjectName("voiceCardSpeaking" if state.get("speaking") else "voiceCard")
+        audible = self.is_user_audible(int(state["user_id"]))
+        card.setObjectName("voiceCardSpeaking" if audible else "voiceCard")
         card.setFixedSize(230, 170)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
         card.customContextMenuRequested.connect(partial(self.show_member_menu, card, state))

@@ -267,6 +267,9 @@ class VoiceAudioClient:
         self._output_stream: sd.RawOutputStream | None = None
         self.speaking = False
         self._last_voice_at = 0.0
+        self._audible_users: set[int] = set()
+        self._key_problem_users: set[int] = set()
+        self._audible_lock = threading.Lock()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -309,6 +312,7 @@ class VoiceAudioClient:
         self._output_stream = None
         self._drain(self.capture_queue)
         self._drain(self.playback_queue)
+        self.consume_audible_users()
         self._status("audio disconnected")
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:
@@ -390,17 +394,44 @@ class VoiceAudioClient:
                 continue
             media_key = self.media_key_for_sender(sender_id)
             if not media_key:
+                self._mark_key_problem(sender_id)
                 continue
             # AAD привязан к channel_id, sender_id и recipient_id
             aad = make_voice_aad(self.channel_id, sender_id, 0)
             try:
                 pcm = decrypt_frame(media_key, encrypted_data, aad)
             except ValueError:
+                self._mark_key_problem(sender_id)
                 continue
             volume = max(0, min(200, self.local_volume(sender_id)))
+            if volume <= 0:
+                continue
             if volume != 100:
                 pcm = audioop.mul(pcm, SAMPLE_WIDTH, volume / 100)
+            if audioop.rms(pcm, SAMPLE_WIDTH) <= 0:
+                continue
             self._put_latest(self.playback_queue, pcm)
+            self._mark_audible(sender_id)
+
+    def consume_audible_users(self) -> set[int]:
+        with self._audible_lock:
+            users = set(self._audible_users)
+            self._audible_users.clear()
+            return users
+
+    def consume_key_problem_users(self) -> set[int]:
+        with self._audible_lock:
+            users = set(self._key_problem_users)
+            self._key_problem_users.clear()
+            return users
+
+    def _mark_audible(self, user_id: int) -> None:
+        with self._audible_lock:
+            self._audible_users.add(user_id)
+
+    def _mark_key_problem(self, user_id: int) -> None:
+        with self._audible_lock:
+            self._key_problem_users.add(user_id)
 
     def _put_latest(self, target: queue.Queue[bytes], data: bytes) -> None:
         try:

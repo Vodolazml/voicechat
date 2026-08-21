@@ -367,8 +367,7 @@ class VoiceAudioClient:
             aad = make_voice_aad(self.channel_id, self.user_id, 0)
             encrypted = encrypt_frame(self.outgoing_media_key, frame, aad)
             # Добавляем sender_id в начало пакета
-            packet = self.user_id.to_bytes(4, "big") + encrypted
-            await websocket.send(packet)
+            await websocket.send(encrypted)
 
     async def _receive_loop(self, websocket) -> None:
         async for message in websocket:
@@ -393,7 +392,7 @@ class VoiceAudioClient:
             if not media_key:
                 continue
             # AAD привязан к channel_id, sender_id и recipient_id
-            aad = make_voice_aad(self.channel_id, sender_id, self.user_id)
+            aad = make_voice_aad(self.channel_id, sender_id, 0)
             try:
                 pcm = decrypt_frame(media_key, encrypted_data, aad)
             except ValueError:

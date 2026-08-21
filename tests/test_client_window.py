@@ -2,13 +2,20 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from app.client import settings_store
-from app.client.main import MainWindow
+from app.client.client_config import ClientConfig
+from app.client.main import LoginDialog, MainWindow
 
 
 class FakeApi:
+    def __init__(self) -> None:
+        self.base_url = "http://127.0.0.1:8765"
+
+    def set_base_url(self, value: str, *, allow_insecure_http: bool = False) -> None:
+        self.base_url = value.rstrip("/")
+
     def me(self) -> dict:
         return {"id": 1, "username": "admin", "display_name": "Администратор"}
 
@@ -33,6 +40,12 @@ class FakeApi:
 
     def ws_headers(self) -> dict:
         return {}
+
+    def check_update(self):
+        raise AssertionError("update check is not expected")
+
+    def login(self, username: str, password: str) -> dict:
+        raise AssertionError("login is not expected")
 
 
 def test_main_window_initializes_client_settings_before_e2ee(tmp_path, monkeypatch) -> None:
@@ -75,4 +88,53 @@ def test_start_audio_passes_channel_and_user_ids(tmp_path, monkeypatch) -> None:
     assert captured["user_id"] == 1
     assert captured["started"] is True
     window.close()
+    app.processEvents()
+
+
+def test_login_dialog_locked_server_is_not_editable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    monkeypatch.setattr(
+        "app.client.main.load_client_config",
+        lambda: ClientConfig(
+            server_url="http://72.35.246.230:8765",
+            lock_server_url=True,
+            allow_insecure_http=True,
+        ),
+    )
+    app = QApplication.instance() or QApplication([])
+
+    dialog = LoginDialog(FakeApi())
+
+    assert isinstance(dialog.server, QLabel)
+    assert not isinstance(dialog.server, QLineEdit)
+    assert dialog.server.text() == "http://72.35.246.230:8765"
+    dialog.close()
+    app.processEvents()
+
+
+def test_login_dialog_loads_remembered_password(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    settings_store.save_client_settings(
+        {
+            "remember_me": True,
+            "remembered_username": "admin",
+            "remembered_password_dpapi": "secret",
+        }
+    )
+    monkeypatch.setattr("app.client.main.unprotect_text", lambda value: "Admin12345!")
+    monkeypatch.setattr(
+        "app.client.main.load_client_config",
+        lambda: ClientConfig(
+            server_url="http://72.35.246.230:8765",
+            lock_server_url=True,
+            allow_insecure_http=True,
+        ),
+    )
+    app = QApplication.instance() or QApplication([])
+
+    dialog = LoginDialog(FakeApi())
+
+    assert dialog.username.text() == "admin"
+    assert dialog.password.text() == "Admin12345!"
+    dialog.close()
     app.processEvents()

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from .api import ApiClient, ApiError
 from .client_config import load_client_config
+from .credential_store import CredentialError, protect_text, unprotect_text
 from .e2ee import ChannelE2EE, E2EEIdentity
 from .screen_share import STOP_FRAME, ScreenShareClient
 from .settings_store import load_client_settings, save_client_settings
@@ -318,6 +319,7 @@ class LoginDialog(QDialog):
         
         # Загружаем запомненный логин
         remembered_username = self.client_settings.get("remembered_username", "admin")
+        remembered_password = self.load_remembered_password()
         
         self.setWindowTitle("Вход")
         self.setMinimumWidth(380)
@@ -325,9 +327,13 @@ class LoginDialog(QDialog):
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         self.password.setPlaceholderText("Пароль")
+        if remembered_password:
+            self.password.setText(remembered_password)
         self.server = QLineEdit(api.base_url)
+        self.server_info = QLabel(api.base_url)
+        self.server_info.setObjectName("muted")
         if self.packaged_config.lock_server_url:
-            self.server.setReadOnly(True)
+            self.server = self.server_info
             self.server.setToolTip("Адрес сервера задан администратором в client_config.json")
         self.error = QLabel("")
         self.error.setObjectName("warn")
@@ -357,6 +363,20 @@ class LoginDialog(QDialog):
         
         layout.addWidget(self.error)
         layout.addWidget(self.login_button)
+        if self.remember_me_checkbox.isChecked() and remembered_password:
+            QTimer.singleShot(100, self.try_login)
+
+    def load_remembered_password(self) -> str:
+        secret = self.client_settings.get("remembered_password_dpapi")
+        if not isinstance(secret, str) or not secret:
+            return ""
+        try:
+            return unprotect_text(secret)
+        except CredentialError:
+            self.client_settings.pop("remembered_password_dpapi", None)
+            self.client_settings.pop("remember_me", None)
+            save_client_settings(self.client_settings)
+            return ""
 
     def try_login(self) -> None:
         try:
@@ -379,10 +399,15 @@ class LoginDialog(QDialog):
             if self.remember_me_checkbox.isChecked():
                 self.client_settings["remembered_username"] = self.username.text().strip()
                 self.client_settings["remember_me"] = True
+                try:
+                    self.client_settings["remembered_password_dpapi"] = protect_text(self.password.text())
+                except CredentialError:
+                    self.client_settings.pop("remembered_password_dpapi", None)
                 # В будущем здесь можно сохранить encrypted token
             else:
                 self.client_settings.pop("remembered_username", None)
                 self.client_settings.pop("remember_me", None)
+                self.client_settings.pop("remembered_password_dpapi", None)
             
             if not self.packaged_config.lock_server_url:
                 self.client_settings["server_url"] = self.api.base_url
@@ -505,6 +530,15 @@ class MainWindow(QMainWindow):
         self.local_mutes: set[int] = set()
         self.local_volumes: dict[int, int] = {}
         self.client_settings = load_client_settings()
+        saved_local_volumes = self.client_settings.get("local_volumes", {})
+        if isinstance(saved_local_volumes, dict):
+            for user_id, volume in saved_local_volumes.items():
+                if not str(user_id).isdigit():
+                    continue
+                try:
+                    self.local_volumes[int(user_id)] = max(0, min(200, int(volume)))
+                except (TypeError, ValueError):
+                    continue
         self.e2ee_identity = E2EEIdentity(self.client_settings)
         save_client_settings(self.client_settings)
         self.channel_e2ee: dict[int, ChannelE2EE] = {}
@@ -1568,6 +1602,8 @@ class MainWindow(QMainWindow):
 
     def set_local_volume(self, user_id: int, value: int, label: QLabel) -> None:
         self.local_volumes[user_id] = value
+        self.client_settings["local_volumes"] = {str(key): volume for key, volume in self.local_volumes.items()}
+        save_client_settings(self.client_settings)
         label.setText(f"Громкость: {value}%")
 
     def closeEvent(self, event) -> None:

@@ -202,6 +202,15 @@ QLabel#deviceLabel {
     padding: 5px 8px;
     font-size: 12px;
 }
+QLabel#versionLabel {
+    color: #949ba4;
+    background: #1e1f22;
+    border: 1px solid #3f4147;
+    border-radius: 10px;
+    padding: 3px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}
 QLabel#pingGood {
     background: #1f3f2b;
     color: #3ddd82;

@@ -2,11 +2,12 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel, QLineEdit
+from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QDialog
 
 from app.client import settings_store
 from app.client.client_config import ClientConfig
 from app.client.main import LoginDialog, MainWindow
+from app.version import APP_VERSION
 
 
 class FakeApi:
@@ -55,6 +56,7 @@ def test_main_window_initializes_client_settings_before_e2ee(tmp_path, monkeypat
     window = MainWindow(FakeApi())
 
     assert "e2ee_identity_private_key" in window.client_settings
+    assert window.version_label.text() == f"v{APP_VERSION}"
     window.close()
     app.processEvents()
 
@@ -87,6 +89,48 @@ def test_start_audio_passes_channel_and_user_ids(tmp_path, monkeypatch) -> None:
     assert captured["channel_id"] == 7
     assert captured["user_id"] == 1
     assert captured["started"] is True
+    window.close()
+    app.processEvents()
+
+
+def test_noise_settings_do_not_restart_active_audio(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    app = QApplication.instance() or QApplication([])
+
+    class FakeAudio:
+        def stop(self) -> None:
+            raise AssertionError("audio restart is not expected")
+
+    class FakeDialog:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def exec(self) -> int:
+            return QDialog.Accepted
+
+        def selected_devices(self) -> tuple[None, None]:
+            return None, None
+
+        def noise_suppression_enabled(self) -> bool:
+            return False
+
+        def selected_threshold(self) -> int:
+            return 620
+
+    monkeypatch.setattr("app.client.main.AudioSettingsDialog", FakeDialog)
+    window = MainWindow(FakeApi())
+    window.connected_channel_id = 7
+    window.voice_audio = FakeAudio()
+    monkeypatch.setattr(window, "start_audio", lambda channel_id: (_ for _ in ()).throw(AssertionError("audio restart is not expected")))
+
+    window.open_audio_settings()
+
+    assert window.noise_suppression is False
+    assert window.noise_threshold == 620
+    assert window.client_settings["noise_suppression"] is False
+    assert window.client_settings["noise_threshold"] == 620
+    window.voice_audio = None
+    window.connected_channel_id = None
     window.close()
     app.processEvents()
 

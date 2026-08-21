@@ -45,6 +45,7 @@ from .settings_store import load_client_settings, save_client_settings
 from .styles import APP_STYLE
 from .updater import UpdateInfo, download_update, open_update_file
 from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
+from ..version import APP_VERSION
 
 
 SCREEN_FRAME_LIMIT_BYTES = 2_800_000
@@ -559,10 +560,10 @@ class MainWindow(QMainWindow):
         self.current_voice_states: list[dict] = []
         self.remote_audible_until: dict[int, float] = {}
         self.audio_status = "audio idle"
-        self.input_device_id: int | None = None
-        self.output_device_id: int | None = None
-        self.noise_suppression = True
-        self.noise_threshold = 450
+        self.input_device_id = self.valid_audio_device_id(self.client_settings.get("input_device_id"))
+        self.output_device_id = self.valid_audio_device_id(self.client_settings.get("output_device_id"))
+        self.noise_suppression = bool(self.client_settings.get("noise_suppression", True))
+        self.noise_threshold = self.valid_noise_threshold(self.client_settings.get("noise_threshold"))
         self.last_speaking = False
         self.last_voice_sync_at = 0.0
         self.last_audible_state: set[int] = set()
@@ -720,6 +721,9 @@ class MainWindow(QMainWindow):
         self.device_label = QLabel("Системные аудиоустройства")
         self.device_label.setObjectName("deviceLabel")
         self.device_label.setToolTip("Выбранные микрофон и устройство вывода")
+        self.version_label = QLabel(f"v{APP_VERSION}")
+        self.version_label.setObjectName("versionLabel")
+        self.version_label.setToolTip("Версия клиента")
         self.mute_button = icon_button("mic", "Выключить микрофон")
         self.mute_button.clicked.connect(self.toggle_mute)
         self.deafen_button = icon_button("headphones", "Отключить входящий звук")
@@ -737,6 +741,7 @@ class MainWindow(QMainWindow):
         refresh = icon_button("refresh", "Обновить")
         refresh.clicked.connect(self.reload_all)
         layout.addWidget(self.user_label)
+        layout.addWidget(self.version_label)
         layout.addWidget(self.device_label)
         layout.addStretch()
         layout.addWidget(self.mute_button)
@@ -808,6 +813,20 @@ class MainWindow(QMainWindow):
         allowed = {interval for _label, interval in SCREEN_FPS_PRESETS}
         return int(value) if isinstance(value, int) and value in allowed else default
 
+    def valid_audio_device_id(self, value) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def valid_noise_threshold(self, value) -> int:
+        try:
+            return max(150, min(1600, int(value)))
+        except (TypeError, ValueError):
+            return 450
+
     def save_preferences(self) -> None:
         self.client_settings.update(
             {
@@ -815,6 +834,10 @@ class MainWindow(QMainWindow):
                 "screen_fps_interval_ms": self.screen_fps_interval_ms,
                 "viewer_quality_key": self.viewer_quality_key,
                 "viewer_fps_interval_ms": self.viewer_fps_interval_ms,
+                "input_device_id": self.input_device_id,
+                "output_device_id": self.output_device_id,
+                "noise_suppression": self.noise_suppression,
+                "noise_threshold": self.noise_threshold,
             }
         )
         save_client_settings(self.client_settings)
@@ -1273,11 +1296,14 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.Accepted:
             return
+        previous_devices = (self.input_device_id, self.output_device_id)
         self.input_device_id, self.output_device_id = dialog.selected_devices()
         self.noise_suppression = dialog.noise_suppression_enabled()
         self.noise_threshold = dialog.selected_threshold()
+        self.save_preferences()
         self.update_audio_device_label()
-        if self.connected_channel_id:
+        device_changed = previous_devices != (self.input_device_id, self.output_device_id)
+        if self.connected_channel_id and device_changed:
             channel_id = self.connected_channel_id
             self.stop_audio()
             try:

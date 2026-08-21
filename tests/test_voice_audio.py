@@ -1,10 +1,18 @@
 import asyncio
+from time import monotonic
 
 from app.client.voice_audio import VoiceAudioClient, make_voice_aad
 from app.media_crypto import ENCRYPTED_FRAME_PREFIX, encrypt_frame
 
 
-def make_client(*, user_id: int, key: bytes, volume: int = 100) -> VoiceAudioClient:
+def make_client(
+    *,
+    user_id: int,
+    key: bytes,
+    volume: int = 100,
+    noise_suppression: bool = False,
+    noise_threshold: int = 450,
+) -> VoiceAudioClient:
     return VoiceAudioClient(
         ws_url="ws://test",
         ws_headers={},
@@ -16,8 +24,8 @@ def make_client(*, user_id: int, key: bytes, volume: int = 100) -> VoiceAudioCli
         is_deafened=lambda: False,
         is_locally_muted=lambda sender_id: False,
         local_volume=lambda sender_id: volume,
-        noise_suppression=lambda: False,
-        noise_threshold=lambda: 450,
+        noise_suppression=lambda: noise_suppression,
+        noise_threshold=lambda: noise_threshold,
     )
 
 
@@ -151,3 +159,31 @@ def test_voice_receive_frame_without_key_reports_key_problem() -> None:
 
     assert receiver.playback_queue.empty()
     assert receiver.consume_key_problem_users() == {sender_id}
+
+
+def test_noise_suppression_sends_preroll_when_voice_starts() -> None:
+    key = b"v" * 32
+    client = make_client(user_id=5, key=key, noise_suppression=True, noise_threshold=450)
+    quiet = (1).to_bytes(2, "little", signed=True) * 320
+    loud = (1000).to_bytes(2, "little", signed=True) * 320
+
+    client._capture_callback(quiet, 320, None, None)
+    client._capture_callback(quiet, 320, None, None)
+    client._capture_callback(loud, 320, None, None)
+
+    sent = [client.capture_queue.get_nowait() for _ in range(client.capture_queue.qsize())]
+    assert sent == [quiet, quiet, loud]
+
+
+def test_noise_suppression_keeps_short_pauses_in_speech() -> None:
+    key = b"v" * 32
+    client = make_client(user_id=5, key=key, noise_suppression=True, noise_threshold=450)
+    quiet = (1).to_bytes(2, "little", signed=True) * 320
+    loud = (1000).to_bytes(2, "little", signed=True) * 320
+
+    client._capture_callback(loud, 320, None, None)
+    client._last_voice_at = monotonic() - 0.2
+    client._capture_callback(quiet, 320, None, None)
+
+    sent = [client.capture_queue.get_nowait() for _ in range(client.capture_queue.qsize())]
+    assert sent[-1] == quiet

@@ -5,6 +5,7 @@ import audioop
 import queue
 import re
 import threading
+from collections import deque
 from dataclasses import dataclass
 from time import monotonic
 from collections.abc import Callable
@@ -21,7 +22,8 @@ SAMPLE_WIDTH = 2
 BLOCKSIZE = 320
 FRAME_BYTES = BLOCKSIZE * CHANNELS * SAMPLE_WIDTH
 SPEAKING_RMS = 450
-SPEAKING_HOLD_SECONDS = 0.35
+SPEAKING_HOLD_SECONDS = 0.8
+VOICE_PREROLL_FRAMES = 8
 MIC_TEST_DELAY_FRAMES = 18
 RECONNECT_DELAY_SECONDS = 0.75
 
@@ -269,6 +271,7 @@ class VoiceAudioClient:
         self._stream_lock = threading.RLock()
         self.speaking = False
         self._last_voice_at = 0.0
+        self._preroll_frames: deque[bytes] = deque(maxlen=VOICE_PREROLL_FRAMES)
         self._audible_users: set[int] = set()
         self._key_problem_users: set[int] = set()
         self._audible_lock = threading.Lock()
@@ -350,18 +353,38 @@ class VoiceAudioClient:
     def _capture_callback(self, indata, frames, time_info, status) -> None:
         if self._stop.is_set() or self.is_muted():
             self.speaking = False
+            self._preroll_frames.clear()
             return
         data = bytes(indata)
         if not data:
             return
         now = monotonic()
-        if audioop.rms(data, SAMPLE_WIDTH) >= self.noise_threshold():
+        noise_enabled = self.noise_suppression()
+        rms = audioop.rms(data, SAMPLE_WIDTH)
+        voice_detected = rms >= self.noise_threshold()
+        was_speaking = self.speaking
+
+        if voice_detected:
             self._last_voice_at = now
             self.speaking = True
         elif now - self._last_voice_at > SPEAKING_HOLD_SECONDS:
             self.speaking = False
-        if self.noise_suppression() and not self.speaking:
+
+        if not noise_enabled:
+            self._preroll_frames.clear()
+            self._put_latest(self.capture_queue, data)
             return
+
+        self._preroll_frames.append(data)
+        if not self.speaking:
+            return
+
+        if voice_detected and not was_speaking:
+            for frame in tuple(self._preroll_frames):
+                self._put_latest(self.capture_queue, frame)
+            self._preroll_frames.clear()
+            return
+
         self._put_latest(self.capture_queue, data)
 
     def _playback_callback(self, outdata, frames, time_info, status) -> None:

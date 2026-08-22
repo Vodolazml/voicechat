@@ -18,10 +18,13 @@ class VoiceRelay:
                 await old.close(code=1000)
             self._channels[channel_id][user_id] = websocket
 
-    async def leave(self, channel_id: int, user_id: int) -> None:
+    async def leave(self, channel_id: int, user_id: int, websocket: WebSocket | None = None) -> None:
         async with self._lock:
             users = self._channels.get(channel_id)
             if not users:
+                return
+            current = users.get(user_id)
+            if websocket is not None and current is not websocket:
                 return
             users.pop(user_id, None)
             if not users:

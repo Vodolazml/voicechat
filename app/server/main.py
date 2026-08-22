@@ -620,12 +620,7 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = ""
     except WebSocketDisconnect:
         pass
     finally:
-        await voice_relay.leave(channel_id, user_id)
-        with SessionLocal() as db:
-            state = db.get(models.VoiceState, user_id)
-            if state and state.channel_id == channel_id:
-                db.delete(state)
-                db.commit()
+        await voice_relay.leave(channel_id, user_id, websocket)
 
 
 @app.websocket("/screen/ws/{channel_id}")

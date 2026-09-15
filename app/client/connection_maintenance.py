@@ -41,4 +41,4 @@ class ConnectionMaintenance:
                     self.sync_keys()
             except Exception as exc:
                 self.status(f"Соединение: {exc}")
-            self._stop.wait(3)
+            self._stop.wait(1.5)

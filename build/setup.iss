@@ -17,6 +17,7 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={localappdata}\Programs\Private VoiceChat
 DefaultGroupName={#MyAppName}
+SetupIconFile=..\assets\app_icon.ico
 AllowNoIcons=yes
 OutputDir=..\dist
 OutputBaseFilename=PrivateVoiceChat-{#MyAppVersion}-setup

@@ -6,7 +6,8 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QDialog
 
 from app.client import settings_store
 from app.client.client_config import ClientConfig
-from app.client.main import LoginDialog, MainWindow
+from app.client.main import AudioSettingsDialog, LoginDialog, MainWindow
+from app.client.hotkeys import DEFAULT_BINDINGS
 from app.version import APP_VERSION
 
 
@@ -117,6 +118,9 @@ def test_noise_settings_do_not_restart_active_audio(tmp_path, monkeypatch) -> No
         def selected_threshold(self) -> int:
             return 620
 
+        def selected_hotkeys(self) -> dict:
+            return {}
+
     monkeypatch.setattr("app.client.main.AudioSettingsDialog", FakeDialog)
     window = MainWindow(FakeApi())
     window.connected_channel_id = 7
@@ -162,6 +166,9 @@ def test_device_settings_restart_streams_without_rejoining_voice(tmp_path, monke
 
         def selected_threshold(self) -> int:
             return 500
+
+        def selected_hotkeys(self) -> dict:
+            return {}
 
     monkeypatch.setattr("app.client.main.AudioSettingsDialog", FakeDialog)
     window = MainWindow(FakeApi())
@@ -226,4 +233,54 @@ def test_login_dialog_loads_remembered_password(tmp_path, monkeypatch) -> None:
     assert dialog.username.text() == "admin"
     assert dialog.password.text() == "Admin12345!"
     dialog.close()
+    app.processEvents()
+
+
+def test_audio_settings_dialog_builds_hotkey_editors() -> None:
+    app = QApplication.instance() or QApplication([])
+
+    dialog = AudioSettingsDialog(None, None, None, True, 450, {"toggle_mute": "Ctrl+Shift+M"})
+
+    assert set(dialog.hotkey_edits) == set(DEFAULT_BINDINGS)
+    selected = dialog.selected_hotkeys()
+    assert selected["toggle_mute"] == "Ctrl+Shift+M"
+    dialog.close()
+    app.processEvents()
+
+
+def test_main_window_sets_up_tray_and_hotkeys(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    app = QApplication.instance() or QApplication([])
+
+    window = MainWindow(FakeApi())
+
+    assert window.hotkeys == DEFAULT_BINDINGS
+    assert hasattr(window, "tray_icon")
+    window.close()
+    app.processEvents()
+
+
+def test_voice_presence_change_plays_sounds_only_after_baseline(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
+    app = QApplication.instance() or QApplication([])
+    calls: list[str] = []
+    monkeypatch.setattr("app.client.main.play_join_sound", lambda device=None: calls.append("join"))
+    monkeypatch.setattr("app.client.main.play_leave_sound", lambda device=None: calls.append("leave"))
+
+    window = MainWindow(FakeApi())
+    window.connected_channel_id = 1
+    window.me = {"id": 1}
+
+    window.notify_voice_presence_changes(1, [{"user_id": 1}, {"user_id": 2}])
+    assert calls == []
+
+    window.notify_voice_presence_changes(1, [{"user_id": 1}, {"user_id": 2}, {"user_id": 3}])
+    assert calls == ["join"]
+    calls.clear()
+
+    window.notify_voice_presence_changes(1, [{"user_id": 1}])
+    assert calls == ["leave"]
+
+    window.connected_channel_id = None
+    window.close()
     app.processEvents()

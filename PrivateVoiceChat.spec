@@ -12,6 +12,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('livekit.rtc')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+datas += [('assets/app_icon.ico', 'assets')]
+
 
 a = Analysis(
     ['run_client.py'],
@@ -34,6 +36,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='PrivateVoiceChat',
+    icon='assets/app_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

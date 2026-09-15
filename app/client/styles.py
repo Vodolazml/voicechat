@@ -5,7 +5,7 @@ QWidget {
     font-family: "Segoe UI";
     font-size: 14px;
 }
-QLineEdit, QComboBox, QSpinBox {
+QLineEdit, QComboBox, QSpinBox, QKeySequenceEdit {
     background: #1e1f22;
     border: 1px solid #1a1b1e;
     border-radius: 6px;
@@ -150,6 +150,15 @@ QFrame#voiceStage {
 QFrame#bottomBar {
     background: #232428;
     border-top: 1px solid #1e1f22;
+}
+QSplitter::handle {
+    background: #232428;
+}
+QSplitter::handle:hover {
+    background: #5865f2;
+}
+QSplitter::handle:horizontal {
+    width: 3px;
 }
 QLabel#title {
     font-size: 20px;

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import ctypes.wintypes
 import sys
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from time import monotonic
 
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRectF, QSize, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QPainter, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QPolygon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,8 +30,11 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QKeySequenceEdit,
     QSlider,
     QSizePolicy,
+    QSplitter,
+    QSystemTrayIcon,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -40,11 +45,13 @@ from .api import ApiClient, ApiError
 from .client_config import load_client_config
 from .credential_store import CredentialError, protect_text, unprotect_text
 from .e2ee import ChannelE2EE, E2EEIdentity
+from .hotkeys import ACTION_LABELS, DEFAULT_BINDINGS, HotkeyManager
 from .screen_share import STOP_FRAME, ScreenShareClient
 from .livekit_screen import LiveKitScreenClient
 from .connection_maintenance import ConnectionMaintenance
 from .ui_requests import UiRequests
 from .settings_store import load_client_settings, save_client_settings
+from .sounds import play_join_sound, play_leave_sound
 from .styles import APP_STYLE
 from .updater import UpdateInfo, download_update, open_update_file
 from .voice_audio import AudioDevice, MicTestMonitor, audio_devices, device_display_name
@@ -107,6 +114,19 @@ DEFAULT_VIEWER_QUALITY = "source"
 DEFAULT_VIEWER_FPS_INTERVAL_MS = 67
 
 
+def app_icon_path() -> Path:
+    if getattr(sys, "frozen", False):
+        base = Path(sys.executable).resolve().parent
+    else:
+        base = Path(__file__).resolve().parents[2]
+    return base / "assets" / "app_icon.ico"
+
+
+def app_icon() -> QIcon:
+    path = app_icon_path()
+    return QIcon(str(path)) if path.exists() else QIcon()
+
+
 def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
     paths = {
         "mic": '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 10v2a7 7 0 0 0 14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/>',
@@ -126,6 +146,43 @@ def svg_icon(name: str, color: str = "#dbdee1") -> QIcon:
     pixmap = QPixmap()
     pixmap.loadFromData(svg.encode("utf-8"), "SVG")
     return QIcon(pixmap)
+
+
+class ElidedLabel(QLabel):
+    """A QLabel that shrinks with the layout instead of forcing a wider window."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None, *, min_width: int = 0) -> None:
+        super().__init__(parent)
+        self._full_text = text
+        self._min_width = min_width
+        super().setText(text)
+
+    def setText(self, text: str) -> None:
+        self._full_text = text
+        self._apply_elide()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(min(self._min_width, self.sizeHint().width()), hint.height())
+
+    def sizeHint(self) -> QSize:
+        # Based on the full (unelided) text so the layout still requests the
+        # "natural" width; only the on-screen text shrinks under pressure.
+        height = super().sizeHint().height()
+        width = self.fontMetrics().horizontalAdvance(self._full_text) + 4
+        return QSize(width, height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        elided = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, max(0, self.width()))
+        super().setText(elided)
+        super().setToolTip(self._full_text if elided != self._full_text else "")
 
 
 def icon_button(icon: str, tooltip: str, *, danger: bool = False) -> QToolButton:
@@ -585,6 +642,7 @@ class MainWindow(QMainWindow):
         self.screen_frames: dict[int, QPixmap] = {}
         self.last_screen_stage_update_at = 0.0
         self.current_voice_states: list[dict] = []
+        self.voice_known_members: dict[int, set[int]] = {}
         self.remote_audible_until: dict[int, float] = {}
         self.audio_status = "audio idle"
         self.input_device_id = self.valid_audio_device_id(self.client_settings.get("input_device_id"))
@@ -594,16 +652,23 @@ class MainWindow(QMainWindow):
         self.last_speaking = False
         self.last_voice_sync_at = 0.0
         self.last_audible_state: set[int] = set()
+        self.hotkeys = self.load_hotkey_bindings()
+        self.hotkey_manager: HotkeyManager | None = None
+        self._quitting = False
+        self.stage_columns = 4
 
         self.setWindowTitle("Private VoiceChat")
-        self.resize(1180, 720)
-        self.setMinimumSize(900, 560)
+        self.setWindowIcon(app_icon())
+        self.resize(1280, 760)
+        self.setMinimumSize(760, 480)
         self.setCentralWidget(self.build_ui())
         self.ui_requests = UiRequests(self.api)
         self.ui_requests.voice_ready.connect(self.render_voice_response)
         self.ui_requests.ping_ready.connect(self.render_ping_response)
         self.ui_requests.message.connect(self.show_media_status)
         self.update_audio_device_label()
+        self.setup_tray_icon()
+        self.register_hotkeys()
 
         self.timer = QTimer(self)
         self.timer.setInterval(2500)
@@ -632,10 +697,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         self.space_list = QListWidget()
-        self.space_list.setFixedWidth(126)
         self.space_list.itemClicked.connect(self.select_space_item)
         space_frame = QFrame()
         space_frame.setObjectName("sidebar")
+        space_frame.setMinimumWidth(70)
         space_layout = QVBoxLayout(space_frame)
         space_layout.setContentsMargins(8, 10, 8, 10)
         space_layout.setSpacing(8)
@@ -654,7 +719,7 @@ class MainWindow(QMainWindow):
         self.channel_list.itemDoubleClicked.connect(self.activate_channel_item)
         channel_frame = QFrame()
         channel_frame.setObjectName("panel")
-        channel_frame.setFixedWidth(300)
+        channel_frame.setMinimumWidth(170)
         channel_layout = QVBoxLayout(channel_frame)
         channel_layout.setContentsMargins(10, 12, 10, 10)
         channel_layout.setSpacing(8)
@@ -673,6 +738,7 @@ class MainWindow(QMainWindow):
 
         center = QFrame()
         center.setObjectName("mainArea")
+        center.setMinimumWidth(280)
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(24, 18, 24, 0)
         center_layout.setSpacing(12)
@@ -724,7 +790,7 @@ class MainWindow(QMainWindow):
 
         member_frame = QFrame()
         member_frame.setObjectName("rightPanel")
-        member_frame.setFixedWidth(330)
+        member_frame.setMinimumWidth(180)
         member_layout = QVBoxLayout(member_frame)
         member_layout.setContentsMargins(12, 14, 12, 12)
         member_layout.setSpacing(10)
@@ -735,11 +801,29 @@ class MainWindow(QMainWindow):
         member_layout.addWidget(member_title)
         member_layout.addWidget(self.member_list)
 
-        layout.addWidget(space_frame)
-        layout.addWidget(channel_frame)
-        layout.addWidget(center, 1)
-        layout.addWidget(member_frame)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(3)
+        self.main_splitter.addWidget(space_frame)
+        self.main_splitter.addWidget(channel_frame)
+        self.main_splitter.addWidget(center)
+        self.main_splitter.addWidget(member_frame)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setStretchFactor(2, 1)
+        self.main_splitter.setStretchFactor(3, 0)
+        saved_sizes = self.client_settings.get("splitter_sizes")
+        if isinstance(saved_sizes, list) and len(saved_sizes) == 4 and all(isinstance(v, int) for v in saved_sizes):
+            self.main_splitter.setSizes(saved_sizes)
+        else:
+            self.main_splitter.setSizes([126, 300, 700, 330])
+        self.main_splitter.splitterMoved.connect(self.on_splitter_moved)
+        layout.addWidget(self.main_splitter)
         return root
+
+    def on_splitter_moved(self, pos: int, index: int) -> None:
+        self.client_settings["splitter_sizes"] = self.main_splitter.sizes()
+        save_client_settings(self.client_settings)
 
     def bottom_bar(self) -> QFrame:
         bar = QFrame()
@@ -747,9 +831,9 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(12, 10, 10, 10)
         layout.setSpacing(10)
-        self.user_label = QLabel("Пользователь")
+        self.user_label = ElidedLabel("Пользователь", min_width=70)
         self.user_label.setObjectName("ok")
-        self.device_label = QLabel("Системные аудиоустройства")
+        self.device_label = ElidedLabel("Системные аудиоустройства", min_width=50)
         self.device_label.setObjectName("deviceLabel")
         self.device_label.setToolTip("Выбранные микрофон и устройство вывода")
         self.version_label = QLabel(f"v{APP_VERSION}")
@@ -871,6 +955,7 @@ class MainWindow(QMainWindow):
                 "output_device_id": self.output_device_id,
                 "noise_suppression": self.noise_suppression,
                 "noise_threshold": self.noise_threshold,
+                "hotkeys": self.hotkeys,
             }
         )
         save_client_settings(self.client_settings)
@@ -945,8 +1030,7 @@ class MainWindow(QMainWindow):
                 self.stop_audio()
                 self.api.disconnect(channel_id)
                 self.connected_channel_id = None
-                self.channel_e2ee.pop(channel_id, None)
-                self.last_e2ee_sync_at.pop(channel_id, None)
+                self.voice_known_members.pop(channel_id, None)
                 self.channel_status.setText("Отключено")
             else:
                 self.stop_screen_share()
@@ -954,6 +1038,7 @@ class MainWindow(QMainWindow):
                 self.stop_audio()
                 state = self.api.connect(channel_id, self.muted, self.deafened)
                 self.connected_channel_id = state["channel_id"]
+                self.voice_known_members.pop(channel_id, None)
                 self.ensure_e2ee_for_channel(channel_id, force=True)
                 self.start_audio(channel_id)
                 self.start_screen_client(channel_id)
@@ -1366,6 +1451,7 @@ class MainWindow(QMainWindow):
             self.output_device_id,
             self.noise_suppression,
             self.noise_threshold,
+            self.hotkeys,
         )
         if dialog.exec() != QDialog.Accepted:
             return
@@ -1373,8 +1459,13 @@ class MainWindow(QMainWindow):
         self.input_device_id, self.output_device_id = dialog.selected_devices()
         self.noise_suppression = dialog.noise_suppression_enabled()
         self.noise_threshold = dialog.selected_threshold()
+        self.hotkeys = dialog.selected_hotkeys()
         self.save_preferences()
         self.update_audio_device_label()
+        hotkey_errors = self.register_hotkeys()
+        if hotkey_errors:
+            details = "\n".join(f"{ACTION_LABELS[action]}: {message}" for action, message in hotkey_errors.items())
+            self.show_error(f"Не удалось назначить некоторые горячие клавиши:\n{details}")
         device_changed = previous_devices != (self.input_device_id, self.output_device_id)
         if self.connected_channel_id and device_changed:
             if self.voice_audio:
@@ -1447,6 +1538,19 @@ class MainWindow(QMainWindow):
         else:
             self.render_voice_response(0, [])
 
+    def notify_voice_presence_changes(self, channel_id: int, states: list[dict]) -> None:
+        if self.connected_channel_id != channel_id:
+            return
+        my_id = int(self.me["id"]) if self.me else None
+        current_ids = {int(state["user_id"]) for state in states} - {my_id}
+        known_ids = self.voice_known_members.get(channel_id)
+        if known_ids is not None:
+            if current_ids - known_ids:
+                play_join_sound(self.output_device_id)
+            if known_ids - current_ids:
+                play_leave_sound(self.output_device_id)
+        self.voice_known_members[channel_id] = current_ids
+
     def render_voice_response(self, channel_id, states) -> None:
         if channel_id and (not self.current_channel or self.current_channel['id'] != channel_id):
             return
@@ -1459,6 +1563,7 @@ class MainWindow(QMainWindow):
         try:
             if isinstance(states, Exception):
                 raise ApiError(str(states))
+            self.notify_voice_presence_changes(self.current_channel["id"], states)
             self.current_voice_states = states
             self.voice_cache[self.current_channel["id"]] = states
             if self.connected_channel_id == self.current_channel["id"] and not getattr(self, "call_maintenance", None):
@@ -1716,7 +1821,8 @@ class MainWindow(QMainWindow):
         bottom.addStretch()
         card_layout.addLayout(bottom)
         index = self.stage_members_layout.count()
-        self.stage_members_layout.addWidget(card, index // 4, index % 4)
+        columns = max(1, self.stage_columns)
+        self.stage_members_layout.addWidget(card, index // columns, index % columns)
 
     def show_member_menu(self, parent: QWidget, state: dict, point) -> None:
         """Показывает контекстное меню участника с регулировкой громкости.
@@ -1766,8 +1872,109 @@ class MainWindow(QMainWindow):
         save_client_settings(self.client_settings)
         label.setText(f"Громкость: {value}%")
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.update_stage_columns()
+
+    def update_stage_columns(self) -> None:
+        if not hasattr(self, "stage_scroll"):
+            return
+        card_width, spacing = 230, 12
+        width = self.stage_scroll.viewport().width()
+        columns = max(1, (width + spacing) // (card_width + spacing))
+        if columns != self.stage_columns:
+            self.stage_columns = columns
+            self.redraw_voice_stage()
+
+    def setup_tray_icon(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon = None
+            return
+        self.tray_icon = QSystemTrayIcon(app_icon(), self)
+        self.tray_icon.setToolTip("Private VoiceChat")
+        menu = QMenu()
+        show_action = menu.addAction("Открыть")
+        show_action.triggered.connect(self.restore_from_tray)
+        menu.addSeparator()
+        quit_action = menu.addAction("Выход")
+        quit_action.triggered.connect(self.quit_application)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self.on_tray_activated)
+        self.tray_icon.show()
+
+    def on_tray_activated(self, reason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.restore_from_tray()
+
+    def restore_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_application(self) -> None:
+        self._quitting = True
+        self.close()
+        QApplication.instance().quit()
+
+    def load_hotkey_bindings(self) -> dict[str, str]:
+        saved = self.client_settings.get("hotkeys")
+        bindings = dict(DEFAULT_BINDINGS)
+        if isinstance(saved, dict):
+            for action in DEFAULT_BINDINGS:
+                value = saved.get(action)
+                if isinstance(value, str):
+                    bindings[action] = value
+        return bindings
+
+    def register_hotkeys(self) -> dict[str, str]:
+        if self.hotkey_manager is None:
+            try:
+                self.hotkey_manager = HotkeyManager(int(self.winId()))
+            except Exception:
+                self.hotkey_manager = None
+        if self.hotkey_manager is None:
+            return {}
+        try:
+            return self.hotkey_manager.apply(self.hotkeys)
+        except Exception:
+            return {}
+
+    def trigger_hotkey_action(self, action: str) -> None:
+        if action == "toggle_mute":
+            self.toggle_mute()
+        elif action == "toggle_deafen":
+            self.toggle_deafen()
+        elif action == "toggle_screen_share":
+            self.toggle_screen_share()
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32" and self.hotkey_manager is not None and bytes(event_type) == b"windows_generic_MSG":
+            try:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                action = self.hotkey_manager.action_for_message(msg.message, msg.wParam)
+            except Exception:
+                action = None
+            if action:
+                self.trigger_hotkey_action(action)
+                return True, 0
+        return super().nativeEvent(event_type, message)
+
     def closeEvent(self, event) -> None:
+        if not self._quitting and self.tray_icon is not None:
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage(
+                "Private VoiceChat",
+                "Приложение свернуто в трей. Голосовая связь продолжает работать.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2500,
+            )
+            return
         self.ui_requests.closed = True
+        if self.hotkey_manager is not None:
+            self.hotkey_manager.clear()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         if self.screen_viewer:
             self.screen_viewer.close()
             self.screen_viewer = None
@@ -1786,7 +1993,7 @@ class MainWindow(QMainWindow):
         empty.setObjectName("emptyText")
         empty.setAlignment(Qt.AlignCenter)
         empty.setWordWrap(True)
-        self.stage_members_layout.addWidget(empty, 0, 0, 1, 4)
+        self.stage_members_layout.addWidget(empty, 0, 0, 1, max(1, self.stage_columns))
 
     def clear_stage_members(self) -> None:
         while self.stage_members_layout.count():
@@ -2341,6 +2548,7 @@ class AudioSettingsDialog(QDialog):
         output_device_id: int | None,
         noise_suppression: bool,
         noise_threshold: int,
+        hotkeys: dict[str, str] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки аудио")
@@ -2399,6 +2607,23 @@ class AudioSettingsDialog(QDialog):
         form.addRow("", self.advanced_box)
         self.update_threshold_label(noise_threshold)
 
+        hotkeys = hotkeys or dict(DEFAULT_BINDINGS)
+        self.hotkey_edits: dict[str, QKeySequenceEdit] = {}
+        hotkeys_form = QFormLayout()
+        for action, label in ACTION_LABELS.items():
+            edit = QKeySequenceEdit(QKeySequence(hotkeys.get(action, "")))
+            edit.setMaximumSequenceLength(1)
+            clear_button = QPushButton("Очистить")
+            clear_button.setObjectName("secondary")
+            clear_button.clicked.connect(edit.clear)
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(clear_button)
+            hotkeys_form.addRow(label, row)
+            self.hotkey_edits[action] = edit
+        hotkeys_hint = QLabel("Работает даже когда окно не в фокусе (например, в игре).")
+        hotkeys_hint.setObjectName("muted")
+
         hint = QLabel(self.error_text or "По умолчанию показаны обычные устройства. Расширенный список нужен для виртуальных кабелей, line-in и системных endpoints.")
         hint.setObjectName("muted" if not self.error_text else "warn")
         hint.setWordWrap(True)
@@ -2413,8 +2638,16 @@ class AudioSettingsDialog(QDialog):
         layout.addWidget(title)
         layout.addLayout(form)
         layout.addWidget(hint)
+        hotkeys_title = QLabel("Горячие клавиши")
+        hotkeys_title.setObjectName("title")
+        layout.addWidget(hotkeys_title)
+        layout.addLayout(hotkeys_form)
+        layout.addWidget(hotkeys_hint)
         layout.addWidget(buttons)
         self.restart_threshold_monitor()
+
+    def selected_hotkeys(self) -> dict[str, str]:
+        return {action: edit.keySequence().toString() for action, edit in self.hotkey_edits.items()}
 
     def fill_combo(self, combo: QComboBox, devices: list[AudioDevice], selected: int | None, default_label: str) -> None:
         combo.blockSignals(True)
@@ -2570,6 +2803,8 @@ class UserDialog(QDialog):
 def main() -> int:
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLE)
+    app.setWindowIcon(app_icon())
+    app.setQuitOnLastWindowClosed(False)
     api = ApiClient()
     login = LoginDialog(api)
     if login.exec() != QDialog.Accepted:

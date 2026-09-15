@@ -16,6 +16,7 @@ from typing import Callable
 import httpx
 
 from app.version import APP_VERSION
+from app.update_trust import verify_release
 
 
 # Путь к кэшу обновлений
@@ -53,6 +54,14 @@ class UpdateResult:
     old_version: str = ""
     rollback_needed: bool = False
     error: str = ""
+    update_available: bool = False
+    download_url: str = ""
+    sha256: str = ""
+    download_path: Path | None = None
+    install_path: Path | None = None
+    backup_path: Path | None = None
+    rollback_path: Path | None = None
+    signature: str = ""
 
 
 def get_install_path() -> Path | None:
@@ -167,8 +176,10 @@ def check_for_updates(
             message=f"Доступна новая версия {latest_version}",
             new_version=latest_version,
             old_version=current_version,
+            update_available=True,
             download_url=data.get("download_url", ""),
             sha256=data.get("sha256", ""),
+            signature=data.get("signature", ""),
         )
     
     except httpx.HTTPError as exc:
@@ -188,8 +199,11 @@ def download_update_package(
     download_url: str,
     expected_sha256: str,
     progress_callback: Callable[[UpdateProgress], None] | None = None,
+    *, version: str = "", signature: str = "",
 ) -> UpdateResult:
     """Скачивает пакет обновления в кэш."""
+    verify_release(version, download_url, expected_sha256, signature)
+    target_file = None
     progress = UpdateProgress("downloading", 0, "Скачивание обновления...")
     if progress_callback:
         progress_callback(progress)
@@ -204,7 +218,7 @@ def download_update_package(
                 downloaded = 0
                 sha256 = hashlib.sha256()
                 
-                target_file = UPDATE_CACHE_DIR / f"update-{int(time.time())}.zip"
+                target_file = UPDATE_CACHE_DIR / f"update-{int(time.time())}.exe"
                 with target_file.open("wb") as f:
                     for chunk in response.iter_bytes(chunk_size=8192):
                         f.write(chunk)
@@ -240,7 +254,8 @@ def download_update_package(
         )
     
     except httpx.HTTPError as exc:
-        target_file.unlink(missing_ok=True)
+        if target_file:
+            target_file.unlink(missing_ok=True)
         progress.step = "error"
         progress.error = f"Ошибка скачивания: {exc}"
         if progress_callback:
@@ -390,7 +405,7 @@ def verify_and_restart(
         while time.time() - start_time < ROLLBACK_TIMEOUT_SECONDS:
             if proc.poll() is not None:
                 # Процесс завершился — возможно ошибка
-                break
+                raise RuntimeError("New client exited before the health check completed")
             time.sleep(1)
         
         # Если все ок — очищаем кэш и бэкап
@@ -436,7 +451,7 @@ def rollback_installation(
         # Восстанавливаем из бэкапа
         latest_backup = max(backup_path.glob("backup-*.zip"), key=lambda p: p.stat().st_mtime)
         with zipfile.ZipFile(latest_backup, 'r') as zf:
-            zf.extractall(install_path.parent)
+            zf.extractall(install_path)
         
         progress.step = "rolled_back"
         progress.percentage = 100

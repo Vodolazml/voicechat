@@ -41,16 +41,25 @@ from .client_config import load_client_config
 from .credential_store import CredentialError, protect_text, unprotect_text
 from .e2ee import ChannelE2EE, E2EEIdentity
 from .screen_share import STOP_FRAME, ScreenShareClient
+from .livekit_screen import LiveKitScreenClient
+from .connection_maintenance import ConnectionMaintenance
+from .ui_requests import UiRequests
 from .settings_store import load_client_settings, save_client_settings
 from .styles import APP_STYLE
 from .updater import UpdateInfo, download_update, open_update_file
-from .voice_audio import AudioDevice, MicTestMonitor, VoiceAudioClient, audio_devices, device_display_name
+from .voice_audio import AudioDevice, MicTestMonitor, audio_devices, device_display_name
+from .livekit_voice import LiveKitVoiceClient as VoiceAudioClient
 from ..version import APP_VERSION
 
 
 SCREEN_FRAME_LIMIT_BYTES = 2_800_000
 REMOTE_AUDIBLE_HOLD_SECONDS = 0.55
 SCREEN_QUALITY_PRESETS = {
+    "2160p": {
+        "label": "4K 2160p",
+        "tooltip": "3840x2160, WebRTC H.264",
+        "captures": ((3840, 2160, 90),),
+    },
     "1080p_high": {
         "label": "FullHD высокое",
         "tooltip": "1920x1080, высокая четкость",
@@ -86,8 +95,9 @@ SCREEN_FPS_PRESETS = (
     ("30 FPS", 33),
     ("60 FPS", 17),
 )
-DEFAULT_SCREEN_FPS_INTERVAL_MS = 200
+DEFAULT_SCREEN_FPS_INTERVAL_MS = 17
 VIEWER_QUALITY_PRESETS = {
+    "2160p": {"label": "4K 2160p", "size": (3840, 2160)},
     "source": {"label": "Исходное", "size": None},
     "1080p": {"label": "FullHD 1080p", "size": (1920, 1080)},
     "720p": {"label": "HD 720p", "size": (1280, 720)},
@@ -207,7 +217,7 @@ class UpdateStepsDialog(QDialog):
     
     def run_update_workflow(self) -> bool:
         """Запускает полный цикл обновления. Возвращает True если нужно продолжить."""
-        from .auto_updater import UpdateWorkflow
+        from .updater import UpdateWorkflow
         
         workflow = UpdateWorkflow(progress_callback=self.on_progress)
         
@@ -322,6 +332,13 @@ class LoginDialog(QDialog):
         # Загружаем запомненный логин
         remembered_username = self.client_settings.get("remembered_username", "admin")
         remembered_password = self.load_remembered_password()
+        self.remembered_refresh = ""
+        stored_refresh = self.client_settings.get("remembered_refresh_dpapi")
+        if stored_refresh and self.client_settings.get("remembered_server_url") == self.api.base_url:
+            try:
+                self.remembered_refresh = unprotect_text(stored_refresh)
+            except CredentialError:
+                pass
         
         self.setWindowTitle("Вход")
         self.setMinimumWidth(380)
@@ -344,7 +361,8 @@ class LoginDialog(QDialog):
         self.remember_me_checkbox.setChecked(self.client_settings.get("remember_me", False))
 
         form = QFormLayout()
-        form.addRow("Сервер", self.server)
+        if not self.packaged_config.lock_server_url:
+            form.addRow("Сервер", self.server)
         form.addRow("Логин", self.username)
         form.addRow("Пароль", self.password)
 
@@ -365,7 +383,7 @@ class LoginDialog(QDialog):
         
         layout.addWidget(self.error)
         layout.addWidget(self.login_button)
-        if self.remember_me_checkbox.isChecked() and remembered_password:
+        if self.remember_me_checkbox.isChecked() and (remembered_password or self.remembered_refresh):
             QTimer.singleShot(100, self.try_login)
 
     def load_remembered_password(self) -> str:
@@ -391,18 +409,26 @@ class LoginDialog(QDialog):
                 self.api.set_base_url(self.server.text(), allow_insecure_http=self.packaged_config.allow_insecure_http)
             if not self.ensure_update_checked():
                 return
-            data = self.api.login(self.username.text().strip(), self.password.text())
+            if self.remembered_refresh and not self.password.text():
+                refresh, self.remembered_refresh = self.remembered_refresh, ""
+                data = self.api.refresh_session(refresh)
+            else:
+                data = self.api.login(self.username.text().strip(), self.password.text())
             if data.get("must_change_password"):
                 dialog = PasswordDialog(self.api, self.password.text())
                 if dialog.exec() != QDialog.Accepted:
                     self.error.setText("Перед работой нужно сменить временный пароль.")
                     return
+                self.password.setText(dialog.new_password.text())
+                self.api.login(self.username.text().strip(), self.password.text())
             # Сохраняем "запомнить меня"
             if self.remember_me_checkbox.isChecked():
                 self.client_settings["remembered_username"] = self.username.text().strip()
                 self.client_settings["remember_me"] = True
                 try:
-                    self.client_settings["remembered_password_dpapi"] = protect_text(self.password.text())
+                    self.client_settings["remembered_refresh_dpapi"] = protect_text(self.api.refresh_token)
+                    self.client_settings["remembered_server_url"] = self.api.base_url
+                    self.client_settings.pop("remembered_password_dpapi", None)
                 except CredentialError:
                     self.client_settings.pop("remembered_password_dpapi", None)
                 # В будущем здесь можно сохранить encrypted token
@@ -410,6 +436,7 @@ class LoginDialog(QDialog):
                 self.client_settings.pop("remembered_username", None)
                 self.client_settings.pop("remember_me", None)
                 self.client_settings.pop("remembered_password_dpapi", None)
+                self.client_settings.pop("remembered_refresh_dpapi", None)
             
             if not self.packaged_config.lock_server_url:
                 self.client_settings["server_url"] = self.api.base_url
@@ -572,6 +599,10 @@ class MainWindow(QMainWindow):
         self.resize(1180, 720)
         self.setMinimumSize(900, 560)
         self.setCentralWidget(self.build_ui())
+        self.ui_requests = UiRequests(self.api)
+        self.ui_requests.voice_ready.connect(self.render_voice_response)
+        self.ui_requests.ping_ready.connect(self.render_ping_response)
+        self.ui_requests.message.connect(self.show_media_status)
         self.update_audio_device_label()
 
         self.timer = QTimer(self)
@@ -735,9 +766,9 @@ class MainWindow(QMainWindow):
         self.ping_label.setToolTip("Задержка API до сервера")
         self.settings_button = icon_button("settings", "Настройки")
         self.settings_button.clicked.connect(self.open_audio_settings)
-        create_user = QPushButton("Создать пользователя")
+        create_user = self.admin_button = QPushButton("Пользователи")
         create_user.setObjectName("secondary")
-        create_user.clicked.connect(self.create_user)
+        create_user.clicked.connect(self.manage_users)
         refresh = icon_button("refresh", "Обновить")
         refresh.clicked.connect(self.reload_all)
         layout.addWidget(self.user_label)
@@ -756,6 +787,7 @@ class MainWindow(QMainWindow):
     def reload_all(self) -> None:
         try:
             self.me = self.api.me()
+            self.admin_button.setVisible('users.create' in self.me.get('permissions', []))
             self.api.set_device_key(self.e2ee_identity.public_key, self.e2ee_identity.fingerprint)
             self.user_label.setText(f"{self.me['display_name']}  @{self.me['username']}")
             self.spaces = self.api.spaces()
@@ -774,9 +806,10 @@ class MainWindow(QMainWindow):
             self.show_error(str(exc))
 
     def refresh_ping(self) -> None:
-        try:
-            ping = self.api.ping_ms()
-        except ApiError:
+        self.ui_requests.ping()
+
+    def render_ping_response(self, ping) -> None:
+        if isinstance(ping, Exception):
             self.ping_label.setText("offline")
             self.ping_label.setObjectName("pingBad")
             self.ping_label.setToolTip("Сервер недоступен или сеть оборвалась")
@@ -943,8 +976,9 @@ class MainWindow(QMainWindow):
             e2ee = self.ensure_e2ee_for_channel(channel_id, force=True)
             _key_id, outgoing_key = e2ee.ensure_outgoing_key()
             self.voice_audio = VoiceAudioClient(
+                media_credentials=lambda: self.api.request("POST", f"/channels/{channel_id}/video-token?audio=true"),
                 ws_url=self.api.voice_ws_url(channel_id),
-                ws_headers=self.api.ws_headers(),
+                ws_headers=self.api.ws_headers,
                 channel_id=channel_id,
                 user_id=int(self.me["id"]) if self.me else 0,
                 outgoing_media_key=outgoing_key,
@@ -960,11 +994,21 @@ class MainWindow(QMainWindow):
                 output_device=self.output_device_id,
             )
             self.voice_audio.start()
+            self.call_maintenance = ConnectionMaintenance(
+                self.api, channel_id,
+                lambda: (self.muted, self.deafened, bool(self.voice_audio and self.voice_audio.speaking)),
+                lambda: self.ensure_e2ee_for_channel(channel_id, force=True),
+                self.set_audio_status,
+            )
+            self.call_maintenance.start()
         except Exception as exc:
             self.voice_audio = None
             raise RuntimeError(f"Не удалось запустить голос: {exc}") from exc
 
     def stop_audio(self) -> None:
+        if getattr(self, "call_maintenance", None):
+            self.call_maintenance.stop()
+            self.call_maintenance = None
         if self.voice_audio:
             self.voice_audio.stop()
             self.voice_audio = None
@@ -975,19 +1019,39 @@ class MainWindow(QMainWindow):
     def start_screen_client(self, channel_id: int) -> None:
         e2ee = self.ensure_e2ee_for_channel(channel_id)
         _key_id, outgoing_key = e2ee.ensure_outgoing_key()
-        self.screen_client = ScreenShareClient(
-            self.api.screen_ws_url(channel_id),
-            self.api.ws_headers(),
+        self.screen_client = LiveKitScreenClient(
+            lambda: self.api.request("POST", f"/channels/{channel_id}/video-token"),
+            int(self.me["id"]),
             outgoing_key,
             lambda user_id: self.media_key_for_sender(channel_id, user_id),
         )
-        self.screen_client.frame_received.connect(self.on_screen_frame)
         self.screen_client.stopped_received.connect(self.on_screen_stop)
         self.screen_client.status_changed.connect(self.set_audio_status)
         self.screen_client.start()
+        if not hasattr(self, "video_render_timer"):
+            self.video_render_timer = QTimer(self)
+            self.video_render_timer.setTimerType(Qt.PreciseTimer)
+            self.video_render_timer.setInterval(16)
+            self.video_render_timer.timeout.connect(self.render_webrtc_frames)
+        self.video_render_timer.start()
         self.send_viewer_preferences_to_server()
 
+    def render_webrtc_frames(self) -> None:
+        if not isinstance(self.screen_client, LiveKitScreenClient):
+            return
+        frames = self.screen_client.take_frames()
+        for user_id, (image, fps) in frames.items():
+            self.screen_frames[user_id] = QPixmap.fromImage(image)
+            if user_id != int(self.me["id"]):
+                self.screen_stream_info = f"WebRTC H.264 · {image.width()}x{image.height()} · {fps:.1f} FPS приём"
+        if frames:
+            self.refresh_screen_preview_widgets()
+            if self.screen_viewer:
+                self.screen_viewer.mark_dirty()
+
     def stop_screen_client(self) -> None:
+        if hasattr(self, "video_render_timer"):
+            self.video_render_timer.stop()
         if self.screen_client:
             self.screen_client.stop()
             self.screen_client = None
@@ -1010,6 +1074,7 @@ class MainWindow(QMainWindow):
             return channel_state
         if not self.me:
             return channel_state
+        self.api.set_device_key(self.e2ee_identity.public_key, self.e2ee_identity.fingerprint)
         state = self.api.e2ee_state(channel_id)
         users = list(state.get("users", []))
         users_by_id = {int(user["user_id"]): user for user in users}
@@ -1070,10 +1135,11 @@ class MainWindow(QMainWindow):
         self.screen_sharing = True
         self.screen_frame_times.clear()
         self.screen_stream_info = ""
-        self.screen_timer.setInterval(self.screen_fps_interval_ms)
-        self.screen_timer.start()
+        width, height, _quality = SCREEN_QUALITY_PRESETS[self.screen_quality_key]["captures"][0]
+        fps = 60 if self.screen_fps_interval_ms == 17 else round(1000 / self.screen_fps_interval_ms)
+        self.screen_client.start_share(width, height, fps)
+        self.screen_stream_info = f"WebRTC H.264 · до {width}x{height} · цель {fps} FPS"
         self.apply_screen_button()
-        self.capture_screen_frame()
 
     def stop_screen_share(self) -> None:
         was_sharing = self.screen_sharing
@@ -1243,6 +1309,11 @@ class MainWindow(QMainWindow):
 
     def set_audio_status(self, text: str) -> None:
         self.audio_status = text
+        self.ui_requests.message.emit(text)
+
+    def show_media_status(self, text: str) -> None:
+        if self.connected_channel_id and self.current_channel and self.current_channel['id'] == self.connected_channel_id:
+            self.channel_status.setText(text)
 
     def is_user_audible(self, user_id: int) -> bool:
         return monotonic() < self.remote_audible_until.get(user_id, 0.0)
@@ -1251,7 +1322,7 @@ class MainWindow(QMainWindow):
         now = monotonic()
         if self.voice_audio:
             key_problem_users = self.voice_audio.consume_key_problem_users()
-            if key_problem_users and self.connected_channel_id:
+            if key_problem_users and self.connected_channel_id and not getattr(self, "call_maintenance", None):
                 try:
                     self.ensure_e2ee_for_channel(self.connected_channel_id, force=True)
                 except ApiError:
@@ -1272,6 +1343,8 @@ class MainWindow(QMainWindow):
         if not self.connected_channel_id:
             return
         self.sync_remote_audible_state()
+        if getattr(self, "call_maintenance", None):
+            return
         now = monotonic()
         speaking = bool(self.voice_audio and self.voice_audio.speaking and not self.muted and not self.deafened)
         needs_heartbeat = now - self.last_voice_sync_at >= 5
@@ -1335,8 +1408,11 @@ class MainWindow(QMainWindow):
 
     def toggle_deafen(self) -> None:
         self.deafened = not self.deafened
-        if self.deafened and not self.muted:
+        if self.deafened:
+            self._mute_before_deafen = self.muted
             self.muted = True
+        else:
+            self.muted = getattr(self, "_mute_before_deafen", False)
         self.apply_audio_buttons()
         self.update_voice_flags()
 
@@ -1353,6 +1429,9 @@ class MainWindow(QMainWindow):
         self.deafen_button.style().polish(self.deafen_button)
 
     def update_voice_flags(self) -> None:
+        if getattr(self, 'call_maintenance', None):
+            self.refresh_voice()
+            return
         if self.connected_channel_id:
             try:
                 self.api.update_voice(self.connected_channel_id, self.muted, self.deafened)
@@ -1363,6 +1442,14 @@ class MainWindow(QMainWindow):
                 self.show_error(str(exc))
 
     def refresh_voice(self) -> None:
+        if self.current_channel and self.current_channel['type'] == 'voice':
+            self.ui_requests.voice(self.current_channel['id'])
+        else:
+            self.render_voice_response(0, [])
+
+    def render_voice_response(self, channel_id, states) -> None:
+        if channel_id and (not self.current_channel or self.current_channel['id'] != channel_id):
+            return
         self.member_list.clear()
         self.clear_stage_members()
         if not self.current_channel or self.current_channel["type"] != "voice":
@@ -1370,10 +1457,11 @@ class MainWindow(QMainWindow):
             self.add_stage_empty("Для текстовых каналов скоро появится полноценный чат.")
             return
         try:
-            states = self.api.voice_states(self.current_channel["id"])
+            if isinstance(states, Exception):
+                raise ApiError(str(states))
             self.current_voice_states = states
             self.voice_cache[self.current_channel["id"]] = states
-            if self.connected_channel_id == self.current_channel["id"]:
+            if self.connected_channel_id == self.current_channel["id"] and not getattr(self, "call_maintenance", None):
                 try:
                     self.ensure_e2ee_for_channel(self.current_channel["id"])
                 except ApiError:
@@ -1679,6 +1767,7 @@ class MainWindow(QMainWindow):
         label.setText(f"Громкость: {value}%")
 
     def closeEvent(self, event) -> None:
+        self.ui_requests.closed = True
         if self.screen_viewer:
             self.screen_viewer.close()
             self.screen_viewer = None
@@ -1743,17 +1832,80 @@ class MainWindow(QMainWindow):
             except ApiError as exc:
                 self.show_error(str(exc))
 
+    def manage_users(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Управление пользователями")
+        dialog.resize(600, 450)
+        layout = QVBoxLayout(dialog)
+        users = QListWidget()
+        layout.addWidget(users)
+        row = QHBoxLayout()
+        layout.addLayout(row)
+        def reload():
+            try:
+                users.clear()
+                for user in self.api.users():
+                    item = QListWidgetItem(f"{user['display_name']}  @{user['username']} · " +
+                        ("Заблокирован" if user['status'] != 'active' else "Активен"))
+                    item.setData(Qt.UserRole, user)
+                    users.addItem(item)
+            except ApiError as exc:
+                self.show_error(str(exc))
+        def create():
+            self.create_user()
+            reload()
+        def action(command):
+            item = users.currentItem()
+            if not item:
+                return
+            user = item.data(Qt.UserRole)
+            label = "Сбросить пароль" if command == 'reset-password' else "Заблокировать"
+            if QMessageBox.question(dialog, label, f"{label}: {user['display_name']}?",
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            try:
+                result = self.api.request('POST', f"/users/{user['id']}/{command}")
+                if 'temporary_password' in result:
+                    box = QMessageBox(dialog)
+                    box.setWindowTitle("Временный пароль на 24 часа")
+                    box.setText(result['temporary_password'])
+                    box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    box.exec()
+                reload()
+            except ApiError as exc:
+                self.show_error(str(exc))
+        for text, callback in [("Создать", create), ("Сбросить пароль", lambda: action('reset-password')),
+                               ("Заблокировать", lambda: action('disable'))]:
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            row.addWidget(button)
+        reload()
+        dialog.exec()
+
     def create_user(self) -> None:
         dialog = UserDialog(self)
         if dialog.exec() == QDialog.Accepted:
             try:
-                self.api.create_user(
+                result = self.api.create_user(
                     dialog.username.text().strip(),
                     dialog.display_name.text().strip(),
                     dialog.password.text(),
                     dialog.is_admin.isChecked(),
                 )
-                QMessageBox.information(self, "Готово", "Пользователь создан. Передайте ему временный пароль безопасным способом.")
+                invitation = QDialog(self)
+                invitation.setWindowTitle("Пользователь создан")
+                layout = QVBoxLayout(invitation)
+                details = QLineEdit(f"Логин: {result['username']}   Пароль: {result['temporary_password']}")
+                details.setReadOnly(True)
+                layout.addWidget(details)
+                copy_button = QPushButton("Копировать данные входа")
+                copy_button.clicked.connect(lambda: QApplication.clipboard().setText(details.text()))
+                layout.addWidget(copy_button)
+                close_button = QPushButton("Закрыть")
+                close_button.clicked.connect(invitation.accept)
+                layout.addWidget(close_button)
+                invitation.resize(620, 150)
+                invitation.exec()
             except ApiError as exc:
                 self.show_error(str(exc))
 
@@ -1943,13 +2095,8 @@ class ScreenShareStartDialog(QDialog):
         fps = max(1, round(1000 / interval_ms))
         capture_presets = preset["captures"]
         width, height, quality = capture_presets[0]
-        fps_note = (
-            " 60 FPS в текущей JPEG-трансляции зависит от скорости захвата и сжатия; "
-            "для максимальной плавности выберите FullHD скорость или HD 720p."
-            if interval_ms <= 17
-            else ""
-        )
-        self.quality_hint.setText(f"Будет отправляться: {width}x{height}, {fps} FPS, JPEG {quality}. {preset['tooltip']}.{fps_note}")
+        fps = 60 if interval_ms == 17 else fps
+        self.quality_hint.setText(f"До {width}x{height} · {fps} FPS · H.264")
 
     def refresh_preview(self) -> None:
         screen = QApplication.primaryScreen()
@@ -2406,6 +2553,7 @@ class UserDialog(QDialog):
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.Password)
         self.is_admin = QCheckBox("Администратор")
+        self.password.setPlaceholderText("Автоматически, если оставить пустым")
         form = QFormLayout()
         form.addRow("Логин", self.username)
         form.addRow("Имя", self.display_name)

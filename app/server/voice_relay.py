@@ -14,9 +14,12 @@ class VoiceRelay:
     async def join(self, channel_id: int, user_id: int, websocket: WebSocket) -> None:
         async with self._lock:
             old = self._channels[channel_id].get(user_id)
-            if old and old is not websocket:
-                await old.close(code=1000)
             self._channels[channel_id][user_id] = websocket
+        if old and old is not websocket:
+            try:
+                await asyncio.wait_for(old.close(code=1000), timeout=1)
+            except Exception:
+                pass
 
     async def leave(self, channel_id: int, user_id: int, websocket: WebSocket | None = None) -> None:
         async with self._lock:
@@ -38,17 +41,16 @@ class VoiceRelay:
                 for user_id, ws in self._channels.get(channel_id, {}).items()
                 if user_id != sender_id
             ]
-        stale: list[int] = []
-        for user_id, ws in recipients:
+        async def send(user_id, ws):
             try:
-                await ws.send_bytes(packet)
-            except RuntimeError:
-                stale.append(user_id)
-        if stale:
-            async with self._lock:
-                users = self._channels.get(channel_id, {})
-                for user_id in stale:
-                    users.pop(user_id, None)
+                await asyncio.wait_for(ws.send_bytes(packet), timeout=0.2)
+            except Exception:
+                await self.leave(channel_id, user_id, ws)
+                try:
+                    await asyncio.wait_for(ws.close(code=1013), timeout=0.2)
+                except Exception:
+                    pass
+        await asyncio.gather(*(send(user_id, ws) for user_id, ws in recipients))
 
 
 voice_relay = VoiceRelay()

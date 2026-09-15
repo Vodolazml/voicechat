@@ -4,6 +4,7 @@ from . import models
 
 
 PERMISSIONS = {
+    "roles.manage": "Manage administrator roles",
     "users.create": "Create users",
     "users.disable": "Disable users",
     "users.reset_password": "Reset user passwords",
@@ -33,6 +34,7 @@ PERMISSIONS = {
 
 ADMIN_PERMISSIONS = set(PERMISSIONS)
 USER_PERMISSIONS = {
+    "screen_share.start",
     "voice.join",
     "voice.speak",
     "voice.mute_self",

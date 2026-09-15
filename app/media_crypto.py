@@ -48,13 +48,13 @@ class ReplayProtectedCrypto:
             raise ValueError("bad encrypted media frame")
         
         seq = self._extract_seq(nonce)
-        if not self._check_recv_seq(seq):
-            raise ValueError("replay detected")
-        
         try:
-            return AESGCM(self.key).decrypt(nonce, ciphertext, aad)
+            plaintext = AESGCM(self.key).decrypt(nonce, ciphertext, aad)
         except InvalidTag as exc:
             raise ValueError("bad encrypted media frame") from exc
+        if not self._check_recv_seq(seq):
+            raise ValueError("replay detected")
+        return plaintext
     
     def _next_send_seq(self) -> int:
         """Генерирует следующий sequence number для отправки."""

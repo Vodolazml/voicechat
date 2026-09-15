@@ -25,3 +25,7 @@ backups
 downloads
 dist
 build
+*.key
+*.pem
+*.crt
+deploy/livekit.generated.yaml

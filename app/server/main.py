@@ -1,6 +1,9 @@
 from collections import defaultdict, deque
 from datetime import timedelta
 import json
+import hashlib
+import secrets
+from datetime import timezone
 from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -21,9 +24,11 @@ from ..e2ee_crypto import public_key_fingerprint
 from ..media_crypto import ENCRYPTED_FRAME_PREFIX
 from .deps import current_user, ensure_channel_member, require_permission, user_from_token
 from .permissions import seed_permissions, has_permission, user_permissions
-from .security import create_token, hash_password, validate_password_strength, verify_password
+from .security import create_token, hash_password, validate_password_strength, verify_password, password_fingerprint
 from .screen_relay import screen_relay
 from .voice_relay import voice_relay
+from .media_sessions import remove_media_participant
+from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
 
 
@@ -33,6 +38,7 @@ SCREEN_ALLOWED_VIEWER_INTERVALS_MS = {17, 33, 67, 100, 200, 500}
 MAX_WS_TEXT_CHARS = 2048
 
 app = FastAPI(title=settings.app_name)
+app.add_middleware(BodyLimitMiddleware, limit=settings.max_http_body_bytes)
 app.mount("/downloads", StaticFiles(directory=settings.downloads_dir, check_dir=False), name="downloads")
 if settings.allowed_hosts and "*" not in settings.allowed_hosts:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
@@ -208,6 +214,7 @@ def client_update(version: str = APP_VERSION) -> schemas.ClientUpdateOut:
         required=update_available and settings.client_update_required,
         download_url=settings.client_download_url if update_available else "",
         sha256=settings.client_download_sha256 if update_available else "",
+        signature=settings.client_download_signature if update_available else "",
         release_notes_url=settings.client_release_notes_url if update_available else "",
     )
 
@@ -230,8 +237,38 @@ def login(payload: schemas.LoginIn, request: Request, db: Session = Depends(get_
         db.commit()
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     write_audit(db, actor_id=user.id, action="auth.login", target_type="user", target_id=user.id, request=request)
+    temporary = db.get(models.TemporaryCredential, user.id)
+    if user.must_change_password and temporary and temporary.expires_at.replace(tzinfo=timezone.utc) <= models.utcnow():
+        raise HTTPException(status_code=401, detail="Временный пароль истёк. Обратитесь к администратору")
     db.commit()
-    return schemas.TokenOut(access_token=create_token(user.id, user.password_hash), must_change_password=user.must_change_password)
+    return issue_session(db, user)
+
+
+def issue_session(db, user):
+    refresh = ""
+    if not user.must_change_password:
+        refresh = secrets.token_urlsafe(48)
+        db.add(models.LoginSession(token_hash=hashlib.sha256(refresh.encode()).hexdigest(),
+            user_id=user.id, password_fingerprint=password_fingerprint(user.password_hash),
+            expires_at=models.utcnow() + timedelta(days=30)))
+        db.commit()
+    return schemas.TokenOut(access_token=create_token(user.id, user.password_hash),
+                            must_change_password=user.must_change_password, refresh_token=refresh)
+
+
+@app.post("/auth/refresh", response_model=schemas.TokenOut, tags=["auth"])
+def refresh_session(payload: schemas.RefreshIn, request: Request, db: Session = Depends(get_db)):
+    rate_limit(f"refresh:{request.client.host if request.client else 'local'}", 120, 60)
+    token_hash = hashlib.sha256(payload.refresh_token.encode()).hexdigest()
+    session = db.get(models.LoginSession, token_hash)
+    if not session or session.expires_at.replace(tzinfo=timezone.utc) <= models.utcnow():
+        raise HTTPException(status_code=401, detail="Требуется повторный вход")
+    user = db.get(models.User, session.user_id)
+    if not user or user.status != 'active' or user.must_change_password or session.password_fingerprint != password_fingerprint(user.password_hash):
+        raise HTTPException(status_code=401, detail="Сессия отозвана")
+    # Keep the device token stable so a crash between refresh and disk save cannot log it out.
+    return schemas.TokenOut(access_token=create_token(user.id, user.password_hash),
+                            must_change_password=False, refresh_token=payload.refresh_token)
 
 
 @app.get("/me", response_model=schemas.MeOut, tags=["auth"])
@@ -243,6 +280,11 @@ def me(user: models.User = Depends(current_user), db: Session = Depends(get_db))
         must_change_password=user.must_change_password,
         permissions=sorted(user_permissions(db, user.id)),
     )
+
+
+@app.post("/auth/renew", response_model=schemas.TokenOut, tags=["auth"])
+def renew_session(user: models.User = Depends(current_user)):
+    return schemas.TokenOut(access_token=create_token(user.id, user.password_hash), must_change_password=False)
 
 
 @app.post("/me/password", tags=["auth"])
@@ -258,6 +300,9 @@ def change_password(
     validate_password_strength(payload.new_password)
     user.password_hash = hash_password(payload.new_password)
     user.must_change_password = False
+    temporary = db.get(models.TemporaryCredential, user.id)
+    if temporary:
+        db.delete(temporary)
     write_audit(db, actor_id=user.id, action="auth.password_changed", target_type="user", target_id=user.id, request=request)
     db.commit()
     return {"status": "ok"}
@@ -271,7 +316,7 @@ def list_users(
     return list(db.scalars(select(models.User).where(models.User.status != "deleted").order_by(models.User.username)))
 
 
-@app.post("/users", response_model=schemas.UserOut, tags=["admin"])
+@app.post("/users", response_model=schemas.UserCreatedOut, tags=["admin"])
 def create_user(
     payload: schemas.UserCreateIn,
     request: Request,
@@ -281,13 +326,17 @@ def create_user(
     # Rate limiting для создания пользователей: максимум 10 в минуту с одного IP
     client_ip = request.client.host if request.client else "local"
     rate_limit(f"create_user:{client_ip}", 10, 60)
-    validate_password_strength(payload.temporary_password)
+    import secrets
+    temporary_password = payload.temporary_password or (secrets.token_urlsafe(18) + "aA7!")
+    validate_password_strength(temporary_password)
+    if payload.is_admin and not has_permission(db, actor.id, 'roles.manage'):
+        raise HTTPException(status_code=403, detail="Нет права назначать администратора")
     role_name = "Owner/System Admin" if payload.is_admin else "User"
     role = db.scalar(select(models.Role).where(models.Role.name == role_name))
     user = models.User(
         username=payload.username,
         display_name=payload.display_name,
-        password_hash=hash_password(payload.temporary_password),
+        password_hash=hash_password(temporary_password),
         must_change_password=True,
     )
     db.add(user)
@@ -298,9 +347,55 @@ def create_user(
         raise HTTPException(status_code=409, detail="Пользователь с таким логином уже существует") from exc
     if role:
         db.add(models.UserRole(user_id=user.id, role_id=role.id))
+    db.add(models.TemporaryCredential(user_id=user.id, expires_at=models.utcnow() + timedelta(days=1)))
     write_audit(db, actor_id=actor.id, action="users.create", target_type="user", target_id=user.id, request=request)
     db.commit()
-    return user
+    return schemas.UserCreatedOut(**schemas.UserOut.model_validate(user).model_dump(), temporary_password=temporary_password)
+
+
+@app.post('/users/{user_id}/reset-password', tags=['admin'])
+async def reset_user_password(user_id: int, request: Request,
+    actor: models.User = Depends(require_permission('users.reset_password')), db: Session = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if not user or user.id == actor.id:
+        raise HTTPException(status_code=400, detail='Выберите другого пользователя')
+    password = secrets.token_urlsafe(18) + 'aA7!'
+    user.password_hash = hash_password(password)
+    user.must_change_password = True
+    temporary = db.get(models.TemporaryCredential, user_id)
+    if temporary:
+        temporary.expires_at = models.utcnow() + timedelta(days=1)
+    else:
+        db.add(models.TemporaryCredential(user_id=user_id, expires_at=models.utcnow() + timedelta(days=1)))
+    state = db.get(models.VoiceState, user_id)
+    channel_id = state.channel_id if state else None
+    if state:
+        db.delete(state)
+    db.query(models.LoginSession).filter_by(user_id=user_id).delete()
+    write_audit(db, actor_id=actor.id, action='users.reset_password', target_type='user', target_id=user_id, request=request)
+    db.commit()
+    if channel_id:
+        await remove_media_participant(channel_id, user_id)
+    return {'temporary_password': password}
+
+
+@app.post('/users/{user_id}/disable', tags=['admin'])
+async def disable_user(user_id: int, request: Request,
+    actor: models.User = Depends(require_permission('users.disable')), db: Session = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if not user or user.id == actor.id:
+        raise HTTPException(status_code=400, detail='Нельзя заблокировать свою учётную запись')
+    user.status = 'disabled'
+    db.query(models.LoginSession).filter_by(user_id=user_id).delete()
+    state = db.get(models.VoiceState, user_id)
+    channel_id = state.channel_id if state else None
+    if state:
+        db.delete(state)
+    write_audit(db, actor_id=actor.id, action='users.disable', target_type='user', target_id=user_id, request=request)
+    db.commit()
+    if channel_id:
+        await remove_media_participant(channel_id, user_id)
+    return {'status': 'ok'}
 
 
 @app.get("/spaces", response_model=list[schemas.SpaceOut], tags=["spaces"])
@@ -521,7 +616,7 @@ def update_voice_state(
 
 
 @app.post("/channels/{channel_id}/disconnect", tags=["voice"])
-def disconnect_channel(
+async def disconnect_channel(
     channel_id: int,
     request: Request,
     user: models.User = Depends(current_user),
@@ -532,6 +627,7 @@ def disconnect_channel(
         db.delete(state)
         write_audit(db, actor_id=user.id, action="voice.disconnect", target_type="channel", target_id=channel_id, request=request)
         db.commit()
+        await remove_media_participant(channel_id, user.id)
     return {"status": "ok"}
 
 
@@ -560,6 +656,28 @@ def audit_log(
     return list(db.scalars(select(models.AuditLog).order_by(models.AuditLog.id.desc()).limit(100)))
 
 
+@app.post("/channels/{channel_id}/video-token", tags=["video"])
+def video_token(channel_id: int, audio: bool = False, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    from livekit import api as livekit_api
+    ensure_channel_member(db, user.id, channel_id)
+    state = db.get(models.VoiceState, user.id)
+    if not state or state.channel_id != channel_id:
+        raise HTTPException(status_code=403, detail="Сначала войдите в канал")
+    if not settings.livekit_url or not settings.livekit_api_secret:
+        raise HTTPException(status_code=503, detail="Видеосервер LiveKit ещё не настроен")
+    can_publish = has_permission(db, user.id, "voice.speak" if audio else "screen_share.start")
+    can_subscribe = has_permission(db, user.id, "voice.join" if audio else "screen_share.view")
+    if not can_publish and not can_subscribe:
+        raise HTTPException(status_code=403, detail="Нет доступа к видео")
+    token = (livekit_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+             .with_identity(f'{user.id}-audio' if audio else str(user.id)).with_name(user.display_name)
+             .with_ttl(timedelta(minutes=10))
+             .with_grants(livekit_api.VideoGrants(room_join=True, room=f"channel-{channel_id}",
+                 can_publish=can_publish, can_subscribe=can_subscribe,
+                 can_publish_data=False, can_publish_sources=["microphone" if audio else "screen_share"])).to_jwt())
+    return {"url": settings.livekit_url, "token": token}
+
+
 def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceStateOut:
     user = db.get(models.User, state.user_id)
     return schemas.VoiceStateOut(
@@ -575,6 +693,9 @@ def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceState
 
 @app.websocket("/voice/ws/{channel_id}")
 async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = "") -> None:
+    if websocket.headers.get("x-voicechat-protocol") != "2":
+        await websocket.close(code=1008, reason="client update required")
+        return
     if not websocket_origin_allowed(websocket):
         await websocket.close(code=1008, reason="bad origin")
         return
@@ -582,7 +703,7 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = ""
     # Rate limiting для WebSocket подключений
     ws_client = websocket.client
     client_host = ws_client.host if ws_client else "unknown"
-    rate_limit(f"ws_voice:{client_host}", 5, 60)
+    rate_limit(f"ws_voice:{client_host}", 300, 60)
 
     with SessionLocal() as db:
         try:
@@ -591,6 +712,10 @@ async def voice_websocket(websocket: WebSocket, channel_id: int, token: str = ""
             await websocket.close(code=1008, reason="auth required")
             return
         user_id = user.id
+        state = db.get(models.VoiceState, user_id)
+        if user.must_change_password or not state or state.channel_id != channel_id:
+            await websocket.close(code=1008, reason="join channel first")
+            return
         channel = db.get(models.Channel, channel_id)
         if not channel or channel.is_deleted or channel.type != "voice":
             await websocket.close(code=1008, reason="bad channel")
@@ -632,7 +757,7 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str = "
     # Rate limiting для screen share WebSocket
     ws_client = websocket.client
     client_host = ws_client.host if ws_client else "unknown"
-    rate_limit(f"ws_screen:{client_host}", 5, 60)
+    rate_limit(f"ws_screen:{client_host}", 300, 60)
 
     can_send = False
     with SessionLocal() as db:
@@ -673,7 +798,7 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str = "
                 if control.get("type") == "viewer_settings":
                     interval_ms = control.get("fps_interval_ms")
                     if isinstance(interval_ms, int) and interval_ms in SCREEN_ALLOWED_VIEWER_INTERVALS_MS:
-                        await screen_relay.set_viewer_interval(channel_id, payload.user_id, interval_ms)
+                        await screen_relay.set_viewer_interval(channel_id, user_id, interval_ms)
                 continue
             data = message.get("bytes")
             if data is None:
@@ -690,4 +815,4 @@ async def screen_websocket(websocket: WebSocket, channel_id: int, token: str = "
     finally:
         if can_send:
             await screen_relay.broadcast_frame(channel_id, user_id, b"__STOP__")
-        await screen_relay.leave(channel_id, user_id)
+        await screen_relay.leave(channel_id, user_id, websocket)

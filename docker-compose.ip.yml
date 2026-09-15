@@ -1,5 +1,33 @@
 services:
+  data-init:
+    image: alpine:3.22
+    user: "0:0"
+    volumes:
+      - voicechat_data:/data
+    command: ["sh", "-c", "chown -R 10001:10001 /data"]
+    restart: "no"
+  livekit:
+    image: livekit/livekit-server:v1.9.9
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    volumes:
+      - ./deploy/livekit.generated.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
   api:
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     build:
       context: .
     restart: unless-stopped
@@ -13,7 +41,7 @@ services:
       - "8765:8765"
     volumes:
       - voicechat_data:/data
-      - ./downloads:/data/downloads
+      - ./downloads:/data/downloads:ro
     command:
       - python
       - -m

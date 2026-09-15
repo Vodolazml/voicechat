@@ -12,12 +12,17 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
     allowed_hosts: list[str] = ["127.0.0.1", "localhost", "testserver"]
     max_http_body_bytes: int = 65536
-    client_latest_version: str = "0.1.12"
+    client_latest_version: str = "0.2.0"
     client_download_url: str = ""
     client_download_sha256: str = ""
+    client_download_signature: str = ""
     client_update_required: bool = False
     client_release_notes_url: str = ""
     downloads_dir: str = "downloads"
+    livekit_url: str = ""
+    livekit_internal_url: str = "http://livekit:7880"
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
 
     model_config = SettingsConfigDict(env_prefix="VOICECHAT_", env_file=".env")
 

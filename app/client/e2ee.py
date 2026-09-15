@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from time import monotonic
 
 from app.e2ee_crypto import (
     decrypt_sender_media_key,
@@ -29,6 +30,8 @@ class ChannelE2EE:
         self.outgoing_key: bytes | None = None
         self.outgoing_key_id = ""
         self.published_recipients: set[int] = set()
+        self.published_identities: dict[int, str] = {}
+        self.last_published = 0.0
         self.sender_keys: dict[int, bytes] = {}
         self.sender_key_ids: dict[int, str] = {}
 
@@ -52,7 +55,9 @@ class ChannelE2EE:
         for user in users:
             recipient_id = int(user["user_id"])
             public_key = str(user["public_key"])
-            if recipient_id in self.published_recipients:
+            if (recipient_id in self.published_recipients
+                    and self.published_identities.get(recipient_id) == public_key
+                    and monotonic() - self.last_published < 60):
                 continue
             envelopes[recipient_id] = encrypt_sender_media_key(
                 private_key_b64=identity.private_key,
@@ -63,10 +68,12 @@ class ChannelE2EE:
                 recipient_id=recipient_id,
                 key_id=key_id,
             )
+            self.published_identities[recipient_id] = public_key
         return envelopes
 
     def mark_published(self, recipient_ids: set[int]) -> None:
         self.published_recipients.update(recipient_ids)
+        self.last_published = monotonic()
 
     def load_sender_keys(
         self,

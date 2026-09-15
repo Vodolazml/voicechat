@@ -14,7 +14,8 @@ from collections.abc import Callable
 import sounddevice as sd
 import websockets
 
-from app.media_crypto import decrypt_frame, encrypt_frame
+from app.media_crypto import ReplayProtectedCrypto
+from .audio_mixer import AudioMixer
 
 
 SAMPLE_RATE = 16_000
@@ -253,6 +254,8 @@ class VoiceAudioClient:
         self.channel_id = channel_id
         self.user_id = user_id
         self.outgoing_media_key = outgoing_media_key
+        self._encryptor = ReplayProtectedCrypto(outgoing_media_key, direction="send")
+        self._decryptors: dict[int, ReplayProtectedCrypto] = {}
         self.media_key_for_sender = media_key_for_sender
         self.is_muted = is_muted
         self.is_deafened = is_deafened
@@ -264,7 +267,8 @@ class VoiceAudioClient:
         self.input_device = input_device
         self.output_device = output_device
         self.capture_queue: queue.Queue[bytes] = queue.Queue(maxsize=40)
-        self.playback_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
+        self.playback_queue: queue.Queue[bytes] = queue.Queue(maxsize=1)
+        self.mixer = AudioMixer(FRAME_BYTES)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -272,6 +276,7 @@ class VoiceAudioClient:
         self._input_stream: sd.RawInputStream | None = None
         self._output_stream: sd.RawOutputStream | None = None
         self._stream_lock = threading.RLock()
+        self._devices_started = False
         self.speaking = False
         self._last_voice_at = 0.0
         self._preroll_frames: deque[bytes] = deque(maxlen=VOICE_PREROLL_FRAMES)
@@ -287,6 +292,7 @@ class VoiceAudioClient:
         self._drain(self.capture_queue)
         self._drain(self.playback_queue)
         self._input_stream, self._output_stream = self._open_streams(self.input_device, self.output_device)
+        self._devices_started = True
         self._thread = threading.Thread(target=self._run_loop, name="voice-audio", daemon=True)
         self._thread.start()
         self._status("audio connected")
@@ -324,12 +330,18 @@ class VoiceAudioClient:
 
     def restart_devices(self, input_device: int | None, output_device: int | None) -> None:
         with self._stream_lock:
-            new_input, new_output = self._open_streams(input_device, output_device)
             old_input, old_output = self._input_stream, self._output_stream
-            self._input_stream, self._output_stream = new_input, new_output
+            self._close_streams(old_input, old_output)
+            self._input_stream = self._output_stream = None
+            self.mixer.clear()
+            self._drain(self.capture_queue)
+            try:
+                self._input_stream, self._output_stream = self._open_streams(input_device, output_device)
+            except Exception:
+                self._input_stream, self._output_stream = self._open_streams(self.input_device, self.output_device)
+                raise
             self.input_device = input_device
             self.output_device = output_device
-        self._close_streams(old_input, old_output)
         self._status("audio devices changed")
 
     def _close_streams(self, *streams) -> None:
@@ -344,9 +356,10 @@ class VoiceAudioClient:
 
     def stop(self) -> None:
         self._stop.set()
+        self._devices_started = False
         self._close_active_websocket()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=12)
         with self._stream_lock:
             input_stream, output_stream = self._input_stream, self._output_stream
             self._input_stream = None
@@ -354,14 +367,16 @@ class VoiceAudioClient:
         self._close_streams(input_stream, output_stream)
         self._drain(self.capture_queue)
         self._drain(self.playback_queue)
+        self.mixer.clear()
         self.consume_audible_users()
         self._reset_capture_state()
         self._status("audio disconnected")
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:
-        if self._stop.is_set() or self.is_muted():
+        if self._stop.is_set() or self.is_muted() or self.is_deafened():
             self.speaking = False
             self._preroll_frames.clear()
+            self._drain(self.capture_queue)
             return
         data = bytes(indata)
         if not data:
@@ -397,12 +412,12 @@ class VoiceAudioClient:
 
     def _playback_callback(self, outdata, frames, time_info, status) -> None:
         if self._stop.is_set() or self.is_deafened():
+            self.mixer.clear()
             outdata[:] = b"\x00" * len(outdata)
             return
-        try:
-            data = self.playback_queue.get_nowait()
-        except queue.Empty:
-            data = b"\x00" * len(outdata)
+        data, audible = self.mixer.render(self.is_locally_muted, self.local_volume)
+        for user_id in audible:
+            self._mark_audible(user_id)
         if len(data) < len(outdata):
             data += b"\x00" * (len(outdata) - len(data))
         outdata[:] = data[: len(outdata)]
@@ -419,7 +434,9 @@ class VoiceAudioClient:
     async def _socket_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                async with websockets.connect(self.ws_url, max_size=8192, additional_headers=self.ws_headers) as websocket:
+                headers = self.ws_headers() if callable(self.ws_headers) else self.ws_headers
+                async with websockets.connect(self.ws_url, max_size=8192, additional_headers=headers,
+                                              open_timeout=5, close_timeout=1, ping_interval=10, ping_timeout=10) as websocket:
                     self._websocket = websocket
                     self._status("audio connected")
                     sender = asyncio.create_task(self._send_loop(websocket))
@@ -449,9 +466,12 @@ class VoiceAudioClient:
             except queue.Empty:
                 await asyncio.sleep(0.004)
                 continue
+            if self.is_muted() or self.is_deafened():
+                self._drain(self.capture_queue)
+                continue
             # AAD привязан к channel_id и user_id для защиты от пересылки между каналами
             aad = make_voice_aad(self.channel_id, self.user_id, 0)
-            encrypted = encrypt_frame(self.outgoing_media_key, frame, aad)
+            encrypted = self._encryptor.encrypt(frame, aad)
             # Добавляем sender_id в начало пакета
             await websocket.send(encrypted)
 
@@ -481,19 +501,14 @@ class VoiceAudioClient:
             # AAD привязан к channel_id, sender_id и recipient_id
             aad = make_voice_aad(self.channel_id, sender_id, 0)
             try:
-                pcm = decrypt_frame(media_key, encrypted_data, aad)
+                decryptor = self._decryptors.get(sender_id)
+                if decryptor is None or decryptor.key != media_key:
+                    decryptor = self._decryptors[sender_id] = ReplayProtectedCrypto(media_key)
+                pcm = decryptor.decrypt(encrypted_data, aad)
             except ValueError:
                 self._mark_key_problem(sender_id)
                 continue
-            volume = max(0, min(200, self.local_volume(sender_id)))
-            if volume <= 0:
-                continue
-            if volume != 100:
-                pcm = audioop.mul(pcm, SAMPLE_WIDTH, volume / 100)
-            if audioop.rms(pcm, SAMPLE_WIDTH) <= 0:
-                continue
-            self._put_latest(self.playback_queue, pcm)
-            self._mark_audible(sender_id)
+            self.mixer.put(sender_id, pcm)
 
     def consume_audible_users(self) -> set[int]:
         with self._audible_lock:

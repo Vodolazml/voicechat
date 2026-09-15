@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.version import APP_VERSION
+from app.update_trust import verify_release
 from .auto_updater import (
     UpdateProgress,
     UpdateResult,
@@ -35,6 +36,7 @@ class UpdateInfo:
     required: bool
     download_url: str = ""
     sha256: str = ""
+    signature: str = ""
     release_notes_url: str = ""
 
 
@@ -56,7 +58,9 @@ class UpdateWorkflow:
                 success=False, step="error",
                 message="URL или SHA-256 не заданы", error="Missing update info",
             )
-        return auto_download_update(info.download_url, info.sha256, self.progress_callback)
+        return auto_download_update(info.download_url, info.sha256, self.progress_callback,
+            version=getattr(info, 'latest_version', getattr(info, 'new_version', '')),
+            signature=info.signature)
     
     def install(self, download_path: Path) -> UpdateResult:
         """Устанавливает обновление."""
@@ -93,16 +97,25 @@ def download_update(info: UpdateInfo) -> Path:
         raise RuntimeError("URL обновления не задан")
     if not info.sha256:
         raise RuntimeError("SHA-256 обновления не задан")
+    verify_release(info.latest_version, info.download_url, info.sha256, info.signature)
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
     target = UPDATE_DIR / update_file_name(info.download_url, info.latest_version)
+    if target.suffix.lower() != ".exe":
+        raise RuntimeError("Обновление должно быть установщиком EXE")
+    partial = target.with_suffix('.partial')
+    downloaded = 0
     with httpx.stream("GET", info.download_url, follow_redirects=True, timeout=60) as response:
         response.raise_for_status()
-        with target.open("wb") as file:
+        with partial.open("wb") as file:
             for chunk in response.iter_bytes():
+                downloaded += len(chunk)
+                if downloaded > 1024 * 1024 * 1024:
+                    raise RuntimeError("Превышен максимальный размер обновления")
                 file.write(chunk)
-    if sha256_file(target).lower() != info.sha256.lower():
-        target.unlink(missing_ok=True)
+    if sha256_file(partial).lower() != info.sha256.lower():
+        partial.unlink(missing_ok=True)
         raise RuntimeError("Хэш обновления не совпал. Файл удалён.")
+    os.replace(partial, target)
     return target
 
 

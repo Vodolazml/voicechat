@@ -69,7 +69,10 @@ def test_voice_receive_frame_decrypts_server_prefixed_packet() -> None:
 
     asyncio.run(receiver._receive_loop(FakeWebsocket()))
 
-    assert receiver.playback_queue.get_nowait() == pcm
+    assert receiver.consume_audible_users() == set()
+    output = bytearray(len(pcm))
+    receiver._playback_callback(output, 320, None, None)
+    assert bytes(output) == pcm
     assert receiver.consume_audible_users() == {sender_id}
 
 

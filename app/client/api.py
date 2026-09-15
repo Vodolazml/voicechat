@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 from urllib.parse import urlparse
+from threading import Lock
 
 import httpx
 
@@ -12,7 +13,9 @@ from .updater import UpdateInfo
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765", *, allow_insecure_http: bool = False) -> str:
@@ -33,6 +36,8 @@ def normalize_base_url(value: str, default: str = "http://127.0.0.1:8765", *, al
 class ApiClient:
     base_url: str = "http://127.0.0.1:8765"
     token: str | None = None
+    refresh_token: str = ""
+    _refresh_lock: Lock = field(default_factory=Lock, init=False)
     _client: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=8), init=False)
 
     def set_base_url(self, value: str, *, allow_insecure_http: bool = False) -> None:
@@ -51,12 +56,20 @@ class ApiClient:
             )
         except httpx.HTTPError as exc:
             raise ApiError("Сервер недоступен. Проверьте, что backend запущен.") from exc
+        if response.status_code == 401 and self.refresh_token and not path.startswith('/auth/'):
+            with self._refresh_lock:
+                self.refresh_session(self.refresh_token)
+            try:
+                response = self._client.request(method, f"{self.base_url.rstrip('/')}{path}",
+                                                headers=self._headers(), **kwargs)
+            except httpx.HTTPError as exc:
+                raise ApiError("Сервер недоступен") from exc
         if response.status_code >= 400:
             try:
                 detail = response.json().get("detail", "Ошибка запроса")
             except ValueError:
                 detail = response.text or "Ошибка запроса"
-            raise ApiError(str(detail))
+            raise ApiError(str(detail), response.status_code)
         if not response.content:
             return None
         return response.json()
@@ -64,6 +77,13 @@ class ApiClient:
     def login(self, username: str, password: str) -> dict[str, Any]:
         data = self.request("POST", "/auth/login", json={"username": username, "password": password})
         self.token = data["access_token"]
+        self.refresh_token = data.get("refresh_token", "")
+        return data
+
+    def refresh_session(self, token):
+        data = self.request('POST', '/auth/refresh', json={'refresh_token': token})
+        self.token = data['access_token']
+        self.refresh_token = data['refresh_token']
         return data
 
     def ping_ms(self) -> int:
@@ -82,6 +102,7 @@ class ApiClient:
             required=bool(data.get("required", False)),
             download_url=str(data.get("download_url", "")),
             sha256=str(data.get("sha256", "")),
+            signature=str(data.get("signature", "")),
             release_notes_url=str(data.get("release_notes_url", "")),
         )
 
@@ -96,7 +117,7 @@ class ApiClient:
         return f"{scheme}://{host}/screen/ws/{channel_id}"
 
     def ws_headers(self) -> dict[str, str]:
-        return self._headers()
+        return {**self._headers(), "X-VoiceChat-Protocol": "2"}
 
     def set_device_key(self, public_key: str, fingerprint: str) -> None:
         self.request("PUT", "/me/device-key", json={"public_key": public_key, "fingerprint": fingerprint})
@@ -123,7 +144,7 @@ class ApiClient:
             json={
                 "username": username,
                 "display_name": display_name,
-                "temporary_password": password,
+                "temporary_password": password or None,
                 "is_admin": is_admin,
             },
         )

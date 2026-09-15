@@ -1,11 +1,15 @@
 argon2-cffi>=23.1.0
-cryptography>=42.0.0
+cryptography==50.0.0
 fastapi>=0.115.0
 httpx>=0.27.0
-pydantic-settings>=2.4.0
+pydantic-settings==2.14.2
 PySide6>=6.7.0
 sounddevice>=0.4.7
 SQLAlchemy>=2.0.30
 uvicorn[standard]>=0.30.0
 websockets>=12.0
 pytest>=8.2.0
+numpy>=1.26
+livekit==1.1.18
+livekit-api==1.2.1
+mss==10.2.0

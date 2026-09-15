@@ -9,10 +9,13 @@ WORKDIR /app
 
 RUN python -m pip install --no-cache-dir --upgrade pip
 
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+COPY requirements-server.txt .
+RUN python -m pip install --no-cache-dir -r requirements-server.txt
 
 COPY . .
+
+RUN useradd --uid 10001 --create-home voicechat
+USER 10001:10001
 
 EXPOSE 8765
 

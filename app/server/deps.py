@@ -1,6 +1,7 @@
 import hmac
+from datetime import timezone
 
-from fastapi import Depends, Header, HTTPException, WebSocket, status
+from fastapi import Depends, Header, HTTPException, WebSocket, Request, status
 from sqlalchemy.orm import Session
 from . import models
 from .database import get_db, SessionLocal
@@ -18,10 +19,16 @@ def user_from_token(db: Session, token: str) -> models.User:
     return user
 
 
-def current_user(authorization: str = Header(default=""), db: Session = Depends(get_db)) -> models.User:
+def current_user(request: Request, authorization: str = Header(default=""), db: Session = Depends(get_db)) -> models.User:
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется вход")
-    return user_from_token(db, authorization.removeprefix("Bearer ").strip())
+    user = user_from_token(db, authorization.removeprefix("Bearer ").strip())
+    temporary = db.get(models.TemporaryCredential, user.id) if user.must_change_password else None
+    if temporary and temporary.expires_at.replace(tzinfo=timezone.utc) <= models.utcnow():
+        raise HTTPException(status_code=401, detail="Временный пароль истёк")
+    if user.must_change_password and request.url.path not in {"/me", "/me/password"}:
+        raise HTTPException(status_code=403, detail="Сначала смените временный пароль")
+    return user
 
 
 def require_permission(permission: str):

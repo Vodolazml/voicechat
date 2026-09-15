@@ -47,3 +47,4 @@ Desktop.ini
 
 # Docker local state
 .docker-data/
+deploy/livekit.generated.yaml

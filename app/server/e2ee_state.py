@@ -91,7 +91,7 @@ class E2EEState:
 
             # Проверяем старый ключ на истечение TTL
             existing = channel_keys.get(sender_id)
-            if existing and not existing.is_expired():
+            if existing and not existing.is_expired() and existing.key_id == key_id:
                 # Обновляем только envelopes, сохраняем key_id если он не старше
                 existing.envelopes.update(clean_envelopes)
                 existing.updated_at = monotonic()

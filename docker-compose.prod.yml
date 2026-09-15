@@ -1,5 +1,18 @@
 services:
+  data-init:
+    image: alpine:3.22
+    user: "0:0"
+    volumes:
+      - voicechat_data:/data
+    command: ["sh", "-c", "chown -R 10001:10001 /data"]
+    restart: "no"
   api:
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
     build:
       context: .
     restart: unless-stopped
@@ -13,7 +26,7 @@ services:
       - "8765"
     volumes:
       - voicechat_data:/data
-      - ./downloads:/data/downloads
+      - ./downloads:/data/downloads:ro
     command:
       - python
       - -m

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,9 @@ def load_client_settings() -> dict[str, Any]:
     
     if not isinstance(data, dict):
         return {}
+    if "e2ee_identity_dpapi" in data:
+        from .credential_store import unprotect_text
+        data["e2ee_identity_private_key"] = unprotect_text(data.pop("e2ee_identity_dpapi"))
     
     # Если настройки зашифрованы, расшифруем их
     if data.get("_encrypted"):
@@ -59,11 +64,22 @@ def save_client_settings(settings: dict[str, Any]) -> None:
         encrypted_data = _encrypt_settings(settings, master_key)
         data_to_save = encrypted_data
     else:
-        data_to_save = settings
+        data_to_save = dict(settings)
+        if sys.platform == "win32" and "e2ee_identity_private_key" in data_to_save:
+            from .credential_store import protect_text
+            data_to_save["e2ee_identity_dpapi"] = protect_text(data_to_save.pop("e2ee_identity_private_key"))
     
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with SETTINGS_PATH.open("w", encoding="utf-8") as file:
-        json.dump(data_to_save, file, ensure_ascii=False, indent=2)
+    fd, temporary = tempfile.mkstemp(dir=SETTINGS_PATH.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(data_to_save, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, SETTINGS_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     
     try:
         os.chmod(SETTINGS_PATH, 0o600)

@@ -17,6 +17,11 @@ class LoginIn(BaseModel):
 class TokenOut(OrmModel):
     access_token: str
     must_change_password: bool
+    refresh_token: str = ""
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str = Field(min_length=32, max_length=256)
 
 
 class ClientUpdateOut(BaseModel):
@@ -25,6 +30,7 @@ class ClientUpdateOut(BaseModel):
     required: bool = False
     download_url: str = ""
     sha256: str = ""
+    signature: str = ""
     release_notes_url: str = ""
 
 
@@ -44,7 +50,7 @@ class PasswordChangeIn(OrmModel):
 class UserCreateIn(OrmModel):
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
-    temporary_password: str = Field(min_length=12, max_length=256)
+    temporary_password: str | None = Field(default=None, min_length=12, max_length=256)
     is_admin: bool = False
 
 
@@ -54,6 +60,10 @@ class UserOut(OrmModel):
     display_name: str
     status: str
     must_change_password: bool
+
+
+class UserCreatedOut(UserOut):
+    temporary_password: str
 
 
 class SpaceCreateIn(OrmModel):

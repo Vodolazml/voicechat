@@ -1,5 +1,15 @@
 services:
+  data-init:
+    image: alpine:3.22
+    user: "0:0"
+    volumes:
+      - ./.docker-data:/data
+    command: ["sh", "-c", "chown -R 10001:10001 /data"]
+    restart: "no"
   api:
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
     build:
       context: .
     env_file:

@@ -92,7 +92,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def download_update(info: UpdateInfo) -> Path:
+def download_update(info: UpdateInfo, progress: Callable[[int, int], None] | None = None) -> Path:
     if not info.download_url:
         raise RuntimeError("URL обновления не задан")
     if not info.sha256:
@@ -106,12 +106,15 @@ def download_update(info: UpdateInfo) -> Path:
     downloaded = 0
     with httpx.stream("GET", info.download_url, follow_redirects=True, timeout=60) as response:
         response.raise_for_status()
+        total = int(response.headers.get("content-length") or 0)
         with partial.open("wb") as file:
             for chunk in response.iter_bytes():
                 downloaded += len(chunk)
                 if downloaded > 1024 * 1024 * 1024:
                     raise RuntimeError("Превышен максимальный размер обновления")
                 file.write(chunk)
+                if progress:
+                    progress(downloaded, total)
     if sha256_file(partial).lower() != info.sha256.lower():
         partial.unlink(missing_ok=True)
         raise RuntimeError("Хэш обновления не совпал. Файл удалён.")

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import ctypes.wintypes
 import sys
+import threading
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRectF, QSize, QTimer, Qt
+from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QPoint, QRectF, QSize, Signal, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QCursor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QPolygon
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +52,7 @@ from .livekit_screen import LiveKitScreenClient
 from .connection_maintenance import ConnectionMaintenance
 from .ui_requests import UiRequests
 from .settings_store import load_client_settings, save_client_settings
+from .single_instance import SingleInstanceGuard
 from .sounds import play_join_sound, play_leave_sound
 from .styles import APP_STYLE
 from .updater import UpdateInfo, download_update, open_update_file
@@ -370,6 +372,74 @@ class UpdateStepsDialog(QDialog):
         QApplication.processEvents()
 
 
+class UpdateDownloadDialog(QDialog):
+    """Modal progress dialog for downloading an update in the background.
+
+    The previous flow downloaded the ~200MB installer synchronously on the
+    GUI thread with no feedback, so Windows would mark the window "Not
+    Responding" for the whole download - easy to mistake for a crash.
+    """
+
+    _progress = Signal(int, int)
+    _failed = Signal(str)
+    _done = Signal(Path)
+
+    def __init__(self, parent: QWidget | None, info: UpdateInfo) -> None:
+        super().__init__(parent)
+        self.info = info
+        self.downloaded_path: Path | None = None
+        self.error_message = ""
+        self.setWindowTitle("Обновление Private VoiceChat")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel(f"Скачивание версии {info.latest_version}…")
+        self.status_label.setWordWrap(True)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.bar)
+
+        self._progress.connect(self._on_progress)
+        self._failed.connect(self._on_failed)
+        self._done.connect(self._on_done)
+
+    def run(self) -> bool:
+        threading.Thread(target=self._download, name="update-download", daemon=True).start()
+        return self.exec() == QDialog.Accepted
+
+    def _download(self) -> None:
+        try:
+            path = download_update(self.info, progress=lambda done, total: self._progress.emit(done, total))
+        except Exception as exc:
+            self._failed.emit(str(exc))
+            return
+        self._done.emit(path)
+
+    def _on_progress(self, downloaded: int, total: int) -> None:
+        mb = downloaded / 1_048_576
+        if total > 0:
+            percent = max(0, min(100, int(downloaded * 100 / total)))
+            self.bar.setRange(0, 100)
+            self.bar.setValue(percent)
+            self.status_label.setText(f"Скачивание обновления: {percent}% ({mb:.1f} / {total / 1_048_576:.1f} МБ)")
+        else:
+            self.status_label.setText(f"Скачивание обновления: {mb:.1f} МБ")
+
+    def _on_failed(self, message: str) -> None:
+        self.error_message = message
+        self.reject()
+
+    def _on_done(self, path: Path) -> None:
+        self.downloaded_path = path
+        self.accept()
+
+    def closeEvent(self, event) -> None:
+        event.ignore()
+
+
 class LoginDialog(QDialog):
     def __init__(self, api: ApiClient) -> None:
         super().__init__()
@@ -527,11 +597,14 @@ class LoginDialog(QDialog):
         )
         if answer != QMessageBox.Ok:
             return not info.required
+        progress_dialog = UpdateDownloadDialog(self, info)
+        if not progress_dialog.run():
+            self.error.setText(f"Не удалось скачать обновление: {progress_dialog.error_message}")
+            return not info.required
         try:
-            path = download_update(info)
-            open_update_file(path)
+            open_update_file(progress_dialog.downloaded_path)
         except Exception as exc:
-            self.error.setText(f"Не удалось скачать обновление: {exc}")
+            self.error.setText(f"Не удалось запустить установщик: {exc}")
             return not info.required
         if info.required:
             self.error.setText("Установите обновление и запустите приложение снова.")
@@ -1545,10 +1618,11 @@ class MainWindow(QMainWindow):
         current_ids = {int(state["user_id"]) for state in states} - {my_id}
         known_ids = self.voice_known_members.get(channel_id)
         if known_ids is not None:
+            mixer = self.voice_audio.mixer if self.voice_audio else None
             if current_ids - known_ids:
-                play_join_sound(self.output_device_id)
+                play_join_sound(mixer)
             if known_ids - current_ids:
-                play_leave_sound(self.output_device_id)
+                play_leave_sound(mixer)
         self.voice_known_members[channel_id] = current_ids
 
     def render_voice_response(self, channel_id, states) -> None:
@@ -2805,11 +2879,17 @@ def main() -> int:
     app.setStyleSheet(APP_STYLE)
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
+
+    guard = SingleInstanceGuard()
+    if not guard.try_acquire():
+        return 0
+
     api = ApiClient()
     login = LoginDialog(api)
     if login.exec() != QDialog.Accepted:
         return 0
     window = MainWindow(api)
+    guard.show_requested.connect(window.restore_from_tray)
     window.show()
     return app.exec()
 

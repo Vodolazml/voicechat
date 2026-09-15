@@ -6,8 +6,11 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QDialog
 
 from app.client import settings_store
 from app.client.client_config import ClientConfig
-from app.client.main import AudioSettingsDialog, LoginDialog, MainWindow
+from app.client.main import AudioSettingsDialog, LoginDialog, MainWindow, UpdateDownloadDialog, UpdateInfo
 from app.client.hotkeys import DEFAULT_BINDINGS
+from app.client.single_instance import SingleInstanceGuard
+from app.client.sounds import FRAME_SAMPLES, _JOIN_FRAMES, _LEAVE_FRAMES
+from app.client.voice_audio import FRAME_BYTES
 from app.version import APP_VERSION
 
 
@@ -264,8 +267,8 @@ def test_voice_presence_change_plays_sounds_only_after_baseline(tmp_path, monkey
     monkeypatch.setattr(settings_store, "SETTINGS_PATH", tmp_path / "settings.json")
     app = QApplication.instance() or QApplication([])
     calls: list[str] = []
-    monkeypatch.setattr("app.client.main.play_join_sound", lambda device=None: calls.append("join"))
-    monkeypatch.setattr("app.client.main.play_leave_sound", lambda device=None: calls.append("leave"))
+    monkeypatch.setattr("app.client.main.play_join_sound", lambda mixer=None: calls.append("join"))
+    monkeypatch.setattr("app.client.main.play_leave_sound", lambda mixer=None: calls.append("leave"))
 
     window = MainWindow(FakeApi())
     window.connected_channel_id = 1
@@ -284,3 +287,67 @@ def test_voice_presence_change_plays_sounds_only_after_baseline(tmp_path, monkey
     window.connected_channel_id = None
     window.close()
     app.processEvents()
+
+
+def test_notification_chimes_match_voice_mixer_frame_size() -> None:
+    assert all(len(frame) == FRAME_BYTES for frame in _JOIN_FRAMES)
+    assert all(len(frame) == FRAME_BYTES for frame in _LEAVE_FRAMES)
+    assert FRAME_SAMPLES * 2 == FRAME_BYTES
+
+
+def test_update_download_dialog_runs_download_off_the_gui_thread(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    progress_calls = []
+
+    def fake_download_update(info, progress=None):
+        if progress:
+            progress(50, 100)
+        return "C:/fake/installer.exe"
+
+    monkeypatch.setattr("app.client.main.download_update", fake_download_update)
+    info = UpdateInfo(latest_version="9.9.9", update_available=True, required=False,
+                       download_url="http://x/y.exe", sha256="a" * 64, signature="sig")
+
+    dialog = UpdateDownloadDialog(None, info)
+    dialog._progress.connect(lambda done, total: progress_calls.append((done, total)))
+    accepted = dialog.run()
+
+    assert accepted is True
+    assert dialog.downloaded_path == "C:/fake/installer.exe"
+    assert progress_calls == [(50, 100)]
+
+
+def test_update_download_dialog_surfaces_failure(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+
+    def fake_download_update(info, progress=None):
+        raise RuntimeError("network error")
+
+    monkeypatch.setattr("app.client.main.download_update", fake_download_update)
+    info = UpdateInfo(latest_version="9.9.9", update_available=True, required=False,
+                       download_url="http://x/y.exe", sha256="a" * 64, signature="sig")
+
+    dialog = UpdateDownloadDialog(None, info)
+    accepted = dialog.run()
+
+    assert accepted is False
+    assert dialog.error_message == "network error"
+
+
+def test_single_instance_guard_second_launch_notifies_first() -> None:
+    app = QApplication.instance() or QApplication([])
+    primary = SingleInstanceGuard()
+    assert primary.try_acquire() is True
+    received = []
+    primary.show_requested.connect(lambda: received.append(True))
+
+    secondary = SingleInstanceGuard()
+    assert secondary.try_acquire() is False
+
+    for _ in range(100):
+        app.processEvents()
+        if received:
+            break
+        import time
+        time.sleep(0.02)
+    assert received == [True]

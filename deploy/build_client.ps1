@@ -1,4 +1,4 @@
-param([string]$ServerUrl = "http://72.35.246.230:8765")
+param([string]$ServerUrl = "http://194.85.249.53:8765")
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
 python -m pytest -q

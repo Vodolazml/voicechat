@@ -142,6 +142,30 @@ class ApiClient:
     def create_invite(self, note: str = "", is_admin: bool = False) -> dict[str, Any]:
         return self.request("POST", "/invites", json={"note": note, "is_admin": is_admin})
 
+    def media_token(self, channel_id: int) -> dict[str, Any]:
+        """Single LiveKit connection for voice and screen (server 0.3+)."""
+        data = self.request("POST", f"/channels/{channel_id}/media-token")
+        validate_media_url(str(data.get("url", "")))
+        return data
+
+    def space_voice(self, space_id: int) -> list[dict[str, Any]]:
+        return self.request("GET", f"/spaces/{space_id}/voice")
+
+    def update_channel(self, channel_id: int, **changes: Any) -> dict[str, Any]:
+        return self.request("PATCH", f"/channels/{channel_id}", json=changes)
+
+    def delete_channel(self, channel_id: int) -> None:
+        self.request("DELETE", f"/channels/{channel_id}")
+
+    def move_user(self, user_id: int, channel_id: int) -> None:
+        self.request("POST", f"/voice/{user_id}/move", json={"channel_id": channel_id})
+
+    def kick_user(self, user_id: int) -> None:
+        self.request("POST", f"/voice/{user_id}/kick")
+
+    def server_mute(self, user_id: int, muted: bool) -> None:
+        self.request("POST", f"/voice/{user_id}/server-mute", json={"muted": muted})
+
     def media_credentials(self, channel_id: int, *, audio: bool) -> dict[str, Any]:
         data = self.request("POST", f"/channels/{channel_id}/video-token" + ("?audio=true" if audio else ""))
         validate_media_url(str(data.get("url", "")))

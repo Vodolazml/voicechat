@@ -725,13 +725,10 @@ def publish_sender_key(
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     ensure_media_e2ee_access(db, user.id, channel_id)
-    e2ee_state.set_sender_key(
-        channel_id,
-        user.id,
-        payload.key_id,
-        payload.envelopes,
-        channel_participant_ids(db, channel_id),
-    )
+    recipients = channel_participant_ids(db, channel_id)
+    e2ee_state.set_sender_key(channel_id, user.id, payload.key_id, payload.envelopes, recipients)
+    # Friends fetch the new key right away instead of polling for it.
+    hub.publish(recipients - {user.id}, {"type": "e2ee.updated", "channel_id": channel_id, "user_id": user.id})
     return {"status": "ok"}
 
 

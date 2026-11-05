@@ -16,6 +16,30 @@ datas += [('assets/app_icon.ico', 'assets'), ('app/client/ui/qml', 'app/client/u
 import os
 if os.path.isdir('assets/voice'):
     datas += [('assets/voice', 'assets/voice')]  # spoken mic/sound prompts
+
+# Windows version resource, generated from app/version.py so it never goes stale (build/ is not in git).
+import re as _re
+_version = _re.search(r'"([^"]+)"', open('app/version.py', encoding='utf-8').read()).group(1)
+_nums = tuple((list(map(int, _re.findall(r'\d+', _version)))[:4] + [0, 0, 0, 0])[:4])
+os.makedirs('build', exist_ok=True)
+with open('build/version_info.py', 'w', encoding='utf-8') as _f:
+    _f.write(f"""VSVersionInfo(
+  ffi=FixedFileInfo(filevers={_nums}, prodvers={_nums}, mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('041904B0', [
+      StringStruct('CompanyName', 'Private VoiceChat'),
+      StringStruct('FileDescription', 'VoiceChat - voice chat and screen sharing'),
+      StringStruct('FileVersion', '{_version}'),
+      StringStruct('InternalName', 'PrivateVoiceChat'),
+      StringStruct('LegalCopyright', 'Private VoiceChat'),
+      StringStruct('OriginalFilename', 'PrivateVoiceChat.exe'),
+      StringStruct('ProductName', 'VoiceChat'),
+      StringStruct('ProductVersion', '{_version}')])]),
+    VarFileInfo([VarStruct('Translation', [0x0419, 1200])])
+  ]
+)
+""")
 binaries += collect_dynamic_libs('pyrnnoise', destdir='pyrnnoise')
 hiddenimports += ['mss', 'websockets', 'websockets.asyncio.client', 'app.client.ui.app']
 try:

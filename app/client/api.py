@@ -154,6 +154,9 @@ class ApiClient:
     def update_channel(self, channel_id: int, **changes: Any) -> dict[str, Any]:
         return self.request("PATCH", f"/channels/{channel_id}", json=changes)
 
+    def reorder_channels(self, space_id: int, channel_ids: list[int]) -> list[dict[str, Any]]:
+        return self.request("PUT", f"/spaces/{space_id}/channels/order", json={"channel_ids": channel_ids})
+
     def delete_channel(self, channel_id: int) -> None:
         self.request("DELETE", f"/channels/{channel_id}")
 

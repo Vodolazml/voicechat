@@ -15,6 +15,7 @@ import platform as py_platform
 import re
 import sys
 import time
+import wave
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, fields
@@ -52,7 +53,8 @@ UI_DEFAULTS: dict[str, Any] = {
     "key_ptt": "", "key_mute": "Ctrl+Shift+M", "key_deafen": "Ctrl+Shift+D", "key_overlay": "Ctrl+Shift+O",
     "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.9,
     "overlay_speakers_only": False,
-    "sound_join_leave": True, "sound_messages": True, "notify_mentions": True,
+    "sound_join_leave": True, "sound_messages": True, "notify_mentions": True, "voice_prompts": True,
+    "overlay_x": 0.02, "overlay_y": 0.03,
     "accent": "#7c5cff", "compact": False, "close_to_tray": True, "autostart": False,
     "screen_preset": "1080p60", "screen_monitor": 1,
 }
@@ -159,6 +161,39 @@ SOUNDS = {
     "mute": _chime((523.0,), 45, 0.14),
     "unmute": _chime((784.0,), 45, 0.14),
 }
+
+
+VOICE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[3])) / "assets" / "voice"
+# Spoken prompts for the mic and headphone buttons ("Микрофон выключен" ...); the chimes are the fallback.
+PROMPTS = {"mic_on": "unmute", "mic_off": "mute", "sound_on": "unmute", "sound_off": "mute"}
+
+
+def load_prompt(path: Path) -> bytes | None:
+    """A WAV file as 48 kHz mono 16-bit PCM padded to whole 10 ms frames, or None if it can't be read."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            channels, width, rate = wav.getnchannels(), wav.getsampwidth(), wav.getframerate()
+            raw = wav.readframes(wav.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return None
+    if width != 2 or not raw:
+        return None
+    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    if rate != SAMPLE_RATE:
+        target = np.arange(0, len(samples) * SAMPLE_RATE / rate) * rate / SAMPLE_RATE
+        samples = np.interp(target, np.arange(len(samples)), samples)
+    pcm = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+    return pcm + bytes((-len(pcm)) % FRAME_BYTES)
+
+
+def _load_prompts() -> None:
+    for name, fallback in PROMPTS.items():
+        SOUNDS[name] = load_prompt(VOICE_DIR / f"{name}.wav") or SOUNDS[fallback]
+
+
+_load_prompts()
 
 
 def _newer(latest: str, current: str) -> bool:
@@ -901,6 +936,12 @@ class Backend(QObject):
             self._set("_focus_user", 0, self.focusChanged)
             self._ping_timer.stop()
             native.set_call_active(False)
+            if self._mic_test and self.call is not None:
+                # Settings are open on the voice tab: keep the level meter alive after hanging up.
+                try:
+                    self.call.audio.start()
+                except Exception:
+                    logger.info("Mic test could not reopen the microphone", exc_info=True)
             if self._chat_channel == was and not self._text_channel:
                 first_text = next((c["id"] for c in self._channels if c["type"] == "text"), 0)
                 self._text_channel = first_text
@@ -950,7 +991,7 @@ class Backend(QObject):
         if not self._muted:
             self._deafened = False
         self.call.set_muted(self._muted)
-        self._sound("mute" if self._muted else "unmute", force=True)
+        self._prompt("mic_off" if self._muted else "mic_on")
         self.localChanged.emit()
         self._rebuild_stage()
 
@@ -962,7 +1003,7 @@ class Backend(QObject):
         self._muted = self._deafened
         self.call.set_muted(self._muted)
         self.call.set_deafened(self._deafened)
-        self._sound("mute" if self._deafened else "unmute", force=True)
+        self._prompt("sound_off" if self._deafened else "sound_on")
         self.localChanged.emit()
         self._rebuild_stage()
 
@@ -974,6 +1015,16 @@ class Backend(QObject):
             self.call.audio.mixer.play_effect(SOUNDS[name])
         else:
             self._play_direct(SOUNDS[name])
+
+    def _prompt(self, name: str) -> None:
+        """Mic/headphone button feedback. Spoken even right after deafening, so you hear "Звук выключен"."""
+        if self.call is None:
+            return
+        pcm = SOUNDS[name] if self.ui.get("voice_prompts", True) else SOUNDS[PROMPTS[name]]
+        if getattr(self.call.audio, "_running", False):
+            self.call.audio.mixer.play_effect(pcm, always=True)
+        else:
+            self._play_direct(pcm)
 
     def _play_direct(self, pcm: bytes) -> None:
         """A chime outside a call (or while the call's audio is shutting down), on the chosen output."""
@@ -1089,6 +1140,28 @@ class Backend(QObject):
     @Slot(int, str, int)
     def updateChannel(self, channel_id: int, name: str, user_limit: int) -> None:
         self._bg(lambda: self.api.update_channel(channel_id, name=name.strip(), user_limit=user_limit))
+
+    @Slot(int, int)
+    def moveChannel(self, channel_id: int, step: int) -> None:
+        """Move a channel up (-1) or down (+1) among channels of its kind; everyone sees the new order."""
+        channel = next((c for c in self._channels if c["id"] == channel_id), None)
+        if channel is None:
+            return
+        same = [c for c in self._channels if c["type"] == channel["type"]]
+        index = same.index(channel)
+        target = index + step
+        if not 0 <= target < len(same):
+            return
+        same[index], same[target] = same[target], same[index]
+        others = [c for c in self._channels if c["type"] != channel["type"]]
+        order = [c["id"] for c in same] + [c["id"] for c in others]
+        for position, item in enumerate(same, start=1):
+            item["position"] = position
+        self._channels = sorted(self._channels, key=lambda c: (c["type"] != "text", c.get("position", 0), c["id"]))
+        self._rebuild()
+        space_id = self._space_id
+        self._bg(lambda: self.api.reorder_channels(space_id, order), lambda _: None,
+                 lambda exc: (self._toast_error(exc), self._refresh_space()))
 
     @Slot(int)
     def deleteChannel(self, channel_id: int) -> None:

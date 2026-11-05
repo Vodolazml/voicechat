@@ -15,7 +15,7 @@ Item {
             id: col
             anchors.fill: parent; anchors.margins: 32; spacing: 14
             Text { text: "Придумайте свой пароль"; color: Theme.text; font.family: Theme.font; font.pixelSize: 20; font.weight: Font.Bold }
-            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Временный пароль от администратора нужно заменить. Минимум 8 символов: строчные и заглавные буквы, цифра и знак."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
+            Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Временный пароль от администратора нужно заменить. Минимум 8 символов, буквы и хотя бы одна цифра."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
             Field { id: oldPwd; Layout.fillWidth: true; placeholderText: "Временный пароль"; echoMode: TextInput.Password }
             Field { id: newPwd; Layout.fillWidth: true; placeholderText: "Новый пароль"; echoMode: TextInput.Password }
             Field { id: again; Layout.fillWidth: true; placeholderText: "Ещё раз"; echoMode: TextInput.Password; onAccepted: go() }

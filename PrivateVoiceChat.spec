@@ -13,6 +13,9 @@ tmp_ret = collect_all('livekit.rtc')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 datas += [('assets/app_icon.ico', 'assets'), ('app/client/ui/qml', 'app/client/ui/qml')]
+import os
+if os.path.isdir('assets/voice'):
+    datas += [('assets/voice', 'assets/voice')]  # spoken mic/sound prompts
 binaries += collect_dynamic_libs('pyrnnoise', destdir='pyrnnoise')
 hiddenimports += ['mss', 'websockets', 'websockets.asyncio.client', 'app.client.ui.app']
 try:

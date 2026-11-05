@@ -82,6 +82,8 @@ ListView {
             }
             StyledMenu {
                 id: channelMenu
+                MenuItem { text: "Переместить выше"; onTriggered: backend.moveChannel(channelItem.model.id, -1) }
+                MenuItem { text: "Переместить ниже"; onTriggered: backend.moveChannel(channelItem.model.id, 1) }
                 MenuItem { text: "Изменить"; onTriggered: list.renameRequested(channelItem.model.id, channelItem.model.name, channelItem.model.user_limit) }
                 MenuItem { text: "Удалить канал"; onTriggered: list.deleteRequested(channelItem.model.id, channelItem.model.name) }
             }

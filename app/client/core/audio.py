@@ -18,6 +18,11 @@ from .dsp import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, Mixer, RNNoise, VoiceG
 
 logger = logging.getLogger("voicechat.audio")
 
+# Device buffer. "low" (~10 ms) left no slack: any moment the app was busy (screen share, drawing video)
+# the speakers ran dry and the voice crackled or cut out. 40 ms rides over such hiccups and is still well
+# below what anyone can hear in a conversation.
+DEVICE_LATENCY = 0.04
+
 NOISE_OFF, NOISE_STANDARD, NOISE_STRONG = "off", "standard", "strong"
 MODE_VOICE, MODE_PTT = "voice", "ptt"
 
@@ -143,11 +148,11 @@ class AudioEngine:
             try:
                 self._input = sd.RawInputStream(
                     samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1, dtype="int16",
-                    device=_device_index(self.settings.input_device, "input"), latency="low",
+                    device=_device_index(self.settings.input_device, "input"), latency=DEVICE_LATENCY,
                     callback=self._capture, finished_callback=self._stream_finished)
                 self._output = sd.RawOutputStream(
                     samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1, dtype="int16",
-                    device=_device_index(self.settings.output_device, "output"), latency="low",
+                    device=_device_index(self.settings.output_device, "output"), latency=DEVICE_LATENCY,
                     callback=self._playback, finished_callback=self._stream_finished)
                 self._input.start()
                 self._output.start()

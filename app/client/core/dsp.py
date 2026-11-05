@@ -153,7 +153,7 @@ class Mixer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._speakers: dict[int, _SpeakerBuffer] = {}
-        self._effects: deque[bytes] = deque(maxlen=400)
+        self._effects: deque[tuple[bytes, bool]] = deque(maxlen=600)
         self.master_volume = 1.0
         self.user_volume: dict[int, float] = {}
         self.muted_users: set[int] = set()
@@ -171,11 +171,14 @@ class Mixer:
             while len(buffer.frames) > self.MAX_FRAMES:
                 buffer.frames.popleft()
 
-    def play_effect(self, pcm: bytes) -> None:
-        """Short UI sounds (join/leave). Played even when deafened would be wrong, so skipped then."""
+    def play_effect(self, pcm: bytes, always: bool = False) -> None:
+        """Short UI sounds. Join/leave chimes are skipped while deafened; `always` is for the spoken
+        mic/sound prompts, which must be heard right after you deafen yourself. A new sound replaces one
+        still playing, so quick clicks never queue up a long tail."""
         with self._lock:
+            self._effects.clear()
             for offset in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES):
-                self._effects.append(pcm[offset:offset + FRAME_BYTES])
+                self._effects.append((pcm[offset:offset + FRAME_BYTES], always))
 
     def remove(self, user_id: int) -> None:
         with self._lock:
@@ -207,11 +210,10 @@ class Mixer:
                 total += samples * self.user_volume.get(user_id, 1.0)
                 active = True
             if self._effects:
-                if not self.deafened:
-                    total += to_float(self._effects.popleft()) * 0.6
+                effect, always = self._effects.popleft()
+                if always or not self.deafened:
+                    total += to_float(effect) * (0.9 if always else 0.6)
                     active = True
-                else:
-                    self._effects.popleft()
         if not active:
             self.output_level_db = -96.0
             self.limiter.gain = 1.0

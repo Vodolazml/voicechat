@@ -165,8 +165,12 @@ class MediaSession:
                 if self._stop.is_set():
                     break
                 key_id, key = self.outgoing_key()
+                # No key ratcheting: we rotate keys ourselves. With ratcheting on, every frame that arrives
+                # before its new key made WebRTC derive 16 keys (a CPU spike that broke the sound) and could
+                # leave a damaged key behind.
                 options = rtc.RoomOptions(auto_subscribe=False, dynacast=True, connect_timeout=10,
-                                          encryption=rtc.E2EEOptions())
+                                          encryption=rtc.E2EEOptions(key_provider_options=rtc.KeyProviderOptions(
+                                              ratchet_window_size=0)))
                 await room.connect(creds["url"], creds["token"], options=options)
                 identity = room.local_participant.identity
                 room.e2ee_manager.key_provider.set_key(identity, key, key_index(key_id))
@@ -271,7 +275,7 @@ class MediaSession:
             # have fetched it by then (the old key stays in their key ring meanwhile).
             provider.set_key(local, key, key_index(key_id))
             self._applied_keys[local] = key_id
-            asyncio.get_running_loop().call_later(1.5, self._use_local_key_index, key_index(key_id))
+            asyncio.get_running_loop().call_later(3.0, self._use_local_key_index, key_index(key_id))
         for participant in room.remote_participants.values():
             user_id = user_id_from_identity(participant.identity)
             found = self.incoming_key(user_id) if user_id is not None else None
@@ -284,6 +288,9 @@ class MediaSession:
         if room is None or not room.isconnected():
             return
         local = room.local_participant.identity
+        current = self._applied_keys.get(local)
+        if current is not None and key_index(current) != index:
+            return  # a newer rotation happened meanwhile; its own timer switches to it
         for cryptor in room.e2ee_manager.frame_cryptors():
             if cryptor.participant_identity == local and cryptor.key_index != index:
                 cryptor.set_key_index(index)

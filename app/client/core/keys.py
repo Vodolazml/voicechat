@@ -68,12 +68,21 @@ class KeyManager:
 
     def rotate(self, channel_id: int) -> bytes:
         """New outgoing key, e.g. after someone left. Publish with `sync` afterwards."""
+        from .media import key_index
+
         with self._lock:
             state = self.channel(channel_id)
-            state.outgoing_key = None
+            previous = key_index(state.outgoing_key_id) if state.outgoing_key is not None else None
+            while True:
+                state.outgoing_key = None
+                key_id, key = state.ensure_outgoing_key()
+                # A new key in the old slot would replace the old key at once on both sides, and friends
+                # who have not fetched it yet would hear nothing until they do.
+                if key_index(key_id) != previous:
+                    break
             state.published_recipients.clear()
             state.published_identities.clear()
-            return state.ensure_outgoing_key()[1]
+            return key
 
     def forget(self, channel_id: int) -> None:
         with self._lock:

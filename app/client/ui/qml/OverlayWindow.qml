@@ -14,10 +14,14 @@ Window {
     height: Math.max(60, column.implicitHeight + 16)
     title: "VoiceChat overlay"
 
-    readonly property bool right: (s.overlay_corner || "").indexOf("right") >= 0
+    readonly property bool custom: s.overlay_corner === "custom"
+    readonly property bool right: custom ? (s.overlay_x || 0) > 0.5 : (s.overlay_corner || "").indexOf("right") >= 0
     readonly property bool bottom: (s.overlay_corner || "").indexOf("bottom") >= 0
-    x: right ? Screen.width - width - 16 : 16
-    y: bottom ? Screen.height - height - 60 : 16
+    // "Своё место": anywhere on the screen, set by two sliders (fractions of the free space).
+    x: custom ? Math.round((Screen.width - width) * Math.max(0, Math.min(1, s.overlay_x || 0)))
+              : (right ? Screen.width - width - 16 : 16)
+    y: custom ? Math.round((Screen.height - height) * Math.max(0, Math.min(1, s.overlay_y || 0)))
+              : (bottom ? Screen.height - height - 60 : 16)
     onVisibleChanged: if (visible) overlayHelper.clickThrough(win)
 
     Column {

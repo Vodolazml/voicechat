@@ -116,6 +116,25 @@ def test_rotation_creates_a_new_key():
     assert keys.outgoing(5) != first
 
 
+def test_rotated_key_never_takes_the_old_key_slot():
+    from app.client.core.media import key_index
+
+    keys = make_keys(FakeApi())
+    for _ in range(60):
+        before = key_index(keys.outgoing(5)[0])
+        keys.rotate(5)
+        assert key_index(keys.outgoing(5)[0]) != before
+
+
+def test_spoken_prompt_is_heard_right_after_deafening():
+    mixer = Mixer()
+    mixer.deafened = True
+    mixer.play_effect(tone(8000) * 3)
+    assert mixer.mix() == bytes(FRAME_BYTES), "join/leave chimes stay quiet while deafened"
+    mixer.play_effect(tone(8000) * 3, always=True)
+    assert mixer.mix() != bytes(FRAME_BYTES)
+
+
 class FakeMedia:
     instances = []
 
@@ -192,6 +211,7 @@ def test_join_switch_and_leave():
     call.join(11)
     assert wait_for(lambda: call.channel_id == 11 and call.state == CONNECTED)
     assert first_media.stopped, "old room is closed before the new one opens"
+    assert call.audio.running, "switching channels keeps the headset open (no gap, no broken sound)"
     call.leave()
     assert wait_for(lambda: call.state == IDLE)
     assert ("disconnect", (11,)) in api.calls

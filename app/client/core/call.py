@@ -166,7 +166,9 @@ class CallController:
         if self.channel_id is not None:
             # The server moves us and kicks us from the old room. No IDLE in between, so the UI
             # switches channels without flashing "disconnected".
-            self._leave(notify_server=False, final=False)
+            # Devices stay open: closing and re-opening them on every switch cut the sound for a moment
+            # and sometimes left it broken.
+            self._leave(notify_server=False, final=False, keep_audio=True)
         self.channel_id = channel_id
         self._set_state(CONNECTING)
         try:
@@ -200,13 +202,16 @@ class CallController:
         media.start()
         self._start_heartbeat(channel_id)
 
-    def _leave(self, notify_server: bool = True, final: bool = True) -> None:
+    def _leave(self, notify_server: bool = True, final: bool = True, keep_audio: bool = False) -> None:
         channel_id = self.channel_id
         self._stop_heartbeat()
         media, self.media = self.media, None
         if media:
             media.stop()
-        self.audio.stop()
+        if keep_audio:
+            self.audio.mixer.clear()
+        else:
+            self.audio.stop()
         self.speakers = set()
         self.listener.on_speakers(set())
         self.listener.on_streams(set())

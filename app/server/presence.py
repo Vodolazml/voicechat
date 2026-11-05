@@ -163,6 +163,30 @@ def update_channel(channel_id: int, payload: schemas.ChannelUpdateIn, request: R
     return channel
 
 
+@router.put("/spaces/{space_id}/channels/order", response_model=list[schemas.ChannelOut], tags=["channels"])
+def reorder_channels(space_id: int, payload: schemas.ChannelOrderIn, request: Request,
+                     actor: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    """The manager puts channels in the order they want; ids not listed keep their place after them."""
+    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": actor.id}):
+        raise HTTPException(status_code=403, detail="Нет доступа к пространству")
+    require_space_manager(db, actor, space_id, "channels.update")
+    channels = {c.id: c for c in db.scalars(select(models.Channel).where(
+        models.Channel.space_id == space_id, models.Channel.is_deleted.is_(False)))}
+    ordered = [cid for cid in dict.fromkeys(payload.channel_ids) if cid in channels]
+    rest = sorted((c for cid, c in channels.items() if cid not in ordered), key=lambda c: (c.position, c.id))
+    changed = []
+    for position, channel in enumerate([channels[cid] for cid in ordered] + rest, start=1):
+        if channel.position != position:
+            channel.position = position
+            changed.append(channel)
+    write_audit(db, actor_id=actor.id, action="channels.reorder", target_type="space", target_id=space_id,
+                request=request)
+    db.commit()
+    for channel in changed:
+        publish_channel(db, channel)
+    return sorted(channels.values(), key=lambda c: (c.type, c.position, c.id))
+
+
 @router.delete("/channels/{channel_id}", tags=["channels"])
 async def delete_channel(channel_id: int, request: Request,
                          actor: models.User = Depends(current_user),

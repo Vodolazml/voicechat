@@ -1,6 +1,7 @@
 """Spaces: anyone creates their own, others join with its invite code.
 
-The person who created a space manages it (channels, invite code, moderation inside it). The server
+The person who created a space manages it (channels, moderation, a new invite code). Every member sees
+the code and can bring friends. The server
 owner sees every space and channel on the server; everybody else sees only the spaces they joined.
 """
 from __future__ import annotations
@@ -95,14 +96,14 @@ def join_space(db: Session, space: models.Space, user_id: int) -> bool:
 
 def space_out(db: Session, user: models.User, space: models.Space) -> schemas.SpaceOut:
     manage = can_manage_space(db, user, space.id)
-    if manage and not space.invite_code:
+    if not space.invite_code:
         space.invite_code = new_invite_code(db)
         db.commit()
     count = db.scalar(select(func.count()).select_from(models.SpaceMember).join(
         models.User, models.User.id == models.SpaceMember.user_id).where(
         models.SpaceMember.space_id == space.id, models.User.is_owner.is_(False))) or 0
     return schemas.SpaceOut(id=space.id, name=space.name, can_manage=manage, is_mine=space.created_by == user.id,
-                            member_count=count, invite_code=format_code(space.invite_code) if manage else None)
+                            member_count=count, invite_code=format_code(space.invite_code))
 
 
 def _publish_space(db: Session, space: models.Space, kind: str, extra: dict | None = None) -> None:

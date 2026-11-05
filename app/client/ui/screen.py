@@ -1,19 +1,21 @@
 """Screen capture for screen share, and the video item that shows a friend's stream.
 
 Capture uses Desktop Duplication through `dxcam` when it is installed (fast, works with borderless
-games) and falls back to `mss`. Grabbing and scaling run in a worker thread, so the media loop never
-stalls; if the encoder is slower than the screen, frames are dropped rather than queued.
+games) and falls back to `mss`. Grabbing and scaling run in a separate process (a thread if that fails),
+so neither the media loop nor the audio callbacks stall; if the encoder is slower than the screen, frames
+are dropped rather than queued.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import Property, QObject, QRectF, Qt, Signal
+from PySide6.QtCore import Property, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtQuick import QQuickPaintedItem
 
@@ -108,11 +110,113 @@ class _Rate:
         return float(len(self._times))
 
 
+def _make_grabber(info: dict, monitor_count: int, fps: int):
+    """Returns (grab, close, paced, backend). grab() gives a QImage in BGRA memory order (RGB32) or None."""
+    if os.environ.get("VOICECHAT_TEST_CAPTURE") == "1":
+        # Tests: a moving gradient instead of a real screen, so the whole capture path runs without a display.
+        counter = [0]
+
+        def fake():
+            counter[0] += 1
+            image = QImage(info["width"], info["height"], QImage.Format_RGB32)
+            image.fill(0xFF000000 | (counter[0] * 40 % 256) << 8)
+            return image
+        return fake, lambda: None, False, "test"
+    try:
+        import dxcam  # optional, Windows only
+
+        target = dxcam_target(dxcam.output_info(), info, monitor_count)
+        if target is not None:
+            camera = dxcam.create(device_idx=target[0], output_idx=target[1], output_color="BGRA")
+            if camera is not None:
+                # Desktop Duplication on its own thread at the wanted rate; when nothing on screen changes
+                # it repeats the last frame, so the stream never stalls.
+                camera.start(target_fps=fps, video_mode=True)
+
+                def grab():
+                    frame = camera.get_latest_frame()
+                    if frame is None:
+                        return None
+                    h, w = frame.shape[:2]
+                    # copy(): the image must own its pixels, it outlives this numpy buffer.
+                    return QImage(frame.data, w, h, w * 4, QImage.Format_RGB32).copy()
+
+                def close():
+                    try:
+                        camera.stop()
+                    finally:
+                        camera.release()
+                return grab, close, True, "dxcam"
+    except Exception:
+        logger.warning("Fast screen capture (dxcam) unavailable, using the slow one", exc_info=True)
+    import mss
+
+    grabber = mss.mss()
+    region = grabber.monitors[info["index"]]
+
+    def grab():
+        shot = grabber.grab(region)
+        return QImage(shot.raw, shot.width, shot.height, shot.width * 4, QImage.Format_RGB32).copy()
+    return grab, grabber.close, False, "mss"
+
+
+def _fit(image: QImage, width: int, height: int) -> QImage:
+    if image.width() != width or image.height() != height:
+        image = image.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    if image.format() != QImage.Format_RGB32:
+        image = image.convertToFormat(QImage.Format_RGB32)
+    return image
+
+
+def capture_process_main(info: dict, monitor_count: int, width: int, height: int, fps: int, shm_name: str,
+                         slots: int, conn, stop) -> None:
+    """Runs in a child process. Grabbing and scaling a big screen 60 times a second keeps a CPU core busy
+    and, inside the app, held Python's lock so long that the microphone and speaker callbacks missed their
+    turn: the voice broke up or stopped while sharing. In its own process it cannot get in their way.
+    Frames go through shared memory slots; only the slot number travels through the pipe."""
+    from multiprocessing import shared_memory
+
+    frame_bytes = width * height * 4
+    shm = shared_memory.SharedMemory(name=shm_name)
+    try:
+        grab, close, paced, backend = _make_grabber(info, monitor_count, fps)
+    except Exception as exc:
+        conn.send(("error", str(exc)))
+        shm.close()
+        return
+    conn.send(("backend", backend))
+    interval = 1.0 / fps
+    slot = 0
+    try:
+        while not stop.is_set():
+            started = time.perf_counter()
+            image = grab()
+            if image is not None:
+                image = _fit(image, width, height)
+                bits = image.constBits()
+                if image.bytesPerLine() == width * 4:
+                    shm.buf[slot * frame_bytes:(slot + 1) * frame_bytes] = bits[:frame_bytes]
+                    spent = time.perf_counter() - started
+                    conn.send(("frame", slot, spent * 1000))
+                    slot = (slot + 1) % slots
+            if not paced:
+                time.sleep(max(0.0, interval - (time.perf_counter() - started)))
+    except (EOFError, BrokenPipeError, OSError):
+        pass  # the app closed the pipe: sharing stopped
+    finally:
+        try:
+            close()
+        except Exception:
+            pass
+        shm.close()
+
+
 class ScreenCapturer:
-    PREVIEW_EVERY = 2  # frames: your own preview at full size and ~30 fps, so it shows the real quality
+    PREVIEW_FPS = 20  # your own preview: full size, sharp, but not so often that it costs the call anything
+    SLOTS = 3
 
     def __init__(self, monitor: int, preset: Preset, preview=None) -> None:
-        self.preview = preview  # called with a small QImage so you can see what you are sharing
+        self.preview = preview  # called with a QImage so you can see what you are sharing
         monitors = list_monitors()
         info = next((m for m in monitors if m["index"] == monitor), monitors[0] if monitors else None)
         if info is None:
@@ -139,49 +243,109 @@ class ScreenCapturer:
                 **self.encoder}
 
     def _grabber(self):
-        """Returns (grab, close). grab() gives a QImage in BGRA memory order (ARGB32/RGB32) or None."""
-        try:
-            import dxcam  # optional, Windows only
-
-            target = dxcam_target(dxcam.output_info(), self._info, self._monitor_count)
-            if target is not None:
-                camera = dxcam.create(device_idx=target[0], output_idx=target[1], output_color="BGRA")
-                if camera is not None:
-                    # Desktop Duplication on its own thread at the wanted rate; when nothing on screen changes
-                    # it repeats the last frame, so the stream never stalls.
-                    camera.start(target_fps=self.fps, video_mode=True)
-
-                    def grab():
-                        frame = camera.get_latest_frame()
-                        if frame is None:
-                            return None
-                        h, w = frame.shape[:2]
-                        # copy(): the image must own its pixels, it outlives this numpy buffer (preview, scaling).
-                        return QImage(frame.data, w, h, w * 4, QImage.Format_RGB32).copy()
-
-                    def close():
-                        try:
-                            camera.stop()
-                        finally:
-                            camera.release()
-                    self.backend = "dxcam"
-                    return grab, close, True
-        except Exception:
-            logger.warning("Fast screen capture (dxcam) unavailable, using the slow one", exc_info=True)
-        import mss
-
-        grabber = mss.mss()
-        region = grabber.monitors[self.monitor]
-
-        def grab():
-            shot = grabber.grab(region)
-            return QImage(shot.raw, shot.width, shot.height, shot.width * 4, QImage.Format_RGB32).copy()
-        self.backend = "mss"
-        return grab, grabber.close, False
+        grab, close, paced, backend = _make_grabber(self._info, self._monitor_count, self.fps)
+        self.backend = backend
+        return grab, close, paced
 
     async def run(self, source) -> None:
+        try:
+            await self._run_process(source)
+        except _NoProcess as exc:
+            logger.warning("Capture process unavailable (%s), capturing inside the app", exc)
+            await self._run_thread(source)
+
+    def _send(self, source, data, last_preview: list) -> None:
         from livekit import rtc
 
+        # BGRA memory order: no colour conversion on our side, WebRTC converts straight to I420.
+        source.capture_frame(rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.BGRA, data))
+        self._sent.tick()
+        now = time.perf_counter()
+        if self.preview is not None and now - last_preview[0] >= 1.0 / self.PREVIEW_FPS:
+            last_preview[0] = now
+            self.preview(QImage(data, self.width, self.height, self.width * 4, QImage.Format_RGB32).copy())
+
+    async def _run_process(self, source) -> None:
+        import multiprocessing as mp
+        from multiprocessing import shared_memory
+
+        loop = asyncio.get_running_loop()
+        frame_bytes = self.width * self.height * 4
+        try:
+            ctx = mp.get_context("spawn")
+            shm = shared_memory.SharedMemory(create=True, size=frame_bytes * self.SLOTS)
+        except Exception as exc:
+            raise _NoProcess(exc) from exc
+        parent, child = ctx.Pipe(duplex=False)
+        stop = ctx.Event()
+        process = ctx.Process(target=capture_process_main, name="screen-capture", daemon=True,
+                              args=(self._info, self._monitor_count, self.width, self.height, self.fps,
+                                    shm.name, self.SLOTS, child, stop))
+        latest: list = [None]
+        ready = asyncio.Event()
+        started = threading.Event()
+        failure: list = [None]
+
+        def reader() -> None:
+            """Blocking pipe reads on their own thread (they release Python's lock while waiting)."""
+            try:
+                while True:
+                    message = parent.recv()
+                    if message[0] == "frame":
+                        latest[0] = message[1]
+                        self._grab_ms = self._grab_ms * 0.9 + message[2] * 0.1
+                        self._captured.tick()
+                        if not loop.is_closed():
+                            loop.call_soon_threadsafe(ready.set)
+                    elif message[0] == "backend":
+                        self.backend = message[1]
+                        started.set()
+                    elif message[0] == "error":
+                        failure[0] = message[1]
+                        started.set()
+                        return
+            except (EOFError, OSError):
+                started.set()
+
+        try:
+            process.start()
+        except Exception as exc:
+            shm.close()
+            shm.unlink()
+            raise _NoProcess(exc) from exc
+        child.close()
+        threading.Thread(target=reader, name="screen-capture-pipe", daemon=True).start()
+        try:
+            await asyncio.to_thread(started.wait, 15)
+            if not self.backend:
+                raise _NoProcess(failure[0] or "the capture process did not start")
+            logger.info("Screen capture (own process): %s, %dx%d at %d fps", self.backend, self.width,
+                        self.height, self.fps)
+            last_preview = [0.0]
+            while True:
+                await ready.wait()
+                ready.clear()
+                slot, latest[0] = latest[0], None
+                if slot is None:
+                    continue
+                if not process.is_alive():
+                    raise RuntimeError("screen capture process stopped")
+                data = bytes(shm.buf[slot * frame_bytes:(slot + 1) * frame_bytes])
+                self._send(source, data, last_preview)
+        finally:
+            stop.set()
+            await asyncio.to_thread(process.join, 2)
+            if process.is_alive():
+                process.terminate()
+            parent.close()
+            shm.close()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+
+    async def _run_thread(self, source) -> None:
+        """Fallback: capture on a thread of this process (the old way)."""
         loop = asyncio.get_running_loop()
         latest: list = [None]
         ready = asyncio.Event()
@@ -194,19 +358,13 @@ class ScreenCapturer:
             grab, close, paced = self._grabber()
             logger.info("Screen capture: %s, %dx%d at %d fps", self.backend, self.width, self.height, self.fps)
             interval = 1.0 / self.fps
-            count = 0
             try:
                 while not self._stop.is_set():
                     started = time.perf_counter()
                     image = grab()
                     if image is not None:
-                        if image.width() != self.width or image.height() != self.height:
-                            image = image.scaled(self.width, self.height, Qt.IgnoreAspectRatio,
-                                                 Qt.SmoothTransformation)
-                        count += 1
-                        latest[0] = bytes(image.constBits())
-                        if self.preview is not None and count % self.PREVIEW_EVERY == 1:
-                            self.preview(image)  # owns its pixels and is not touched again here
+                        image = _fit(image, self.width, self.height)
+                        latest[0] = bytes(image.constBits())[:self.width * self.height * 4]
                         self._captured.tick()
                         wake()
                     spent = time.perf_counter() - started
@@ -223,17 +381,20 @@ class ScreenCapturer:
 
         thread = threading.Thread(target=worker, name="screen-capture", daemon=True)
         thread.start()
+        last_preview = [0.0]
         try:
             while True:
                 await ready.wait()
                 ready.clear()
                 data, latest[0] = latest[0], None
                 if data:
-                    # BGRA memory order: no colour conversion on our side, WebRTC converts straight to I420.
-                    source.capture_frame(rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.BGRA, data))
-                    self._sent.tick()
+                    self._send(source, data, last_preview)
         finally:
             self._stop.set()
+
+
+class _NoProcess(Exception):
+    pass
 
 
 class VideoHub(QObject):
@@ -305,6 +466,8 @@ class VideoView(QQuickPaintedItem):
         super().__init__(parent)
         self._user_id = 0
         self._image: QImage | None = None
+        self._last_paint = 0.0
+        self._repaint_pending = False
         self.setRenderTarget(QQuickPaintedItem.FramebufferObject)
         video_hub().frame.connect(self._on_frame)
 
@@ -322,13 +485,29 @@ class VideoView(QQuickPaintedItem):
     userId = Property(int, _get_user_id, _set_user_id, notify=userIdChanged)
     hasFrame = Property(bool, lambda self: self._image is not None, notify=hasFrameChanged)
 
+    MAX_PAINT_FPS = 30
+
     def _on_frame(self, user_id: int) -> None:
         if user_id == self._user_id:
             had = self._image is not None
             self._image = video_hub().latest(user_id)
             if not had:
                 self.hasFrameChanged.emit()
-            self.update()
+            # Scaling a big frame into the tile is real work on the interface thread, and while it runs the
+            # audio callbacks wait. 30 repaints a second look smooth and leave them room.
+            now = time.perf_counter()
+            if now - self._last_paint >= 1.0 / self.MAX_PAINT_FPS:
+                self._last_paint = now
+                self.update()
+            elif not self._repaint_pending:
+                self._repaint_pending = True
+                QTimer.singleShot(max(1, int((1.0 / self.MAX_PAINT_FPS - (now - self._last_paint)) * 1000)),
+                                  self._deferred_update)
+
+    def _deferred_update(self) -> None:
+        self._repaint_pending = False
+        self._last_paint = time.perf_counter()
+        self.update()
 
     def paint(self, painter: QPainter) -> None:
         image = self._image

@@ -242,3 +242,23 @@ def test_old_update_installers_are_removed(tmp_path, monkeypatch):
     keep.write_bytes(b"x")
     updater.remove_old_installers(keep=keep)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["PrivateVoiceChat-0.3.1-setup.exe", "notes.txt"]
+
+
+def test_voice_prompts_load_as_whole_frames(tmp_path):
+    import wave
+
+    import numpy as np
+
+    from app.client.core.dsp import FRAME_BYTES
+    from app.client.ui.backend import load_prompt
+
+    path = tmp_path / "p.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(22050)
+        wav.writeframes((np.ones(22050 * 2, dtype=np.int16) * 1000).tobytes())
+    pcm = load_prompt(path)
+    assert pcm and len(pcm) % FRAME_BYTES == 0
+    assert abs(len(pcm) // 2 - 48000) < 600  # one second, resampled to 48 kHz mono
+    assert load_prompt(tmp_path / "missing.wav") is None

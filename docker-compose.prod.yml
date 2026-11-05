@@ -65,7 +65,7 @@ services:
       - --no-server-header
 
   livekit:
-    image: livekit/livekit-server:v1.9.9
+    image: livekit/livekit-server:v1.13.11  # matches the client SDK; 1.9 needed signalling fallbacks
     restart: unless-stopped
     network_mode: host
     command: ["--config", "/etc/livekit.yaml"]

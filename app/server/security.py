@@ -110,14 +110,9 @@ def validate_password_strength(password: str) -> None:
         raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
     if len(password) > 256:
         raise HTTPException(status_code=400, detail="Пароль слишком длинный")
-    checks = (
-        any(c.islower() for c in password),
-        any(c.isupper() for c in password),
-        any(c.isdigit() for c in password),
-        any(not c.isalnum() and not c.isspace() for c in password),
-    )
-    if not all(checks):
-        raise HTTPException(
-            status_code=400,
-            detail="Пароль должен содержать строчные и заглавные буквы, цифру и спецсимвол",
-        )
+    # Letters and a digit; no upper-case/symbol puzzle (friends kept failing it at sign-up). Length and
+    # Argon2 with login rate limits do the real work.
+    if not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
+        raise HTTPException(status_code=400, detail="В пароле нужны буквы и хотя бы одна цифра")
+    if len(set(password)) < 4:
+        raise HTTPException(status_code=400, detail="Пароль слишком простой")

@@ -17,8 +17,8 @@ Modal {
     }
     Text {
         Layout.fillWidth: true; wrapMode: Text.WordWrap
-        text: "Участников: " + backend.spaceMemberCount + ". Если код попал не туда, смените его: старый перестанет работать, а кто уже вошёл, останется."
+        text: "Участников: " + backend.spaceMemberCount + (backend.canManageChannels ? ". Если код попал не туда, смените его: старый перестанет работать, а кто уже вошёл, останется." : ".")
         color: Theme.muted; font.family: Theme.font; font.pixelSize: 12
     }
-    PrimaryButton { Layout.fillWidth: true; secondary: true; text: "Сменить код"; onClicked: backend.rotateInviteCode() }
+    PrimaryButton { visible: backend.canManageChannels; Layout.fillWidth: true; secondary: true; text: "Сменить код"; onClicked: backend.rotateInviteCode() }
 }

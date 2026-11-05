@@ -24,7 +24,7 @@ def test_anyone_signs_up_creates_a_space_and_others_join_by_code(client):
     assert client.get(f"/spaces/{created['id']}/channels", headers=bob).status_code == 403
     assert client.post("/spaces/join", headers=bob, json={"code": "ZZZZ-ZZZZ"}).status_code == 404
     joined = client.post("/spaces/join", headers=bob, json={"code": created["invite_code"].lower()}).json()
-    assert joined["id"] == created["id"] and not joined["can_manage"] and joined["invite_code"] is None
+    assert joined["id"] == created["id"] and not joined["can_manage"] and joined["invite_code"] == created["invite_code"]
     assert len(client.get(f"/spaces/{created['id']}/channels", headers=bob).json()) == 2
     # Members only see their own spaces, never the main one.
     assert [s["id"] for s in client.get("/spaces", headers=bob).json()] == [created["id"]]
@@ -70,3 +70,20 @@ def test_closed_registration(client, monkeypatch):
     response = client.post("/auth/register", json={"username": "frank", "display_name": "F",
                                                    "password": "StrongFrank123!"})
     assert response.status_code == 403
+
+
+def test_manager_reorders_channels_and_members_cannot(client):
+    alice = signup(client, "alice")
+    bob = signup(client, "bob")
+    space = client.post("/spaces", headers=alice, json={"name": "Порядок"}).json()
+    client.post("/spaces/join", headers=bob, json={"code": space["invite_code"]})
+    for name in ("Второй", "Третий"):
+        client.post("/channels", headers=alice, json={"space_id": space["id"], "name": name, "type": "voice"})
+    voice = [c for c in client.get(f"/spaces/{space['id']}/channels", headers=bob).json() if c["type"] == "voice"]
+    wanted = [voice[2]["id"], voice[0]["id"], voice[1]["id"]]
+    assert client.put(f"/spaces/{space['id']}/channels/order", headers=bob,
+                      json={"channel_ids": wanted}).status_code == 403
+    assert client.put(f"/spaces/{space['id']}/channels/order", headers=alice,
+                      json={"channel_ids": wanted}).status_code == 200
+    seen = [c["id"] for c in client.get(f"/spaces/{space['id']}/channels", headers=bob).json() if c["type"] == "voice"]
+    assert seen == wanted

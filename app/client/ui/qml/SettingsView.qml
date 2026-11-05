@@ -29,6 +29,15 @@ Rectangle {
     onTabChanged: backend.setMicTest(visible && tab === 0)
     Keys.onEscapePressed: root.closed()
 
+    // Settings cover the main window; without this, clicks on empty places fell through to the channel
+    // list underneath and joined whatever voice channel was there.
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.AllButtons
+        hoverEnabled: true
+        onWheel: (wheel) => wheel.accepted = true
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 0
@@ -188,10 +197,16 @@ Rectangle {
                     Toggle { title: "Оверлей поверх игры"; hint: "Маленький список: кто в канале и кто говорит. Мышь проходит сквозь него, фокус он не забирает"; checked: root.s.overlay_enabled; onToggled: (v) => backend.setSetting("overlay_enabled", v) }
                     Toggle { title: "Показывать только говорящих"; checked: root.s.overlay_speakers_only; onToggled: (v) => backend.setSetting("overlay_speakers_only", v) }
                     Segmented {
-                        title: "Угол экрана"
-                        options: [{value: "top-left", title: "Слева сверху"}, {value: "top-right", title: "Справа сверху"}, {value: "bottom-left", title: "Слева снизу"}, {value: "bottom-right", title: "Справа снизу"}]
+                        title: "Положение на экране"
+                        options: [{value: "top-left", title: "Слева сверху"}, {value: "top-right", title: "Справа сверху"}, {value: "bottom-left", title: "Слева снизу"}, {value: "bottom-right", title: "Справа снизу"}, {value: "custom", title: "Своё место"}]
                         current: root.s.overlay_corner
                         onPicked: (v) => backend.setSetting("overlay_corner", v)
+                    }
+                    RowLayout {
+                        visible: root.s.overlay_corner === "custom"
+                        Layout.fillWidth: true; spacing: 28
+                        SliderRow { title: "По горизонтали"; from: 0; to: 1; value: root.s.overlay_x; onMoved: (v) => backend.setSetting("overlay_x", v) }
+                        SliderRow { title: "По вертикали"; from: 0; to: 1; value: root.s.overlay_y; onMoved: (v) => backend.setSetting("overlay_y", v) }
                     }
                     RowLayout {
                         Layout.fillWidth: true; spacing: 28
@@ -208,6 +223,7 @@ Rectangle {
                     active: root.tab === 4; visible: active; Layout.fillWidth: true
                     sourceComponent: ColumnLayout {
                     spacing: 6
+                    Toggle { title: "Голосовые подсказки"; hint: "«Микрофон выключен», «Звук включён» и т. п. при нажатии кнопок и горячих клавиш. Без них — короткий сигнал"; checked: root.s.voice_prompts; onToggled: (v) => backend.setSetting("voice_prompts", v) }
                     Toggle { title: "Звук, когда кто-то заходит или выходит"; checked: root.s.sound_join_leave; onToggled: (v) => backend.setSetting("sound_join_leave", v) }
                     Toggle { title: "Звук новых сообщений в канале звонка"; checked: root.s.sound_messages; onToggled: (v) => backend.setSetting("sound_messages", v) }
                     Toggle { title: "Уведомлять, когда меня упомянули (@логин)"; checked: root.s.notify_mentions; onToggled: (v) => backend.setSetting("notify_mentions", v) }

@@ -31,7 +31,7 @@ def test_rejects_weak_password() -> None:
     with pytest.raises(HTTPException):
         validate_password_strength("short")
     with pytest.raises(HTTPException):
-        validate_password_strength("NoSpecialPass123")
+        validate_password_strength("onlyletters")
     with pytest.raises(HTTPException):
         validate_password_strength("Ab1!xyz")  # 7 characters
 

@@ -16,6 +16,14 @@ DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a
 UDP_RANGE = (50000, 60000)
 
 
+
+def _sha256(source) -> str:
+    """hashlib.file_digest needs Python 3.11; Ubuntu 22.04 ships 3.10."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if path.exists():
@@ -72,7 +80,7 @@ def configure(root: Path, domain: str, email: str = "", installer: str | None = 
             raise ValueError("Installer must exist in downloads/")
         manifest = json.loads(path.with_suffix(".release.json").read_text(encoding="utf-8"))
         with path.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
+            digest = _sha256(source)
         if digest != manifest["sha256"]:
             raise ValueError("Installer hash differs from release manifest")
         values["VOICECHAT_CLIENT_LATEST_VERSION"] = manifest["version"]

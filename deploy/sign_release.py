@@ -11,6 +11,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 
+
+def _sha256(source) -> str:
+    """hashlib.file_digest needs Python 3.11; Ubuntu 22.04 ships 3.10."""
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
 def load_key(path):
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +63,7 @@ if __name__ == '__main__':
             parser.error('Signing key does not match the trusted client public key')
         path = Path(args.file)
         with path.open('rb') as source:
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+            digest = _sha256(source)
         payload = {'version': args.version, 'url': args.url, 'sha256': digest}
         message = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
         payload['signature'] = base64.b64encode(key.sign(message)).decode()

@@ -33,7 +33,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "rus"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startwithwindows"; Description: "Запускать при старте Windows"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
@@ -41,7 +40,7 @@ Source: "..\dist\PrivateVoiceChat\*"; DestDir: "{app}"; Flags: ignoreversion rec
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userdesktop}\VoiceChat"; Filename: "{app}\{#MyAppExeName}"
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Registry]

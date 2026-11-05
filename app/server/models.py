@@ -133,10 +133,20 @@ class Message(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
     author_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # AES-256-GCM ciphertext (see app/server/chat.py); the database never holds message text in the clear.
     body: Mapped[str] = mapped_column(Text)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChannelRead(Base):
+    """Last message a user has seen in a channel, for unread counters across devices."""
+
+    __tablename__ = "channel_reads"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), primary_key=True)
+    last_message_id: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class VoiceState(Base):

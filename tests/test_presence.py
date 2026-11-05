@@ -169,3 +169,29 @@ def test_private_channel_is_hidden(client):
                           json={"space_id": space, "name": "Админка", "type": "voice", "is_private": True}).json()
     assert private["id"] not in {c["id"] for c in client.get(f"/spaces/{space}/channels", headers=friend).json()}
     assert client.post(f"/channels/{private['id']}/connect", headers=friend, json={}).status_code == 403
+
+
+def test_chat_in_voice_channel_is_live_and_encrypted_at_rest(client):
+    admin, friend, space, voice = setup_admin_and_friend(client)
+    friend_token = friend["Authorization"].removeprefix("Bearer ")
+    with client.websocket_connect("/events") as ws:
+        ws.send_text(json.dumps({"type": "auth", "token": friend_token}))
+        ws.receive_json()
+        sent = client.post(f"/channels/{voice[0]}/messages", headers=admin,
+                           json={"body": "Заходи @friend https://example.org/match"})
+        assert sent.status_code == 200
+        event = ws.receive_json()
+        assert event["type"] == "message.created"
+        assert event["message"]["body"].startswith("Заходи") and event["message"]["mentions"] == [2]
+    with presence.SessionLocal() as db:
+        from app.server import models
+        stored = db.get(models.Message, sent.json()["id"]).body
+    assert "Заходи" not in stored and stored.startswith("v1:")
+    assert client.get(f"/spaces/{space}/unread", headers=friend).json() == [{"channel_id": voice[0], "count": 1}]
+    client.post(f"/channels/{voice[0]}/read", headers=friend, json={"message_id": sent.json()["id"]})
+    assert client.get(f"/spaces/{space}/unread", headers=friend).json() == []
+    history = client.get(f"/channels/{voice[0]}/messages", headers=friend).json()
+    assert [m["body"] for m in history] == ["Заходи @friend https://example.org/match"]
+    assert client.patch(f"/messages/{history[0]['id']}", headers=friend, json={"body": "x"}).status_code == 403
+    assert client.delete(f"/messages/{history[0]['id']}", headers=admin).status_code == 200
+    assert client.get(f"/channels/{voice[0]}/messages", headers=friend).json()[0]["deleted"] is True

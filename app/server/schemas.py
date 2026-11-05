@@ -186,6 +186,17 @@ class MessageOut(OrmModel):
     body: str
     created_at: datetime
     edited_at: datetime | None
+    deleted: bool = False
+    mentions: list[int] = []
+
+
+class ReadIn(BaseModel):
+    message_id: int = Field(ge=0)
+
+
+class UnreadOut(BaseModel):
+    channel_id: int
+    count: int
 
 
 class VoiceJoinIn(OrmModel):

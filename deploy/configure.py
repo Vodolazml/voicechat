@@ -93,6 +93,11 @@ def configure(root: Path, domain: str, email: str = "", installer: str | None = 
         # Relay for friends behind strict NAT; LiveKit authenticates TURN with the room token.
         "turn": {"enabled": True, "domain": f"rtc.{domain}", "udp_port": 3478},
         "keys": {values["VOICECHAT_LIVEKIT_API_KEY"]: values["VOICECHAT_LIVEKIT_API_SECRET"]},
+        # Signed callbacks: the API learns instantly when someone's connection closes.
+        "webhook": {
+            "api_key": values["VOICECHAT_LIVEKIT_API_KEY"],
+            "urls": ["http://127.0.0.1:8765/livekit/webhook"],
+        },
         "room": {"empty_timeout": 60, "departure_timeout": 15, "max_participants": 40},
         "logging": {"level": "info"},
     }

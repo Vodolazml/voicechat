@@ -122,6 +122,15 @@ class ChannelCreateIn(OrmModel):
     space_id: int
     name: str = Field(min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
     type: str = Field(pattern=r"^(text|voice)$")
+    is_private: bool = False
+    user_limit: int = Field(default=0, ge=0, le=99)
+
+
+class ChannelUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    position: int | None = Field(default=None, ge=0, le=10_000)
+    user_limit: int | None = Field(default=None, ge=0, le=99)
+    is_private: bool | None = None
 
 
 class ChannelOut(OrmModel):
@@ -129,6 +138,9 @@ class ChannelOut(OrmModel):
     space_id: int
     name: str
     type: str
+    position: int = 0
+    user_limit: int = 0
+    is_private: bool = False
 
 
 class DeviceKeyIn(BaseModel):
@@ -195,7 +207,16 @@ class VoiceStateOut(OrmModel):
     muted: bool
     deafened: bool
     speaking: bool
+    server_muted: bool = False
     status: str
+
+
+class MoveIn(BaseModel):
+    channel_id: int
+
+
+class ServerMuteIn(BaseModel):
+    muted: bool
 
 
 class AuditOut(OrmModel):

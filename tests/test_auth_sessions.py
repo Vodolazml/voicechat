@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.server import main, models
+from app.server import main, media_sessions, models, presence
 from app.server.config import Settings
 from app.server.database import get_db
 
@@ -20,12 +20,14 @@ def client(tmp_path, monkeypatch):
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(main, "engine", engine)
     monkeypatch.setattr(main, "SessionLocal", sessions)
+    monkeypatch.setattr(presence, "SessionLocal", sessions)
     kicked: list[tuple[int, int]] = []
 
     async def fake_remove(channel_id, user_id):
         kicked.append((channel_id, user_id))
 
     monkeypatch.setattr(main, "remove_media_participant", fake_remove)
+    monkeypatch.setattr(media_sessions, "remove_media_participant", fake_remove)
 
     def database():
         with sessions() as db:
@@ -159,8 +161,8 @@ def test_stale_voice_state_is_kicked(client):
         state = db.get(models.VoiceState, 1)
         state.updated_at = models.utcnow() - timedelta(minutes=5)
         db.commit()
+    assert presence.collect_stale_voice_states() == [(channel, 1)]
     assert client.get(f"/channels/{channel}/voice", headers=headers).json() == []
-    assert client.kicked == [(channel, 1)]
 
 
 def test_voice_status_is_limited(client):

@@ -111,6 +111,11 @@ class Channel(Base):
     space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     type: Mapped[str] = mapped_column(String(24))
+    position: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # 0 means no limit on people in a voice channel.
+    user_limit: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Private channels are visible only to explicitly added members; public ones to the whole space.
+    is_private: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -141,7 +146,9 @@ class VoiceState(Base):
     muted: Mapped[bool] = mapped_column(Boolean, default=False)
     deafened: Mapped[bool] = mapped_column(Boolean, default=False)
     speaking: Mapped[bool] = mapped_column(Boolean, default=False)
+    server_muted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     status: Mapped[str] = mapped_column(String(24), default="connected")
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

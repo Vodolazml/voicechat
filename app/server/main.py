@@ -1,10 +1,9 @@
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
+import asyncio
 import logging
 import secrets
 from datetime import timezone
-from time import monotonic
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +20,8 @@ from .audit import write_audit
 from .database import SessionLocal, engine, get_db, run_migrations
 from .e2ee_state import e2ee_state
 from ..e2ee_crypto import public_key_fingerprint
-from .deps import current_user, ensure_channel_member, require_permission, token_session_id
+from .deps import channel_participant_ids, current_user, ensure_channel_member, require_permission, token_session_id
+from .limits import _rate_limits, client_ip, rate_limit  # noqa: F401  (_rate_limits re-exported for tests)
 from .permissions import seed_permissions, has_permission, user_permissions
 from .security import (
     burn_password_check,
@@ -33,13 +33,15 @@ from .security import (
     verify_password,
 )
 from .media_sessions import remove_media_participant
+from .events import hub
+from . import presence
+from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
 
 
 settings = get_settings()
 logger = logging.getLogger("voicechat.server")
-MAX_RATE_LIMIT_KEYS = 20_000
 
 _docs_enabled = settings.enable_api_docs or not settings.is_production
 
@@ -47,7 +49,11 @@ _docs_enabled = settings.enable_api_docs or not settings.is_production
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     seed_database()
-    yield
+    janitor = asyncio.create_task(presence.presence_janitor())
+    try:
+        yield
+    finally:
+        janitor.cancel()
 
 
 app = FastAPI(
@@ -69,7 +75,9 @@ if settings.cors_origins:
         allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Authorization", "Content-Type"],
     )
-_rate_limits: dict[str, deque[float]] = defaultdict(deque)
+
+
+app.include_router(presence.router)
 
 
 @app.middleware("http")
@@ -93,31 +101,6 @@ async def security_middleware(request: Request, call_next):
     return response
 
 
-def _purge_rate_limits(now: float) -> None:
-    # Windows are at most one hour; anything older is dead weight.
-    for key in [k for k, bucket in _rate_limits.items() if not bucket or now - bucket[-1] > 3600]:
-        del _rate_limits[key]
-    if len(_rate_limits) > MAX_RATE_LIMIT_KEYS:
-        _rate_limits.clear()
-
-
-def rate_limit(key: str, limit: int, window_seconds: int) -> None:
-    """Sliding-window limiter. Memory stays bounded: stale keys are purged when the table grows."""
-    now = monotonic()
-    if len(_rate_limits) > MAX_RATE_LIMIT_KEYS // 2:
-        _purge_rate_limits(now)
-    bucket = _rate_limits[key]
-    while bucket and now - bucket[0] > window_seconds:
-        bucket.popleft()
-    if len(bucket) >= limit:
-        raise HTTPException(status_code=429, detail="Слишком много действий. Попробуйте позже.")
-    bucket.append(now)
-
-
-def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "local"
-
-
 def revoke_user_sessions(db: Session, user_id: int, *, keep_session_id: int | None = None) -> None:
     now = models.utcnow()
     rows = db.scalars(
@@ -129,16 +112,6 @@ def revoke_user_sessions(db: Session, user_id: int, *, keep_session_id: int | No
         if row.id != keep_session_id:
             row.revoked_at = now
             row.token_hash = None
-
-
-def channel_participant_ids(db: Session, channel_id: int) -> set[int]:
-    return set(
-        db.scalars(
-            select(models.ChannelMember.user_id)
-            .join(models.User, models.User.id == models.ChannelMember.user_id)
-            .where(models.ChannelMember.channel_id == channel_id, models.User.status == "active")
-        )
-    )
 
 
 def ensure_media_e2ee_access(db: Session, user_id: int, channel_id: int) -> models.Channel:
@@ -414,6 +387,8 @@ def revoke_other_sessions(request: Request, user: models.User = Depends(current_
     write_audit(db, actor_id=user.id, action="auth.sessions_revoked", target_type="user", target_id=user.id,
                 request=request)
     db.commit()
+    # Streams of the remaining device reconnect immediately; revoked ones fail their re-auth.
+    hub.disconnect_user(user.id)
     return {"status": "ok"}
 
 
@@ -450,6 +425,7 @@ def change_password(
     revoke_user_sessions(db, user.id)
     write_audit(db, actor_id=user.id, action="auth.password_changed", target_type="user", target_id=user.id, request=request)
     db.commit()
+    hub.disconnect_user(user.id)
     return {"status": "ok"}
 
 
@@ -513,12 +489,11 @@ async def reset_user_password(user_id: int, request: Request,
     else:
         db.add(models.TemporaryCredential(user_id=user_id, expires_at=models.utcnow() + timedelta(days=1)))
     state = db.get(models.VoiceState, user_id)
-    channel_id = state.channel_id if state else None
-    if state:
-        db.delete(state)
+    channel_id = leave_voice(db, state)[0] if state else None
     revoke_user_sessions(db, user_id)
     write_audit(db, actor_id=actor.id, action='users.reset_password', target_type='user', target_id=user_id, request=request)
     db.commit()
+    hub.disconnect_user(user_id)
     if channel_id:
         await remove_media_participant(channel_id, user_id)
     return {'temporary_password': password}
@@ -535,11 +510,10 @@ async def disable_user(user_id: int, request: Request,
     user.status = 'disabled'
     revoke_user_sessions(db, user_id)
     state = db.get(models.VoiceState, user_id)
-    channel_id = state.channel_id if state else None
-    if state:
-        db.delete(state)
+    channel_id = leave_voice(db, state)[0] if state else None
     write_audit(db, actor_id=actor.id, action='users.disable', target_type='user', target_id=user_id, request=request)
     db.commit()
+    hub.disconnect_user(user_id)
     if channel_id:
         await remove_media_participant(channel_id, user_id)
     return {'status': 'ok'}
@@ -650,10 +624,8 @@ def register_with_invite(payload: schemas.RegisterIn, request: Request, db: Sess
         db.add(models.UserRole(user_id=user.id, role_id=role.id))
     if invite.space_id and db.get(models.Space, invite.space_id):
         db.add(models.SpaceMember(space_id=invite.space_id, user_id=user.id))
-        channels = db.scalars(select(models.Channel).where(
-            models.Channel.space_id == invite.space_id, models.Channel.is_deleted.is_(False)))
-        for channel in channels:
-            db.add(models.ChannelMember(channel_id=channel.id, user_id=user.id))
+        db.flush()
+        grant_public_channels(db, invite.space_id, user.id)
     invite.used_at = models.utcnow()
     invite.used_by = user.id
     write_audit(db, actor_id=user.id, action="auth.register", target_type="invite", target_id=invite.id,
@@ -705,6 +677,8 @@ def add_space_member(
         raise HTTPException(status_code=404, detail="Пространство или пользователь не найден")
     if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": payload.user_id}):
         db.add(models.SpaceMember(space_id=space_id, user_id=payload.user_id))
+    db.flush()
+    grant_public_channels(db, space_id, payload.user_id)
     write_audit(
         db,
         actor_id=actor.id,
@@ -716,23 +690,6 @@ def add_space_member(
     )
     db.commit()
     return {"status": "ok"}
-
-
-@app.get("/spaces/{space_id}/channels", response_model=list[schemas.ChannelOut], tags=["channels"])
-def list_channels(space_id: int, user: models.User = Depends(current_user), db: Session = Depends(get_db)) -> list[models.Channel]:
-    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": user.id}):
-        raise HTTPException(status_code=403, detail="Нет доступа к пространству")
-    rows = db.scalars(
-        select(models.Channel)
-        .join(models.ChannelMember, models.ChannelMember.channel_id == models.Channel.id)
-        .where(
-            models.Channel.space_id == space_id,
-            models.ChannelMember.user_id == user.id,
-            models.Channel.is_deleted.is_(False),
-        )
-        .order_by(models.Channel.type, models.Channel.name)
-    )
-    return list(rows)
 
 
 @app.put("/me/device-key", tags=["security"])
@@ -778,191 +735,9 @@ def publish_sender_key(
     return {"status": "ok"}
 
 
-@app.post("/channels", response_model=schemas.ChannelOut, tags=["channels"])
-def create_channel(
-    payload: schemas.ChannelCreateIn,
-    request: Request,
-    actor: models.User = Depends(require_permission("channels.create")),
-    db: Session = Depends(get_db),
-) -> models.Channel:
-    if not db.get(models.SpaceMember, {"space_id": payload.space_id, "user_id": actor.id}):
-        raise HTTPException(status_code=403, detail="Нет доступа к пространству")
-    channel = models.Channel(space_id=payload.space_id, name=payload.name, type=payload.type, created_by=actor.id)
-    db.add(channel)
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Канал с таким названием уже существует") from exc
-    db.add(models.ChannelMember(channel_id=channel.id, user_id=actor.id))
-    write_audit(db, actor_id=actor.id, action="channels.create", target_type="channel", target_id=channel.id, request=request)
-    db.commit()
-    return channel
-
-
-@app.post("/channels/{channel_id}/members", tags=["channels"])
-def add_channel_member(
-    channel_id: int,
-    payload: schemas.MemberIn,
-    request: Request,
-    actor: models.User = Depends(require_permission("channels.members.manage")),
-    db: Session = Depends(get_db),
-) -> dict[str, str]:
-    channel = db.get(models.Channel, channel_id)
-    user = db.get(models.User, payload.user_id)
-    if not channel or not user:
-        raise HTTPException(status_code=404, detail="Канал или пользователь не найден")
-    if not db.get(models.SpaceMember, {"space_id": channel.space_id, "user_id": payload.user_id}):
-        db.add(models.SpaceMember(space_id=channel.space_id, user_id=payload.user_id))
-    if not db.get(models.ChannelMember, {"channel_id": channel_id, "user_id": payload.user_id}):
-        db.add(models.ChannelMember(channel_id=channel_id, user_id=payload.user_id))
-    write_audit(
-        db,
-        actor_id=actor.id,
-        action="channels.members.add",
-        target_type="channel",
-        target_id=channel_id,
-        request=request,
-        details={"user_id": payload.user_id},
-    )
-    db.commit()
-    return {"status": "ok"}
-
-
-@app.post("/channels/{channel_id}/connect", response_model=schemas.VoiceStateOut, tags=["voice"])
-async def connect_channel(
-    channel_id: int,
-    payload: schemas.VoiceJoinIn,
-    request: Request,
-    user: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> schemas.VoiceStateOut:
-    rate_limit(f"voice:{user.id}", 30, 60)
-    channel = ensure_channel_member(db, user.id, channel_id)
-    if channel.type != "voice":
-        raise HTTPException(status_code=400, detail="Подключаться можно только к голосовому каналу")
-    if not has_permission(db, user.id, "voice.join"):
-        raise HTTPException(status_code=403, detail="Нет права подключаться к голосовым каналам")
-    existing = db.get(models.VoiceState, user.id)
-    previous_channel_id = existing.channel_id if existing and existing.channel_id != channel_id else None
-    if existing:
-        existing.channel_id = channel_id
-        existing.muted = payload.muted
-        existing.deafened = payload.deafened
-        existing.speaking = False
-        existing.status = "connected"
-        existing.updated_at = models.utcnow()
-        state = existing
-    else:
-        state = models.VoiceState(user_id=user.id, channel_id=channel_id, muted=payload.muted, deafened=payload.deafened)
-        db.add(state)
-    write_audit(db, actor_id=user.id, action="voice.connect", target_type="channel", target_id=channel_id, request=request)
-    db.commit()
-    if previous_channel_id is not None:
-        # Switching channels: the old room must not keep a hidden listener.
-        await remove_media_participant(previous_channel_id, user.id)
-    return voice_state_out(db, state)
-
-
-@app.put("/channels/{channel_id}/voice-state", response_model=schemas.VoiceStateOut, tags=["voice"])
-def update_voice_state(
-    channel_id: int,
-    payload: schemas.VoiceStateIn,
-    user: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> schemas.VoiceStateOut:
-    state = db.get(models.VoiceState, user.id)
-    if not state or state.channel_id != channel_id:
-        raise HTTPException(status_code=404, detail="Вы не подключены к этому каналу")
-    state.muted = payload.muted
-    state.deafened = payload.deafened
-    state.speaking = payload.speaking
-    state.status = payload.status
-    state.updated_at = models.utcnow()
-    db.commit()
-    return voice_state_out(db, state)
-
-
-@app.post("/channels/{channel_id}/disconnect", tags=["voice"])
-async def disconnect_channel(
-    channel_id: int,
-    request: Request,
-    user: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> dict[str, str]:
-    state = db.get(models.VoiceState, user.id)
-    if state and state.channel_id == channel_id:
-        db.delete(state)
-        write_audit(db, actor_id=user.id, action="voice.disconnect", target_type="channel", target_id=channel_id, request=request)
-        db.commit()
-        await remove_media_participant(channel_id, user.id)
-    return {"status": "ok"}
-
-
-@app.get("/channels/{channel_id}/voice", response_model=list[schemas.VoiceStateOut], tags=["voice"])
-async def voice_states(
-    channel_id: int,
-    user: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-) -> list[schemas.VoiceStateOut]:
-    ensure_channel_member(db, user.id, channel_id)
-    await expire_stale_voice_states(db)
-    rows = db.scalars(select(models.VoiceState).where(models.VoiceState.channel_id == channel_id).order_by(models.VoiceState.user_id))
-    return [voice_state_out(db, row) for row in rows]
-
-
-async def expire_stale_voice_states(db: Session) -> None:
-    """A client that stopped sending heartbeats is gone: drop its state and kick it from the media room."""
-    cutoff = models.utcnow() - timedelta(seconds=settings.voice_state_timeout_seconds)
-    stale_rows = list(db.scalars(select(models.VoiceState).where(models.VoiceState.updated_at < cutoff)))
-    if not stale_rows:
-        return
-    gone = [(row.channel_id, row.user_id) for row in stale_rows]
-    for stale in stale_rows:
-        db.delete(stale)
-    db.commit()
-    for stale_channel_id, stale_user_id in gone:
-        await remove_media_participant(stale_channel_id, stale_user_id)
-
-
 @app.get("/audit", response_model=list[schemas.AuditOut], tags=["admin"])
 def audit_log(
     _: models.User = Depends(require_permission("audit.view")),
     db: Session = Depends(get_db),
 ) -> list[models.AuditLog]:
     return list(db.scalars(select(models.AuditLog).order_by(models.AuditLog.id.desc()).limit(100)))
-
-
-@app.post("/channels/{channel_id}/video-token", tags=["video"])
-def video_token(channel_id: int, audio: bool = False, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
-    from livekit import api as livekit_api
-    ensure_channel_member(db, user.id, channel_id)
-    state = db.get(models.VoiceState, user.id)
-    if not state or state.channel_id != channel_id:
-        raise HTTPException(status_code=403, detail="Сначала войдите в канал")
-    if not settings.livekit_url or not settings.livekit_api_secret:
-        raise HTTPException(status_code=503, detail="Видеосервер LiveKit ещё не настроен")
-    can_publish = has_permission(db, user.id, "voice.speak" if audio else "screen_share.start")
-    can_subscribe = has_permission(db, user.id, "voice.join" if audio else "screen_share.view")
-    if not can_publish and not can_subscribe:
-        raise HTTPException(status_code=403, detail="Нет доступа к видео")
-    token = (livekit_api.AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
-             .with_identity(f'{user.id}-audio' if audio else str(user.id)).with_name(user.display_name)
-             .with_ttl(timedelta(minutes=10))
-             .with_grants(livekit_api.VideoGrants(room_join=True, room=f"channel-{channel_id}",
-                 can_publish=can_publish, can_subscribe=can_subscribe,
-                 can_publish_data=False, can_publish_sources=["microphone" if audio else "screen_share"])).to_jwt())
-    return {"url": settings.livekit_url, "token": token}
-
-
-def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceStateOut:
-    user = db.get(models.User, state.user_id)
-    return schemas.VoiceStateOut(
-        user_id=state.user_id,
-        display_name=user.display_name if user else f"Пользователь {state.user_id}",
-        channel_id=state.channel_id,
-        muted=state.muted,
-        deafened=state.deafened,
-        speaking=state.speaking,
-        status=state.status,
-    )

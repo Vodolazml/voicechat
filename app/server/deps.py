@@ -2,6 +2,7 @@ import hmac
 from datetime import timezone
 
 from fastapi import Depends, Header, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from . import models
 from .database import get_db
@@ -55,3 +56,14 @@ def ensure_channel_member(db: Session, user_id: int, channel_id: int) -> models.
     if not member:
         raise HTTPException(status_code=403, detail="Нет доступа к каналу")
     return channel
+
+
+def channel_participant_ids(db: Session, channel_id: int) -> set[int]:
+    """Active users who can see a channel (and therefore receive its events)."""
+    return set(
+        db.scalars(
+            select(models.ChannelMember.user_id)
+            .join(models.User, models.User.id == models.ChannelMember.user_id)
+            .where(models.ChannelMember.channel_id == channel_id, models.User.status == "active")
+        )
+    )

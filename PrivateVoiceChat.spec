@@ -47,7 +47,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # No UPX and a proper version resource: packed, anonymous exes are what antivirus heuristics flag.
+    upx=False,
+    version='build/version_info.py',
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -60,7 +62,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='PrivateVoiceChat',
 )

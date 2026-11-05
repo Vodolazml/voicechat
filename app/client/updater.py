@@ -92,6 +92,18 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def remove_old_installers(keep: Path | None = None) -> None:
+    """Installers of earlier updates are useless once installed; they used to pile up (1+ GB)."""
+    if not UPDATE_DIR.is_dir():
+        return
+    for path in UPDATE_DIR.iterdir():
+        if path.is_file() and path != keep and path.suffix.lower() in {".exe", ".partial", ".zip"}:
+            try:
+                path.unlink()
+            except OSError:
+                pass  # still running or locked: next time
+
+
 def download_update(info: UpdateInfo, progress: Callable[[int, int], None] | None = None) -> Path:
     if not info.download_url:
         raise RuntimeError("URL обновления не задан")
@@ -100,6 +112,7 @@ def download_update(info: UpdateInfo, progress: Callable[[int, int], None] | Non
     verify_release(info.latest_version, info.download_url, info.sha256, info.signature)
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
     target = UPDATE_DIR / update_file_name(info.download_url, info.latest_version)
+    remove_old_installers(keep=target)
     if target.suffix.lower() != ".exe":
         raise RuntimeError("Обновление должно быть установщиком EXE")
     partial = target.with_suffix('.partial')

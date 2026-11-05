@@ -230,3 +230,15 @@ def test_sent_stream_is_described_from_measured_numbers():
     paused = backend_module.describe_sent({**base, "sent_width": 1920, "sent_height": 1080, "network_fps": 0.0})
     assert paused[0] == "2560×1440 → 1920×1080 · нет зрителей, отправка на паузе"
     assert "кодер запускается" in backend_module.describe_sent(base)[0]
+
+
+def test_old_update_installers_are_removed(tmp_path, monkeypatch):
+    from app.client import updater
+
+    monkeypatch.setattr(updater, "UPDATE_DIR", tmp_path)
+    for name in ("PrivateVoiceChat-0.1.7-setup.exe", "PrivateVoiceChat-0.2.3-setup.exe", "x.partial", "notes.txt"):
+        (tmp_path / name).write_bytes(b"x")
+    keep = tmp_path / "PrivateVoiceChat-0.3.1-setup.exe"
+    keep.write_bytes(b"x")
+    updater.remove_old_installers(keep=keep)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["PrivateVoiceChat-0.3.1-setup.exe", "notes.txt"]

@@ -447,6 +447,10 @@ class Backend(QObject):
                 and os.environ.get("VOICECHAT_NO_AUTOUPDATE") != "1" and "--no-update" not in sys.argv)
 
     def _continue_startup(self) -> None:
+        if self._can_self_update():
+            from app.client.updater import remove_old_installers
+
+            self._pool.submit(remove_old_installers)
         stored = self.client_settings.get("remembered_refresh_dpapi")
         if stored and self._server_url and self.client_settings.get("remember_me"):
             try:

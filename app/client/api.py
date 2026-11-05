@@ -75,7 +75,7 @@ class ApiClient:
                 **kwargs,
             )
         except httpx.HTTPError as exc:
-            raise ApiError("Сервер недоступен. Проверьте, что backend запущен.") from exc
+            raise ApiError("Нет связи с сервером. Проверьте интернет") from exc
         if response.status_code == 401 and self.refresh_token and not path.startswith('/auth/'):
             failed_token = self.token
             with self._refresh_lock:
@@ -243,8 +243,33 @@ class ApiClient:
     def channels(self, space_id: int) -> list[dict[str, Any]]:
         return self.request("GET", f"/spaces/{space_id}/channels")
 
-    def create_channel(self, space_id: int, name: str, channel_type: str) -> dict[str, Any]:
-        return self.request("POST", "/channels", json={"space_id": space_id, "name": name, "type": channel_type})
+    def create_channel(self, space_id: int, name: str, channel_type: str, is_private: bool = False,
+                       user_limit: int = 0) -> dict[str, Any]:
+        return self.request("POST", "/channels", json={"space_id": space_id, "name": name, "type": channel_type,
+                                                       "is_private": is_private, "user_limit": user_limit})
+
+    # --- chat -------------------------------------------------------------------------------------
+
+    def messages(self, channel_id: int, before: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit}
+        if before:
+            params["before"] = before
+        return self.request("GET", f"/channels/{channel_id}/messages", params=params)
+
+    def send_message(self, channel_id: int, body: str) -> dict[str, Any]:
+        return self.request("POST", f"/channels/{channel_id}/messages", json={"body": body})
+
+    def edit_message(self, message_id: int, body: str) -> dict[str, Any]:
+        return self.request("PATCH", f"/messages/{message_id}", json={"body": body})
+
+    def delete_message(self, message_id: int) -> None:
+        self.request("DELETE", f"/messages/{message_id}")
+
+    def mark_read(self, channel_id: int, message_id: int) -> None:
+        self.request("POST", f"/channels/{channel_id}/read", json={"message_id": message_id})
+
+    def unread(self, space_id: int) -> list[dict[str, Any]]:
+        return self.request("GET", f"/spaces/{space_id}/unread")
 
     def add_channel_member(self, channel_id: int, user_id: int) -> None:
         self.request("POST", f"/channels/{channel_id}/members", json={"user_id": user_id})

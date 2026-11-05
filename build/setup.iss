@@ -24,6 +24,8 @@ OutputBaseFilename=PrivateVoiceChat-{#MyAppVersion}-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+CloseApplications=force
+RestartApplications=no
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
@@ -45,10 +47,12 @@ Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 [Registry]
 Root: HKCU; Subkey: "Software\PrivateVoiceChat"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\PrivateVoiceChat"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PrivateVoiceChat"; ValueData: """{app}\{#MyAppExeName}"""; Tasks: startwithwindows
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "PrivateVoiceChat"; ValueData: """{app}\{#MyAppExeName}"" --tray"; Tasks: startwithwindows
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Silent in-app update: start the new version again right away.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

@@ -163,7 +163,9 @@ class CallController:
         if self.channel_id == channel_id and self.state in (CONNECTED, CONNECTING, RECONNECTING):
             return
         if self.channel_id is not None:
-            self._leave(notify_server=False)  # the server moves us; it also kicks us from the old room
+            # The server moves us and kicks us from the old room. No IDLE in between, so the UI
+            # switches channels without flashing "disconnected".
+            self._leave(notify_server=False, final=False)
         self.channel_id = channel_id
         self._set_state(CONNECTING)
         try:
@@ -197,7 +199,7 @@ class CallController:
         media.start()
         self._start_heartbeat(channel_id)
 
-    def _leave(self, notify_server: bool = True) -> None:
+    def _leave(self, notify_server: bool = True, final: bool = True) -> None:
         channel_id = self.channel_id
         self._stop_heartbeat()
         media, self.media = self.media, None
@@ -215,7 +217,10 @@ class CallController:
                 except Exception:
                     logger.info("Disconnect request failed; the server will expire the state")
         self.channel_id = None
-        self._set_state(IDLE)
+        if final:
+            self._set_state(IDLE)
+        else:
+            self.state = IDLE
 
     def _sync_keys(self, channel_id: int | None) -> None:
         if channel_id is None or channel_id != self.channel_id:

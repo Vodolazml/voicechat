@@ -140,7 +140,7 @@ Rectangle {
                     }
                     Segmented {
                         title: "Шумоподавление"
-                        options: [{value: "off", title: "Выключено"}, {value: "standard", title: "Стандартное"}, {value: "strong", title: "Сильное (ИИ)"}]
+                        options: [{value: "off", title: "Выключено"}, {value: "standard", title: "Стандартное"}, {value: "strong", title: backend.strongNoiseAvailable ? "Сильное (ИИ)" : "Сильное (ИИ недоступен)"}]
                         current: root.s.noise
                         onPicked: (v) => backend.setSetting("noise", v)
                     }

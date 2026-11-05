@@ -30,7 +30,7 @@ from app.client.api import ApiClient, ApiError, default_device_name
 from app.client.client_config import load_client_config
 from app.client.core.audio import AudioSettings, list_devices
 from app.client.core.call import CONNECTED, IDLE, CallController, CallListener
-from app.client.core.dsp import FRAME_BYTES, SAMPLE_RATE
+from app.client.core.dsp import FRAME_BYTES, SAMPLE_RATE, RNNoise
 from app.client.core.events import EventStream
 from app.client.core.keys import KeyManager
 from app.client.e2ee import E2EEIdentity
@@ -186,6 +186,7 @@ class Backend(QObject):
         self._spaces_list: list[dict] = []
         self._channels: list[dict] = []
         self._voice: dict[int, dict] = {}          # user_id -> voice state
+        self._voice_generation = 0                 # bumped by every live presence event
         self._unread: dict[int, int] = {}
         self._call_state = IDLE
         self._call_channel = 0
@@ -355,6 +356,7 @@ class Backend(QObject):
     outputDevices = Property("QVariantList", lambda self: ["", *self._outputs], notify=devicesChanged)
     screenPresets = Property("QVariantList", lambda self: [{"key": p.key, "title": p.title} for p in PRESETS],
                              constant=True)
+    strongNoiseAvailable = Property(bool, lambda self: RNNoise.available(), constant=True)
     sessions = Property("QVariantList", lambda self: self._sessions, notify=sessionsChanged)
     safetyCodes = Property("QVariantList", lambda self: self._safety, notify=safetyChanged)
     myFingerprint = Property(str, lambda self: self.keys.identity.fingerprint if self.keys else "", notify=meChanged)
@@ -556,13 +558,25 @@ class Backend(QObject):
         if not space_id:
             return
 
+        generation = self._voice_generation
+
         def load():
             return self.api.channels(space_id), self.api.space_voice(space_id), self.api.unread(space_id)
 
         def done(result):
             if space_id != self._space_id:
                 return
+            if generation != self._voice_generation:
+                # A live event arrived while this snapshot was in flight; it may be older than the event.
+                self._refresh_space()
+                return
             channels, voice, unread = result
+            my_id = self._me.get("id", 0)
+            if my_id in {v["user_id"] for v in voice} and not self._call_channel:
+                # Left over from a crash or a killed process: we are not in a call, so leave at once.
+                stale = next(v["channel_id"] for v in voice if v["user_id"] == my_id)
+                voice = [v for v in voice if v["user_id"] != my_id]
+                self._bg(lambda: self.api.disconnect(stale), lambda _: None, lambda exc: None)
             self._channels = sorted(channels, key=lambda c: (c["type"] != "text", c.get("position", 0), c["id"]))
             self._voice = {v["user_id"]: v for v in voice}
             self._unread = {u["channel_id"]: u["count"] for u in unread}
@@ -624,7 +638,9 @@ class Backend(QObject):
                 "speaking": (self._transmitting and not self._muted) if is_me else uid in self._speakers,
                 "muted": self._muted if is_me else state["muted"], "deafened": self._deafened if is_me else
                 state["deafened"], "serverMuted": bool(state.get("server_muted")),
-                "streaming": uid in self._streams, "watching": uid in self._watching,
+                # Our own share is always shown to us as a local preview.
+                "streaming": uid in self._streams,
+                "watching": (self._sharing and is_me) or uid in self._watching,
                 "volume": self.audio_settings.user_volumes.get(uid, 1.0),
                 "localMuted": bool(mixer and uid in mixer.muted_users), "quality": self._quality.get(uid, 2),
                 "isMe": is_me, "keyChanged": uid in self._key_changed,
@@ -635,6 +651,8 @@ class Backend(QObject):
 
     def _on_event(self, event: dict) -> None:
         kind = event.get("type", "")
+        if kind in ("voice.state", "voice.left"):
+            self._voice_generation += 1
         if self.call is not None:
             self.call.handle_event(event)
         if kind == "connected":
@@ -853,7 +871,8 @@ class Backend(QObject):
         self.ui["screen_preset"], self.ui["screen_monitor"] = preset.key, monitor
         self._save()
         try:
-            capturer = ScreenCapturer(monitor, preset)
+            my_id = self._me.get("id", 0)
+            capturer = ScreenCapturer(monitor, preset, preview=lambda image: video_hub().push_image(my_id, image))
         except Exception as exc:  # noqa: BLE001
             self.toast("error", str(exc))
             return
@@ -864,6 +883,7 @@ class Backend(QObject):
     def stopScreen(self) -> None:
         if self.call is not None:
             self.call.stop_screen()
+        video_hub().drop(self._me.get("id", 0))
 
     # --- moderation ---------------------------------------------------------------------------
 

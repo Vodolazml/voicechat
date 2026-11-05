@@ -83,7 +83,7 @@ Rectangle {
         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 10
         spacing: 4
         IconButton { glyph: "fullscreen"; tip: "Развернуть"; fill: Qt.rgba(0, 0, 0, 0.55); onClicked: tile.focusRequested() }
-        IconButton { glyph: "close"; tip: "Перестать смотреть"; fill: Qt.rgba(0, 0, 0, 0.55); onClicked: backend.watch(tile.person.id, false) }
+        IconButton { glyph: "close"; tip: tile.person.isMe ? "Остановить показ экрана" : "Перестать смотреть"; fill: Qt.rgba(0, 0, 0, 0.55); onClicked: tile.person.isMe ? backend.stopScreen() : backend.watch(tile.person.id, false) }
     }
 
     HoverHandler { id: hover }

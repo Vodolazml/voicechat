@@ -60,7 +60,10 @@ def _target_size(width: int, height: int, max_height: int) -> tuple[int, int]:
 
 
 class ScreenCapturer:
-    def __init__(self, monitor: int, preset: Preset) -> None:
+    PREVIEW_EVERY = 6  # frames; ~10 fps self-preview is plenty and costs almost nothing
+
+    def __init__(self, monitor: int, preset: Preset, preview=None) -> None:
+        self.preview = preview  # called with a small QImage so you can see what you are sharing
         monitors = list_monitors()
         info = next((m for m in monitors if m["index"] == monitor), monitors[0] if monitors else None)
         if info is None:
@@ -107,6 +110,7 @@ class ScreenCapturer:
             grab, close = self._grabber()
             interval = 1.0 / self.fps
             last = None
+            count = 0
             try:
                 while not self._stop.is_set():
                     started = time.perf_counter()
@@ -119,6 +123,9 @@ class ScreenCapturer:
                             image = image.scaled(self.width, self.height, Qt.IgnoreAspectRatio,
                                                  Qt.SmoothTransformation)
                         image = image.convertToFormat(QImage.Format_RGBA8888)
+                        count += 1
+                        if self.preview is not None and count % self.PREVIEW_EVERY == 1:
+                            self.preview(image.scaled(960, 540, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                         latest[0] = bytes(image.constBits())
                         loop.call_soon_threadsafe(ready.set)
                     time.sleep(max(0.0, interval - (time.perf_counter() - started)))
@@ -158,6 +165,12 @@ class VideoHub(QObject):
         """Called from the media thread with an RGBA rtc.VideoFrame."""
         width, height = video_frame.width, video_frame.height
         image = QImage(bytes(video_frame.data), width, height, width * 4, QImage.Format_RGBA8888)
+        with self._lock:
+            self._frames[user_id] = image
+        self.frame.emit(user_id)
+
+    def push_image(self, user_id: int, image: QImage) -> None:
+        """Local preview of our own screen share (any thread)."""
         with self._lock:
             self._frames[user_id] = image
         self.frame.emit(user_id)

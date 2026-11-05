@@ -28,6 +28,13 @@ if "%ISCC%"=="" (
     exit /b 1
 )
 
+python -m pip install --no-deps -r requirements-native.txt
+if errorlevel 1 (
+    echo Failed to install RNNoise. Strong noise suppression would be missing.
+    popd
+    exit /b 1
+)
+
 python -m pip show pyinstaller >nul 2>&1
 if errorlevel 1 python -m pip install pyinstaller
 

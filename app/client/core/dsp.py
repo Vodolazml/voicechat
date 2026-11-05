@@ -9,6 +9,7 @@ import importlib.util
 import math
 import os
 import platform
+import sys
 import threading
 from collections import deque
 from pathlib import Path
@@ -267,6 +268,8 @@ def _load_rnnoise() -> ctypes.CDLL | None:
     spec = importlib.util.find_spec("pyrnnoise")
     if spec and spec.submodule_search_locations:
         candidates += [Path(p) / names for p in spec.submodule_search_locations]
+    if getattr(sys, "frozen", False):
+        candidates.insert(0, Path(getattr(sys, "_MEIPASS", ".")) / "pyrnnoise" / names)
     if os.getenv("VOICECHAT_RNNOISE_LIB"):
         candidates.insert(0, Path(os.environ["VOICECHAT_RNNOISE_LIB"]))
     for path in candidates:

@@ -116,7 +116,9 @@ class AudioEngine:
             self.restart()
 
     def _ensure_apm(self) -> None:
-        config = (self.settings.echo_cancellation, self.settings.noise == NOISE_STANDARD, self.settings.auto_gain)
+        # "Strong" = WebRTC suppression plus RNNoise on top, so it is never weaker than "standard",
+        # even on a machine where the RNNoise library is missing.
+        config = (self.settings.echo_cancellation, self.settings.noise != NOISE_OFF, self.settings.auto_gain)
         if config == self._apm_config:
             return
         try:

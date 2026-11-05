@@ -420,6 +420,33 @@ class Backend(QObject):
     # =========================================================================================
 
     def _startup(self) -> None:
+        """The installed app is its own launcher: before anything else it brings itself up to date."""
+        if not self._can_self_update():
+            self._continue_startup()
+            return
+        try:
+            self.api.set_base_url(self._server_url)
+        except Exception:
+            self._continue_startup()
+            return
+        self._set("_view", "updating", self.viewChanged)
+
+        def got(info) -> None:
+            if info.update_available and _newer(info.latest_version, APP_VERSION) and info.download_url:
+                self._update = {"version": info.latest_version, "required": info.required,
+                                "notes": info.release_notes_url, "_info": info}
+                self.updateChanged.emit()
+                self._install_update(on_failure=self._continue_startup)
+            else:
+                self._continue_startup()
+        # Offline or the server is down: start normally, the update waits for the next launch.
+        self._bg(self.api.check_update, got, lambda exc: self._continue_startup())
+
+    def _can_self_update(self) -> bool:
+        return (bool(getattr(sys, "frozen", False)) and sys.platform == "win32" and bool(self._server_url)
+                and os.environ.get("VOICECHAT_NO_AUTOUPDATE") != "1" and "--no-update" not in sys.argv)
+
+    def _continue_startup(self) -> None:
         stored = self.client_settings.get("remembered_refresh_dpapi")
         if stored and self._server_url and self.client_settings.get("remember_me"):
             try:
@@ -1402,8 +1429,13 @@ class Backend(QObject):
 
     @Slot()
     def installUpdate(self) -> None:
+        self._install_update()
+
+    def _install_update(self, on_failure: Callable[[], None] | None = None) -> None:
         info = self._update.get("_info")
         if info is None or self._update_progress >= 0:
+            if on_failure:
+                on_failure()
             return
         from app.client.updater import download_update
 
@@ -1414,14 +1446,21 @@ class Backend(QObject):
         def finished(path):
             import subprocess
 
+            logger.info("Installing update %s", info.latest_version)
             self.shutdown()
-            subprocess.Popen([str(path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
+            # Silent install closes this app, replaces the files and starts the new version again.
+            subprocess.Popen([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
             QGuiApplication.quit()
 
         def failed(exc):
+            logger.warning("Update not installed: %s", exc)
             self._update_progress = -1.0
             self.updateChanged.emit()
-            self.toast("error", f"Обновление не установлено: {exc}")
+            if on_failure:
+                self.toast("warning", f"Обновление не установилось, запускаю текущую версию: {exc}")
+                on_failure()
+            else:
+                self.toast("error", f"Обновление не установлено: {exc}")
         self._update_progress = 0.0
         self.updateChanged.emit()
         self._bg(lambda: download_update(info, progress), finished, failed)

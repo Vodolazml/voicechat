@@ -75,12 +75,15 @@ gunzip -c /var/backups/voicechat/voicechat-2026-11-05.sql.gz | \
   docker compose -f docker-compose.prod.yml exec -T postgres psql -U voicechat voicechat
 ```
 
-### Публикация новой версии клиента
+### Страница скачивания и обновления клиента
 
-1. Соберите и подпишите установщик (`deploy/build_client.ps1 -ServerUrl https://chat.example.org`).
-2. Положите `PrivateVoiceChat-<версия>-setup.exe` и `.release.json` в `/opt/voicechat/downloads/`.
-3. `python3 deploy/configure.py example.org --installer PrivateVoiceChat-<версия>-setup.exe`
-4. `docker compose -f docker-compose.prod.yml up -d api`
+`https://chat.example.org` открывает страницу с кнопкой «Скачать для Windows» (`/download` всегда ведёт на последний установщик). Программу ставят один раз: при каждом запуске она сама проверяет сервер, скачивает новую подписанную версию, тихо ставит её и перезапускается. Права администратора не нужны.
+
+Выпуск новой версии (на Windows-компьютере со сборкой):
+
+1. Только перед самым первым релизом: `python deploy/sign_release.py --init-key`. Команда создаст `release-signing.key` и пропишет его открытый ключ в `app/update_trust.py`; закоммитьте этот файл.
+2. Поднимите версию в `app/version.py` и `pyproject.toml`.
+3. `deploy\build_client.ps1 -ServerUrl https://chat.example.org -Server root@<IP сервера>` соберёт, подпишет, загрузит установщик на сервер и опубликует его.
 
 Ключ подписи релизов (`release-signing.key`) храните только у себя: без него клиенты не примут обновление.
 

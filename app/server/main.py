@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import chat, presence, spaces
+from . import chat, download_page, presence, spaces
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -80,6 +80,7 @@ if settings.cors_origins:
 app.include_router(presence.router)
 app.include_router(chat.router)
 app.include_router(spaces.router)
+app.include_router(download_page.router)
 
 
 @app.middleware("http")

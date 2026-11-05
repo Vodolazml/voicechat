@@ -7,6 +7,18 @@ Rectangle {
     color: Theme.rail
     implicitWidth: 72
 
+    Text {
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: "v" + backend.version
+        color: Theme.faint; font.family: Theme.font; font.pixelSize: 11
+        HoverHandler { id: verHover }
+        ToolTip.visible: verHover.hovered
+        ToolTip.text: backend.updateInfo.version ? "Доступна версия " + backend.updateInfo.version + ", установится при следующем запуске"
+                                                 : "VoiceChat " + backend.version + ", последняя версия"
+        ToolTip.delay: 300
+    }
+
     Column {
         anchors.top: parent.top
         anchors.topMargin: 12

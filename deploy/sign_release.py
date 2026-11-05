@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sys
 
@@ -26,7 +27,21 @@ if __name__ == '__main__':
     parser.add_argument('--file')
     parser.add_argument('--version')
     parser.add_argument('--url')
+    parser.add_argument('--init-key', action='store_true',
+                        help='First release only: create a signing key and make the client trust it')
     args = parser.parse_args()
+    if args.init_key:
+        if Path(args.key).is_file():
+            parser.error('A signing key already exists; keep using it')
+        key = load_key(Path(args.key))
+        public = base64.b64encode(key.public_key().public_bytes(serialization.Encoding.Raw,
+                                                                serialization.PublicFormat.Raw)).decode()
+        trust = Path(__file__).resolve().parents[1] / 'app' / 'update_trust.py'
+        text = trust.read_text(encoding='utf-8')
+        trust.write_text(re.sub(r'RELEASE_PUBLIC_KEY = "[^"]*"', f'RELEASE_PUBLIC_KEY = "{public}"', text),
+                         encoding='utf-8')
+        print(f'Created {args.key} (back it up, never commit it). Client now trusts {public}')
+        sys.exit(0)
     if args.file and not Path(args.key).is_file():
         parser.error('Release signing key is missing; restore the original key from backup')
     key = load_key(Path(args.key))

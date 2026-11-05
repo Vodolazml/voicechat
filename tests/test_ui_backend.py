@@ -205,3 +205,23 @@ def test_hotkey_combos_parse():
     assert parse_combo("Mouse4") == (0x05,)
     assert parse_combo("F13") == (0x7C,)
     assert parse_combo("") is None and parse_combo("Ctrl+Nope") is None
+
+
+def test_dxcam_output_is_matched_to_the_right_screen():
+    from app.client.ui.screen import dxcam_target
+
+    info = ("Device[0] Output[0]: Res:(2560, 1440) Rot:0 Primary:True\n"
+            "Device[1] Output[0]: Res:(1920, 1080) Rot:0 Primary:False\n")
+    primary = {"index": 1, "width": 2560, "height": 1440, "left": 0, "top": 0}
+    second = {"index": 2, "width": 1920, "height": 1080, "left": 2560, "top": 0}
+    assert dxcam_target(info, primary, 2) == (0, 0)
+    assert dxcam_target(info, second, 2) == (1, 0)  # the second screen hangs off another GPU
+    assert dxcam_target("", primary, 2) is None
+
+
+def test_sent_stream_is_described_from_measured_numbers():
+    text, detail = backend_module.describe_sent({"width": 1920, "height": 1080, "capture_fps": 59.0,
+                                                 "sent_width": 1920, "sent_height": 1080, "encoded_fps": 58.4,
+                                                 "target_kbps": 7800, "limited_by": "cpu", "backend": "dxcam"})
+    assert text == "1920×1080 · 58 к/с"
+    assert "захват 59 к/с" in detail and "7.8 Мбит/с" in detail and "процессора" in detail

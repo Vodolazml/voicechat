@@ -10,11 +10,13 @@ Item {
     RowLayout {
         anchors.fill: parent
         spacing: 0
-        SpaceRail { Layout.fillHeight: true }
+        SpaceRail { Layout.fillHeight: true; onAddSpace: spaceDialog.open() }
         Sidebar {
             Layout.fillHeight: true
             onOpenSettings: root.openSettings(0)
             onOpenInvite: invite.open()
+            onLeaveSpace: confirm.ask("Выйти из «" + backend.spaceName + "»?", "Вернуться можно будет только по новому коду приглашения.", "Выйти", function() { backend.leaveSpace() })
+            onDeleteSpace: confirm.ask("Удалить «" + backend.spaceName + "»?", "Все каналы и сообщения пропадут у всех участников. Это не отменить.", "Удалить", function() { backend.deleteSpace() })
             onOpenScreenShare: share.open()
             onCreateChannel: (type) => channelDialog.openCreate(type)
             onRenameChannel: (id, name, limit) => channelDialog.openEdit(id, name, limit)
@@ -22,7 +24,7 @@ Item {
         }
         Item {
             Layout.fillWidth: true; Layout.fillHeight: true
-            HomeView { anchors.fill: parent; visible: !backend.inCall && backend.textChannelId === 0 }
+            HomeView { anchors.fill: parent; visible: !backend.inCall && backend.textChannelId === 0; onAddSpace: spaceDialog.open() }
             ChatView { anchors.fill: parent; visible: backend.textChannelId !== 0 }
             StageView {
                 anchors.fill: parent
@@ -59,7 +61,8 @@ Item {
         onOpenSafety: safety.open()
     }
 
-    InviteDialog { id: invite }
+    InviteDialog { id: invite; objectName: "inviteDialog" }
+    SpaceDialog { id: spaceDialog; objectName: "spaceDialog" }
     ScreenShareDialog { id: share }
     SafetyDialog { id: safety }
     ChannelDialog { id: channelDialog }

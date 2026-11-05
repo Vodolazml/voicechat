@@ -47,6 +47,20 @@ Rectangle {
         radius: 5; color: Theme.bad; width: 42; height: 20
         Text { anchors.centerIn: parent; text: "LIVE"; color: "white"; font.pixelSize: 11; font.weight: Font.Black; font.family: Theme.font }
     }
+    // Real resolution and frame rate, measured on the received (or, for us, the sent) stream.
+    Rectangle {
+        visible: tile.person.watching && video.hasFrame && tile.person.videoInfo !== ""
+        anchors.top: parent.top; anchors.left: parent.left; anchors.margins: 10
+        anchors.leftMargin: tile.person.streaming ? 58 : 10
+        radius: 6; color: Qt.rgba(0, 0, 0, 0.6)
+        width: statsCol.implicitWidth + 14; height: statsCol.implicitHeight + 6
+        Column {
+            id: statsCol
+            anchors.centerIn: parent
+            Text { text: tile.person.videoInfo; color: "white"; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold }
+            Text { visible: !tile.small && tile.person.videoDetail !== ""; text: tile.person.videoDetail; color: Qt.rgba(1, 1, 1, 0.7); font.family: Theme.font; font.pixelSize: 10 }
+        }
+    }
     PrimaryButton {
         visible: tile.person.streaming && !tile.person.watching && !tile.person.isMe && !tile.small
         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: 10

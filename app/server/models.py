@@ -95,7 +95,10 @@ class Space(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The creator manages the space: channels, its invite code, moderation inside it.
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # Reusable code people type to join; the creator can replace it at any time.
+    invite_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

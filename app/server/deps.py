@@ -67,3 +67,16 @@ def channel_participant_ids(db: Session, channel_id: int) -> set[int]:
             .where(models.ChannelMember.channel_id == channel_id, models.User.status == "active")
         )
     )
+
+
+def can_manage_space(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> bool:
+    """The server owner, a global administrator, or the person who created the space."""
+    if user.is_owner or has_permission(db, user.id, permission):
+        return True
+    space = db.get(models.Space, space_id)
+    return bool(space and not space.is_deleted and space.created_by == user.id)
+
+
+def require_space_manager(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> None:
+    if not can_manage_space(db, user, space_id, permission):
+        raise HTTPException(status_code=403, detail="Это может только создатель пространства")

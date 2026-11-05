@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Layouts
 
 Rectangle {
+    id: home
+    signal addSpace()
     color: Theme.bg
     ColumnLayout {
         anchors.centerIn: parent
@@ -17,7 +19,13 @@ Rectangle {
                 NumberAnimation { to: 1.05; duration: 1600; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 1.0; duration: 1600; easing.type: Easing.InOutSine } }
         }
-        Text { Layout.alignment: Qt.AlignHCenter; text: "Заходите в голосовой канал"; color: Theme.text; font.family: Theme.font; font.pixelSize: 22; font.weight: Font.Bold }
-        Text { Layout.alignment: Qt.AlignHCenter; text: "Один клик по каналу слева, и вы на связи. Друзья увидят вас сразу."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 14 }
+        Text { Layout.alignment: Qt.AlignHCenter; text: backend.hasSpaces ? "Заходите в голосовой канал" : "Добро пожаловать!"; color: Theme.text; font.family: Theme.font; font.pixelSize: 22; font.weight: Font.Bold }
+        Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: backend.hasSpaces ? "Один клик по каналу слева, и вы на связи. Друзья увидят вас сразу."
+                                    : "Создайте своё пространство и позовите друзей, или войдите в чужое по коду приглашения."
+            color: Theme.muted; font.family: Theme.font; font.pixelSize: 14
+        }
+        PrimaryButton { visible: !backend.hasSpaces; Layout.alignment: Qt.AlignHCenter; Layout.topMargin: 8; text: "Создать или войти по коду"; onClicked: home.addSpace() }
     }
 }

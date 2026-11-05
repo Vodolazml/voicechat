@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import chat, presence
+from . import chat, presence, spaces
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -79,6 +79,7 @@ if settings.cors_origins:
 
 app.include_router(presence.router)
 app.include_router(chat.router)
+app.include_router(spaces.router)
 
 
 @app.middleware("http")
@@ -401,6 +402,7 @@ def me(user: models.User = Depends(current_user), db: Session = Depends(get_db))
         display_name=user.display_name,
         must_change_password=user.must_change_password,
         permissions=sorted(user_permissions(db, user.id)),
+        is_owner=user.is_owner,
     )
 
 
@@ -596,16 +598,25 @@ def revoke_invite(
 
 
 @app.post("/auth/register", response_model=schemas.TokenOut, tags=["auth"])
-def register_with_invite(payload: schemas.RegisterIn, request: Request, db: Session = Depends(get_db)):
+def register(payload: schemas.RegisterIn, request: Request, db: Session = Depends(get_db)):
+    """Open sign-up, or sign-up with a one-time invite or a space's invite code (joins that space)."""
     rate_limit(f"register:{client_ip(request)}", 10, 3600)
-    invite = db.scalar(select(models.Invite).where(models.Invite.code_hash == hash_secret_token(payload.code)))
-    if (
-        not invite
-        or invite.revoked
-        or invite.used_at is not None
-        or _as_utc(invite.expires_at) <= models.utcnow()
-    ):
-        raise HTTPException(status_code=400, detail="Приглашение недействительно или уже использовано")
+    code = payload.code.strip()
+    invite = None
+    space = None
+    if code:
+        invite = db.scalar(select(models.Invite).where(models.Invite.code_hash == hash_secret_token(code)))
+        if invite is None:
+            space = spaces.space_by_code(db, code)
+        if invite is not None and (
+            invite.revoked or invite.used_at is not None or _as_utc(invite.expires_at) <= models.utcnow()
+        ):
+            invite = None
+            raise HTTPException(status_code=400, detail="Приглашение недействительно или уже использовано")
+        if invite is None and space is None:
+            raise HTTPException(status_code=400, detail="Приглашение недействительно или уже использовано")
+    elif not settings.open_registration:
+        raise HTTPException(status_code=403, detail="Регистрация на этом сервере только по приглашению")
     validate_password_strength(payload.password)
     user = models.User(
         username=payload.username,
@@ -620,77 +631,23 @@ def register_with_invite(payload: schemas.RegisterIn, request: Request, db: Sess
         db.rollback()
         raise HTTPException(status_code=409, detail="Такой логин уже занят") from exc
     role = db.scalar(select(models.Role).where(
-        models.Role.name == ("Owner/System Admin" if invite.is_admin else "User")))
+        models.Role.name == ("Owner/System Admin" if invite and invite.is_admin else "User")))
     if role:
         db.add(models.UserRole(user_id=user.id, role_id=role.id))
-    if invite.space_id and db.get(models.Space, invite.space_id):
-        db.add(models.SpaceMember(space_id=invite.space_id, user_id=user.id))
-        db.flush()
-        grant_public_channels(db, invite.space_id, user.id)
-    invite.used_at = models.utcnow()
-    invite.used_by = user.id
-    write_audit(db, actor_id=user.id, action="auth.register", target_type="invite", target_id=invite.id,
-                request=request)
+    if invite and invite.space_id:
+        space = db.get(models.Space, invite.space_id)
+    if space and not space.is_deleted:
+        spaces.join_space(db, space, user.id)
+    if invite:
+        invite.used_at = models.utcnow()
+        invite.used_by = user.id
+    write_audit(db, actor_id=user.id, action="auth.register", target_type="invite" if invite else "space",
+                target_id=invite.id if invite else (space.id if space else 0), request=request)
     db.commit()
+    if space:
+        hub.publish(presence.space_member_ids(db, space.id), {"type": "space.members", "space_id": space.id,
+                                                              "user_id": user.id})
     return issue_session(db, user, request, payload.device_name)
-
-
-@app.get("/spaces", response_model=list[schemas.SpaceOut], tags=["spaces"])
-def list_spaces(user: models.User = Depends(current_user), db: Session = Depends(get_db)) -> list[models.Space]:
-    rows = db.scalars(
-        select(models.Space)
-        .join(models.SpaceMember, models.SpaceMember.space_id == models.Space.id)
-        .where(models.SpaceMember.user_id == user.id, models.Space.is_deleted.is_(False))
-        .order_by(models.Space.name)
-    )
-    return list(rows)
-
-
-@app.post("/spaces", response_model=schemas.SpaceOut, tags=["spaces"])
-def create_space(
-    payload: schemas.SpaceCreateIn,
-    request: Request,
-    actor: models.User = Depends(require_permission("spaces.create")),
-    db: Session = Depends(get_db),
-) -> models.Space:
-    space = models.Space(name=payload.name, created_by=actor.id)
-    db.add(space)
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Пространство с таким названием уже существует") from exc
-    db.add(models.SpaceMember(space_id=space.id, user_id=actor.id))
-    write_audit(db, actor_id=actor.id, action="spaces.create", target_type="space", target_id=space.id, request=request)
-    db.commit()
-    return space
-
-
-@app.post("/spaces/{space_id}/members", tags=["spaces"])
-def add_space_member(
-    space_id: int,
-    payload: schemas.MemberIn,
-    request: Request,
-    actor: models.User = Depends(require_permission("spaces.members.manage")),
-    db: Session = Depends(get_db),
-) -> dict[str, str]:
-    if not db.get(models.Space, space_id) or not db.get(models.User, payload.user_id):
-        raise HTTPException(status_code=404, detail="Пространство или пользователь не найден")
-    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": payload.user_id}):
-        db.add(models.SpaceMember(space_id=space_id, user_id=payload.user_id))
-    db.flush()
-    grant_public_channels(db, space_id, payload.user_id)
-    write_audit(
-        db,
-        actor_id=actor.id,
-        action="spaces.members.add",
-        target_type="space",
-        target_id=space_id,
-        request=request,
-        details={"user_id": payload.user_id},
-    )
-    db.commit()
-    return {"status": "ok"}
 
 
 @app.put("/me/device-key", tags=["security"])

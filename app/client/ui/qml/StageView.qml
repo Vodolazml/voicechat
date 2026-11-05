@@ -52,6 +52,17 @@ Rectangle {
                     anchors.fill: parent; radius: 16; color: "black"; clip: true
                     VideoView { id: focused; anchors.fill: parent; userId: backend.focusUserId }
                     Spinner { anchors.centerIn: parent; visible: !focused.hasFrame; size: 32 }
+                    Rectangle {
+                        visible: focused.hasFrame && backend.focusVideoInfo !== ""
+                        anchors.left: parent.left; anchors.top: parent.top; anchors.margins: 12
+                        radius: 8; color: Qt.rgba(0, 0, 0, 0.6)
+                        width: focusStats.implicitWidth + 18; height: focusStats.implicitHeight + 10
+                        Column {
+                            id: focusStats; anchors.centerIn: parent
+                            Text { text: backend.focusVideoInfo; color: "white"; font.family: Theme.font; font.pixelSize: 13; font.weight: Font.DemiBold }
+                            Text { visible: backend.focusVideoDetail !== ""; text: backend.focusVideoDetail; color: Qt.rgba(1, 1, 1, 0.7); font.family: Theme.font; font.pixelSize: 11 }
+                        }
+                    }
                     Row {
                         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 6
                         opacity: focusHover.hovered ? 1 : 0

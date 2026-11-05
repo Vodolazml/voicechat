@@ -422,11 +422,41 @@ class MediaSession:
             source=rtc.TrackSource.SOURCE_SCREENSHARE,
             video_encoding=rtc.VideoEncoding(max_bitrate=capturer.max_bitrate, max_framerate=capturer.fps),
             simulcast=False)
+        try:
+            # Keep both the full size and the frame rate; WebRTC drops a frame only when really overloaded,
+            # instead of quietly shrinking the picture (the default for screens).
+            options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE_AND_RESOLUTION)
+        except Exception:
+            pass
         publication = await room.local_participant.publish_track(track, options)
         self._use_local_key_index(key_index(self.outgoing_key()[0]))
         task = asyncio.create_task(capturer.run(source))
+        stats = asyncio.create_task(self._screen_stats(track, capturer))
+        task.add_done_callback(lambda _: stats.cancel())
         self._screen = (publication, task, capturer)
         self._report_streams()
+
+    async def _screen_stats(self, track, capturer) -> None:
+        """Once a second: what the encoder really sends (size, frames per second, why it holds back)."""
+        reasons = {0: "", 1: "cpu", 2: "bandwidth", 3: "other"}
+        while True:
+            await asyncio.sleep(1.0)
+            try:
+                for stat in await track.get_stats():
+                    if stat.WhichOneof("stats") != "outbound_rtp":
+                        continue
+                    out = stat.outbound_rtp.outbound
+                    capturer.encoder = {
+                        "sent_width": out.frame_width, "sent_height": out.frame_height,
+                        "encoded_fps": round(out.frames_per_second, 1), "encoder": out.encoder_implementation,
+                        "limited_by": reasons.get(int(out.quality_limitation_reason), ""),
+                        "target_kbps": int(out.target_bitrate / 1000),
+                    }
+                    break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("Screen share stats unavailable", exc_info=True)
 
     async def _stop_screen(self) -> None:
         if self._screen is None:

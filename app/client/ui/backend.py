@@ -124,9 +124,28 @@ def _chime(frequencies: tuple[float, ...], note_ms: int = 80, volume: float = 0.
     return pcm + bytes(pad)
 
 
+_LIMITS = {"cpu": "не хватает процессора", "bandwidth": "не хватает сети", "other": "ограничение кодека"}
+
+
+def describe_sent(stats: dict) -> tuple[str, str]:
+    """Our own share, as measured: what leaves the encoder, and what feeds it."""
+    width = stats.get("sent_width") or stats.get("width", 0)
+    height = stats.get("sent_height") or stats.get("height", 0)
+    fps = stats.get("encoded_fps", stats.get("sent_fps", 0.0))
+    text = f"{width}×{height} · {fps:.0f} к/с"
+    detail = [f"захват {stats.get('capture_fps', 0):.0f} к/с"]
+    if stats.get("target_kbps"):
+        detail.append(f"{stats['target_kbps'] / 1000:.1f} Мбит/с")
+    if stats.get("limited_by"):
+        detail.append(_LIMITS.get(stats["limited_by"], stats["limited_by"]))
+    if stats.get("backend") == "mss":
+        detail.append("медленный захват")
+    return text, " · ".join(detail)
+
+
 SOUNDS = {
-    "join": _chime((660.0, 880.0)),
-    "leave": _chime((880.0, 587.0)),
+    "join": _chime((587.0, 784.0, 1175.0), 90, 0.32),
+    "leave": _chime((1175.0, 784.0, 523.0), 90, 0.32),
     "message": _chime((988.0,), 60, 0.16),
     "mute": _chime((523.0,), 45, 0.14),
     "unmute": _chime((784.0,), 45, 0.14),
@@ -157,6 +176,7 @@ class Backend(QObject):
     safetyChanged = Signal()
     updateChanged = Signal()
     focusChanged = Signal()
+    videoInfoChanged = Signal()
     showWindowRequested = Signal()
     inviteCreated = Signal(str)
     _post = Signal(object)
@@ -214,12 +234,12 @@ class Backend(QObject):
         self._inputs, self._outputs = [], []
         self._toast_seq = 0
 
-        self.spaces = ListModel(["id", "name", "initials", "unread"])
+        self.spaces = ListModel(["id", "name", "initials", "unread", "mine"])
         self.channels = ListModel(["id", "name", "type", "user_limit", "is_private", "unread", "members",
                                    "memberCount", "active", "selected"])
         self.stage = ListModel(["id", "name", "initials", "color", "speaking", "muted", "deafened",
                                 "serverMuted", "streaming", "watching", "volume", "localMuted", "quality",
-                                "isMe", "keyChanged"])
+                                "isMe", "keyChanged", "videoInfo", "videoDetail"])
         self.messages = ListModel(["id", "authorId", "author", "initials", "color", "html", "raw", "time",
                                    "day", "showDay", "edited", "deleted", "mine", "mention", "grouped"])
         self.toasts = ListModel(["id", "level", "text"])
@@ -229,6 +249,10 @@ class Backend(QObject):
         self._key_timer = QTimer(self, interval=15, timeout=self._poll_keys)
         self._level_timer = QTimer(self, interval=60, timeout=self._poll_level)
         self._ping_timer = QTimer(self, interval=10_000, timeout=self._measure_ping)
+        # Real (measured) resolution and frame rate of streams, refreshed once a second.
+        self._video_timer = QTimer(self, interval=1000, timeout=self._update_video_info)
+        self._capturer: ScreenCapturer | None = None
+        self._video_info: dict[int, tuple[str, str]] = {}
         QTimer.singleShot(0, self._startup)
 
     # =========================================================================================
@@ -320,10 +344,16 @@ class Backend(QObject):
     rememberMe = Property(bool, lambda self: bool(self.client_settings.get("remember_me", True)), notify=viewChanged)
 
     me = Property("QVariantMap", lambda self: self._me, notify=meChanged)
-    canModerate = Property(bool, lambda self: "voice.moderate" in self._me.get("permissions", []), notify=meChanged)
-    canManageChannels = Property(bool, lambda self: "channels.create" in self._me.get("permissions", []),
-                                 notify=meChanged)
-    canInvite = Property(bool, lambda self: "users.create" in self._me.get("permissions", []), notify=meChanged)
+    # The creator of a space manages it; the server owner manages everything.
+    canModerate = Property(bool, lambda self: self._manages_space("voice.moderate"), notify=spaceChanged)
+    canManageChannels = Property(bool, lambda self: self._manages_space("channels.create"), notify=spaceChanged)
+    canInvite = Property(bool, lambda self: bool(self._current_space().get("invite_code")), notify=spaceChanged)
+    spaceInviteCode = Property(str, lambda self: self._current_space().get("invite_code") or "", notify=spaceChanged)
+    spaceIsMine = Property(bool, lambda self: bool(self._current_space().get("is_mine")), notify=spaceChanged)
+    spaceMemberCount = Property(int, lambda self: int(self._current_space().get("member_count", 0)),
+                                notify=spaceChanged)
+    isOwner = Property(bool, lambda self: bool(self._me.get("is_owner")), notify=meChanged)
+    hasSpaces = Property(bool, lambda self: bool(self._spaces_list), notify=spaceChanged)
     canShare = Property(bool, lambda self: "screen_share.start" in self._me.get("permissions", []), notify=meChanged)
 
     spaceId = Property(int, lambda self: self._space_id, notify=spaceChanged)
@@ -350,6 +380,10 @@ class Backend(QObject):
     hasMoreMessages = Property(bool, lambda self: self._has_more, notify=chatChanged)
 
     focusUserId = Property(int, lambda self: self._focus_user, notify=focusChanged)
+    focusVideoInfo = Property(str, lambda self: self._video_info.get(self._focus_user, ("", ""))[0],
+                              notify=videoInfoChanged)
+    focusVideoDetail = Property(str, lambda self: self._video_info.get(self._focus_user, ("", ""))[1],
+                                notify=videoInfoChanged)
     settings = Property("QVariantMap", lambda self: {**self.ui, **{
         k: v for k, v in asdict(self.audio_settings).items() if k != "user_volumes"}}, notify=settingsChanged)
     inputDevices = Property("QVariantList", lambda self: ["", *self._inputs], notify=devicesChanged)
@@ -466,15 +500,75 @@ class Backend(QObject):
             self._set("_view", "password", self.viewChanged)
             return
         self._start_session()
-        self._spaces_list = spaces
-        self.spaces.set_items([{"id": s["id"], "name": s["name"], "initials": initials(s["name"]), "unread": 0}
-                               for s in spaces])
-        wanted = self.client_settings.get("last_space_id")
-        first = next((s["id"] for s in spaces if s["id"] == wanted), spaces[0]["id"] if spaces else 0)
         self._set("_view", "main", self.viewChanged)
-        if first:
-            self.selectSpace(first)
+        self._set_spaces(spaces)
         self._bg(self.api.check_update, self._got_update, lambda exc: None)
+
+    def _current_space(self) -> dict:
+        return next((s for s in self._spaces_list if s["id"] == self._space_id), {})
+
+    def _manages_space(self, permission: str) -> bool:
+        return (bool(self._current_space().get("can_manage")) or bool(self._me.get("is_owner"))
+                or permission in self._me.get("permissions", []))
+
+    def _set_spaces(self, spaces: list[dict], select: int = 0) -> None:
+        self._spaces_list = spaces
+        self.spaces.set_items([{"id": s["id"], "name": s["name"], "initials": initials(s["name"]),
+                                "unread": 0, "mine": bool(s.get("is_mine"))} for s in spaces])
+        ids = {s["id"] for s in spaces}
+        wanted = select or self._space_id or self.client_settings.get("last_space_id")
+        target = wanted if wanted in ids else (spaces[0]["id"] if spaces else 0)
+        if target != self._space_id or not target:
+            if not target:
+                self._space_id = 0
+                self._space_name = ""
+                self._channels = []
+                self._voice.clear()
+                self._text_channel = 0
+                self._set_chat(0)
+                self._rebuild()
+                self.spaceChanged.emit()
+            else:
+                self.selectSpace(target)
+        else:
+            self._space_name = next((s["name"] for s in spaces if s["id"] == target), "")
+            self.spaceChanged.emit()
+
+    def _reload_spaces(self, select: int = 0) -> None:
+        self._bg(self.api.spaces, lambda spaces: self._set_spaces(spaces, select))
+
+    @Slot(str)
+    def createSpace(self, name: str) -> None:
+        def done(space):
+            self.toast("success", f"Пространство «{space['name']}» создано. Код для друзей: {space['invite_code']}")
+            self._reload_spaces(space["id"])
+        self._bg(lambda: self.api.create_space(name.strip()), done)
+
+    @Slot(str)
+    def joinSpace(self, code: str) -> None:
+        def done(space):
+            self.toast("success", f"Вы вступили в «{space['name']}»")
+            self._reload_spaces(space["id"])
+        self._bg(lambda: self.api.join_space(code.strip()), done)
+
+    @Slot()
+    def rotateInviteCode(self) -> None:
+        space_id = self._space_id
+        self._bg(lambda: self.api.rotate_invite_code(space_id), lambda _: self._reload_spaces(space_id))
+
+    @Slot()
+    def leaveSpace(self) -> None:
+        space_id = self._space_id
+        if self._call_channel and any(c["id"] == self._call_channel for c in self._channels):
+            self.leaveCall()
+        self._bg(lambda: self.api.leave_space(space_id), lambda _: self._reload_spaces())
+
+    @Slot()
+    def deleteSpace(self) -> None:
+        space_id = self._space_id
+        if self._call_channel and any(c["id"] == self._call_channel for c in self._channels):
+            self.leaveCall()
+        self._bg(lambda: self.api.delete_space(space_id), lambda _: self._reload_spaces())
 
     def _start_session(self) -> None:
         if self.call is not None:
@@ -529,6 +623,8 @@ class Backend(QObject):
             self.events = None
         self._voice.clear()
         self._channels = []
+        self._spaces_list = []
+        self._space_id = 0
         self._call_channel = 0
         self._call_state = IDLE
         self.callChanged.emit()
@@ -644,6 +740,8 @@ class Backend(QObject):
                 "volume": self.audio_settings.user_volumes.get(uid, 1.0),
                 "localMuted": bool(mixer and uid in mixer.muted_users), "quality": self._quality.get(uid, 2),
                 "isMe": is_me, "keyChanged": uid in self._key_changed,
+                "videoInfo": self._video_info.get(uid, ("", ""))[0],
+                "videoDetail": self._video_info.get(uid, ("", ""))[1],
             })
         self.stage.set_items(rows)
         if self._focus_user and self._focus_user not in self._streams:
@@ -686,6 +784,12 @@ class Backend(QObject):
                 self._channels = [c for c in self._channels if c["id"] != channel["id"]] + [channel]
                 self._channels.sort(key=lambda c: (c["type"] != "text", c.get("position", 0), c["id"]))
                 self._rebuild()
+        elif kind == "space.deleted":
+            if event.get("space_id") == self._space_id:
+                self.toast("warning", f"Пространство «{self._space_name}» удалено")
+            self._reload_spaces()
+        elif kind == "space.members":
+            self._reload_spaces()
         elif kind == "channel.deleted":
             channel_id = event.get("channel_id")
             self._channels = [c for c in self._channels if c["id"] != channel_id]
@@ -739,7 +843,9 @@ class Backend(QObject):
     @Slot()
     def leaveCall(self) -> None:
         if self.call is not None:
-            self._sound("leave", "sound_join_leave")
+            # The call closes its audio right away, so our own "left" chime goes to the device directly.
+            if not self._deafened and self.ui.get("sound_join_leave", True):
+                self._play_direct(SOUNDS["leave"])
             self.call.leave()
 
     def _on_call_state(self, state: str, channel_id: int | None) -> None:
@@ -751,6 +857,7 @@ class Backend(QObject):
             self._streams.clear()
             self._watching.clear()
             self._sharing = False
+            self._capturer = None
             self._set("_focus_user", 0, self.focusChanged)
             self._ping_timer.stop()
             native.set_call_active(False)
@@ -825,6 +932,23 @@ class Backend(QObject):
             return
         if getattr(self.call.audio, "_running", False):
             self.call.audio.mixer.play_effect(SOUNDS[name])
+        else:
+            self._play_direct(SOUNDS[name])
+
+    def _play_direct(self, pcm: bytes) -> None:
+        """A chime outside a call (or while the call's audio is shutting down), on the chosen output."""
+        def play() -> None:
+            try:
+                import sounddevice as sd
+
+                from app.client.core.audio import _device_index
+
+                samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                sd.play(samples, SAMPLE_RATE, device=_device_index(self.audio_settings.output_device, "output"),
+                        blocking=True)
+            except Exception:
+                logger.debug("UI sound not played", exc_info=True)
+        self._pool.submit(play)
 
     @Slot(int, float)
     def setUserVolume(self, user_id: int, volume: float) -> None:
@@ -854,6 +978,8 @@ class Backend(QObject):
             self._set("_focus_user", user_id, self.focusChanged)
         self.call.watch(user_id, watching)
         self.stage.update(user_id, watching=watching)
+        if watching and not self._video_timer.isActive():
+            self._video_timer.start()
 
     @Slot(int)
     def focusUser(self, user_id: int) -> None:
@@ -877,12 +1003,16 @@ class Backend(QObject):
             self.toast("error", str(exc))
             return
         self.call.start_screen(capturer)
+        self._capturer = capturer
+        if not self._video_timer.isActive():
+            self._video_timer.start()
         self.toast("success", f"Демонстрация экрана: {preset.title}")
 
     @Slot()
     def stopScreen(self) -> None:
         if self.call is not None:
             self.call.stop_screen()
+        self._capturer = None
         video_hub().drop(self._me.get("id", 0))
 
     # --- moderation ---------------------------------------------------------------------------
@@ -1142,6 +1272,24 @@ class Backend(QObject):
     @Slot(int, str, result=str)
     def keyName(self, key: int, text: str) -> str:
         return native.qt_key_name(key, text)
+
+    def _update_video_info(self) -> None:
+        my_id = self._me.get("id", 0)
+        info: dict[int, tuple[str, str]] = {}
+        if self._capturer is not None and self._sharing:
+            info[my_id] = describe_sent(self._capturer.stats())
+        for uid in self._watching:
+            received = video_hub().received(uid)
+            if received:
+                info[uid] = (f"{received['width']}×{received['height']} · {received['fps']:.0f} к/с", "")
+        if info != self._video_info:
+            self._video_info = info
+            for uid in set(info) | {row["id"] for row in self.stage.rows if row.get("videoInfo")}:
+                text, detail = info.get(uid, ("", ""))
+                self.stage.update(uid, videoInfo=text, videoDetail=detail)
+            self.videoInfoChanged.emit()
+        if not info and not self._watching and self._capturer is None:
+            self._video_timer.stop()
 
     def _update_timers(self) -> None:
         active = bool(self._call_channel) or self._mic_test

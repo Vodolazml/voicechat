@@ -8,6 +8,8 @@ Rectangle {
     implicitWidth: 268
     signal openSettings()
     signal openInvite()
+    signal leaveSpace()
+    signal deleteSpace()
     signal openScreenShare()
     signal createChannel(string type)
     signal renameChannel(int channelId, string name, int limit)
@@ -25,6 +27,16 @@ Rectangle {
                 anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 10
                 Text { Layout.fillWidth: true; text: backend.spaceName || "VoiceChat"; color: Theme.text; elide: Text.ElideRight; font.family: Theme.font; font.pixelSize: 15; font.weight: Font.Bold }
                 IconButton { visible: backend.canInvite; glyph: "person_add"; tip: "Пригласить друга"; size: 30; onClicked: root.openInvite() }
+                IconButton {
+                    visible: backend.spaceId !== 0; glyph: "more"; tip: "Пространство"; size: 30
+                    onClicked: spaceMenu.popup()
+                    StyledMenu {
+                        id: spaceMenu
+                        MenuItem { visible: backend.canInvite; height: visible ? implicitHeight : 0; text: "Код приглашения"; onTriggered: root.openInvite() }
+                        MenuItem { visible: !backend.spaceIsMine && !backend.isOwner; height: visible ? implicitHeight : 0; text: "Выйти из пространства"; onTriggered: root.leaveSpace() }
+                        MenuItem { visible: backend.spaceIsMine || backend.isOwner; height: visible ? implicitHeight : 0; text: "Удалить пространство"; onTriggered: root.deleteSpace() }
+                    }
+                }
             }
             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.line }
         }

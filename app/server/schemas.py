@@ -60,7 +60,8 @@ class InviteCreatedOut(InviteOut):
 
 
 class RegisterIn(BaseModel):
-    code: str = Field(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    # Empty: open sign-up. Otherwise a one-time invite or a space's invite code.
+    code: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_ -]*$")
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
     password: str = Field(min_length=8, max_length=256)
@@ -83,6 +84,7 @@ class MeOut(OrmModel):
     display_name: str
     must_change_password: bool
     permissions: list[str]
+    is_owner: bool = False
 
 
 class PasswordChangeIn(OrmModel):
@@ -116,6 +118,15 @@ class SpaceCreateIn(OrmModel):
 class SpaceOut(OrmModel):
     id: int
     name: str
+    can_manage: bool = False
+    is_mine: bool = False
+    member_count: int = 0
+    # Only for people who manage the space.
+    invite_code: str | None = None
+
+
+class SpaceJoinIn(BaseModel):
+    code: str = Field(min_length=4, max_length=32, pattern=r"^[A-Za-z0-9 -]+$")
 
 
 class ChannelCreateIn(OrmModel):

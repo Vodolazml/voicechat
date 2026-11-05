@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     refresh_reuse_grace_seconds: int = Field(default=60, ge=0, le=600)
     # Empty means: generate a random owner password on first start and print it once to the server log.
     bootstrap_password: str = ""
+    # Anyone can create an account; joining a space still needs that space's invite code.
+    open_registration: bool = True
+    max_spaces_per_user: int = Field(default=10, ge=0, le=100)
     invite_hours: int = Field(default=24, ge=1, le=24 * 14)
     enable_api_docs: bool = False
     cors_origins: list[str] = []

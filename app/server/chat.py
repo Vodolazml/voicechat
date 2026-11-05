@@ -23,6 +23,7 @@ from .database import get_db
 from .deps import channel_participant_ids, current_user, ensure_channel_member
 from .events import hub
 from .limits import rate_limit
+from .deps import can_manage_space
 from .permissions import has_permission
 
 router = APIRouter(tags=["chat"])
@@ -142,9 +143,9 @@ def delete_message(message_id: int, user: models.User = Depends(current_user), d
     message = db.get(models.Message, message_id)
     if not message or message.is_deleted:
         raise HTTPException(status_code=404, detail="Сообщение не найдено")
-    ensure_channel_member(db, user.id, message.channel_id)
+    channel = ensure_channel_member(db, user.id, message.channel_id)
     own = message.author_id == user.id and has_permission(db, user.id, "text.delete_own")
-    if not own and not has_permission(db, user.id, "text.delete_any"):
+    if not own and not can_manage_space(db, user, channel.space_id, "text.delete_any"):
         raise HTTPException(status_code=403, detail="Недостаточно прав")
     message.is_deleted = True
     message.body = ""

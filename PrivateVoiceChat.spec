@@ -15,6 +15,11 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 datas += [('assets/app_icon.ico', 'assets'), ('app/client/ui/qml', 'app/client/ui/qml')]
 binaries += collect_dynamic_libs('pyrnnoise', destdir='pyrnnoise')
 hiddenimports += ['mss', 'websockets', 'websockets.asyncio.client', 'app.client.ui.app']
+try:
+    tmp_ret = collect_all('dxcam')  # Windows only; optional
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2] + ['comtypes', 'comtypes.stream']
+except Exception:
+    pass
 
 
 a = Analysis(

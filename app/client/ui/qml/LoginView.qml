@@ -41,7 +41,7 @@ Item {
                 ColumnLayout {
                     spacing: 0
                     Text { text: "VoiceChat"; color: Theme.text; font.family: Theme.font; font.pixelSize: 22; font.weight: Font.Bold }
-                    Text { text: root.inviteMode ? "Регистрация по приглашению" : "С возвращением!"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
+                    Text { text: root.inviteMode ? "Новый аккаунт" : "С возвращением!"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
                 }
             }
 
@@ -58,7 +58,7 @@ Item {
                 id: code
                 Layout.fillWidth: true
                 visible: root.inviteMode
-                placeholderText: "Код приглашения"
+                placeholderText: "Код приглашения, если есть (можно ввести позже)"
             }
             Field {
                 id: username
@@ -116,7 +116,7 @@ Item {
 
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: root.inviteMode ? "Уже есть аккаунт? <a href='#' style='color:#b4a5ff; text-decoration:none'>Войти</a>" : "Есть приглашение? <a href='#' style='color:#b4a5ff; text-decoration:none'>Зарегистрироваться</a>"
+                text: root.inviteMode ? "Уже есть аккаунт? <a href='#' style='color:#b4a5ff; text-decoration:none'>Войти</a>" : "Нет аккаунта? <a href='#' style='color:#b4a5ff; text-decoration:none'>Зарегистрироваться</a>"
                 textFormat: Text.RichText
                 linkColor: Theme.accent2
                 color: Theme.muted

@@ -240,6 +240,18 @@ class ApiClient:
     def create_space(self, name: str) -> dict[str, Any]:
         return self.request("POST", "/spaces", json={"name": name})
 
+    def join_space(self, code: str) -> dict[str, Any]:
+        return self.request("POST", "/spaces/join", json={"code": code})
+
+    def rotate_invite_code(self, space_id: int) -> dict[str, Any]:
+        return self.request("POST", f"/spaces/{space_id}/invite-code")
+
+    def leave_space(self, space_id: int) -> None:
+        self.request("DELETE", f"/spaces/{space_id}/members/me")
+
+    def delete_space(self, space_id: int) -> None:
+        self.request("DELETE", f"/spaces/{space_id}")
+
     def channels(self, space_id: int) -> list[dict[str, Any]]:
         return self.request("GET", f"/spaces/{space_id}/channels")
 

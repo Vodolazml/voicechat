@@ -4,21 +4,21 @@ import QtQuick.Layouts
 
 Modal {
     id: dlg
-    property string code: ""
-    title: "Пригласить друга"
-    subtitle: "Код одноразовый и действует сутки. Друг вводит его в окне входа, в «Есть приглашение?»."
-    Connections { target: backend; function onInviteCreated(value) { dlg.code = value } }
+    title: "Пригласить в «" + backend.spaceName + "»"
+    subtitle: "Отправьте другу этот код. Он вводит его при регистрации или в «+» слева, если аккаунт уже есть."
 
-    Toggle { id: admin; title: "Сделать администратором"; hint: "Сможет создавать каналы, приглашать и модерировать"; onToggled: (v) => checked = v }
     Rectangle {
-        visible: dlg.code !== ""
-        Layout.fillWidth: true; height: 54; radius: 12; color: Theme.bg; border.color: Theme.accent
+        Layout.fillWidth: true; height: 64; radius: 12; color: Theme.bg; border.color: Theme.accent
         RowLayout {
-            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 8
-            Text { Layout.fillWidth: true; text: dlg.code; color: Theme.text; font.family: "Consolas"; font.pixelSize: 15; elide: Text.ElideMiddle }
-            IconButton { glyph: "copy"; tip: "Копировать"; onClicked: backend.copyText(dlg.code) }
+            anchors.fill: parent; anchors.leftMargin: 18; anchors.rightMargin: 8
+            Text { Layout.fillWidth: true; text: backend.spaceInviteCode; color: Theme.text; font.family: "Consolas"; font.pixelSize: 24; font.weight: Font.Bold; font.letterSpacing: 2 }
+            IconButton { glyph: "copy"; tip: "Копировать"; onClicked: backend.copyText(backend.spaceInviteCode) }
         }
     }
-    PrimaryButton { Layout.fillWidth: true; text: dlg.code ? "Создать ещё один" : "Создать приглашение"; onClicked: backend.createInvite(admin.checked) }
-    onOpened: code = ""
+    Text {
+        Layout.fillWidth: true; wrapMode: Text.WordWrap
+        text: "Участников: " + backend.spaceMemberCount + ". Если код попал не туда, смените его: старый перестанет работать, а кто уже вошёл, останется."
+        color: Theme.muted; font.family: Theme.font; font.pixelSize: 12
+    }
+    PrimaryButton { Layout.fillWidth: true; secondary: true; text: "Сменить код"; onClicked: backend.rotateInviteCode() }
 }

@@ -2,6 +2,8 @@ import QtQuick
 import QtQuick.Controls.Basic
 
 Rectangle {
+    id: rail
+    signal addSpace()
     color: Theme.rail
     implicitWidth: 72
 
@@ -55,6 +57,24 @@ Rectangle {
                 ToolTip.text: model.name
                 ToolTip.delay: 300
             }
+        }
+
+        Item {
+            width: 72; height: 52
+            Rectangle {
+                anchors.centerIn: parent
+                width: 48; height: 48
+                radius: addHover.hovered ? 16 : 24
+                color: addHover.hovered ? Theme.good : Theme.card
+                Behavior on radius { NumberAnimation { duration: Theme.fast } }
+                Behavior on color { ColorAnimation { duration: Theme.fast } }
+                Icon { anchors.centerIn: parent; name: "add"; color: addHover.hovered ? "white" : Theme.good; width: 24; height: 24 }
+            }
+            HoverHandler { id: addHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: rail.addSpace() }
+            ToolTip.visible: addHover.hovered
+            ToolTip.text: "Создать пространство или войти по коду"
+            ToolTip.delay: 300
         }
     }
 }

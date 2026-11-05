@@ -37,3 +37,16 @@
 - Оверлей не виден в играх в эксклюзивном полноэкранном режиме. Включите в игре «Оконный без рамки» (Borderless).
 - Звук игры в демонстрации экрана пока не передаётся.
 - Старый интерфейс доступен один релиз: `PrivateVoiceChat.exe --classic`.
+
+## Spaces for everyone, real screen-share numbers
+
+- Anyone can create an account (`open_registration`, on by default). Joining a space needs that space's
+  invite code (`ABCD-EFGH`), entered at sign-up or later with “+” in the left rail.
+- Anyone can create their own space (up to `max_spaces_per_user`); its creator manages channels, the invite
+  code and moderation inside it, and can delete it. Members can leave.
+- The server owner (`admin`) sees every space and channel on the server; everybody else only theirs.
+- Screen share captures with Desktop Duplication (`dxcam`, now a Windows dependency) instead of GDI, which
+  topped out at 20–30 fps. Higher bitrates; the encoder keeps size and frame rate instead of shrinking.
+- Tiles and the focused view show the measured resolution and frame rate: decoded frames for viewers, and
+  for your own share what the encoder really sends, the capture rate, bitrate and any CPU or network limit.
+- Join/leave chimes are louder, and your own “left the channel” chime is no longer cut off.

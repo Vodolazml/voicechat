@@ -20,7 +20,8 @@ from . import media_sessions, models, schemas
 from .audit import write_audit
 from .config import get_settings
 from .database import SessionLocal, get_db
-from .deps import channel_participant_ids, current_user, ensure_channel_member, require_permission, user_from_token
+from .deps import (can_manage_space, channel_participant_ids, current_user, ensure_channel_member,
+                   require_space_manager, user_from_token)
 from .events import hub
 from .limits import rate_limit
 from .permissions import has_permission
@@ -110,10 +111,11 @@ def list_channels(space_id: int, user: models.User = Depends(current_user), db: 
 
 @router.post("/channels", response_model=schemas.ChannelOut, tags=["channels"])
 def create_channel(payload: schemas.ChannelCreateIn, request: Request,
-                   actor: models.User = Depends(require_permission("channels.create")),
+                   actor: models.User = Depends(current_user),
                    db: Session = Depends(get_db)):
     if not db.get(models.SpaceMember, {"space_id": payload.space_id, "user_id": actor.id}):
         raise HTTPException(status_code=403, detail="Нет доступа к пространству")
+    require_space_manager(db, actor, payload.space_id, "channels.create")
     position = (db.scalar(select(func.max(models.Channel.position)).where(
         models.Channel.space_id == payload.space_id)) or 0) + 1
     channel = models.Channel(space_id=payload.space_id, name=payload.name, type=payload.type,
@@ -125,7 +127,8 @@ def create_channel(payload: schemas.ChannelCreateIn, request: Request,
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Канал с таким названием уже существует") from exc
-    members = {actor.id} if channel.is_private else space_member_ids(db, payload.space_id)
+    owners = set(db.scalars(select(models.User.id).where(models.User.is_owner.is_(True))))
+    members = ({actor.id} if channel.is_private else space_member_ids(db, payload.space_id)) | owners
     for member_id in members:
         db.add(models.ChannelMember(channel_id=channel.id, user_id=member_id))
     write_audit(db, actor_id=actor.id, action="channels.create", target_type="channel", target_id=channel.id,
@@ -137,9 +140,10 @@ def create_channel(payload: schemas.ChannelCreateIn, request: Request,
 
 @router.patch("/channels/{channel_id}", response_model=schemas.ChannelOut, tags=["channels"])
 def update_channel(channel_id: int, payload: schemas.ChannelUpdateIn, request: Request,
-                   actor: models.User = Depends(require_permission("channels.update")),
+                   actor: models.User = Depends(current_user),
                    db: Session = Depends(get_db)):
     channel = ensure_channel_member(db, actor.id, channel_id)
+    require_space_manager(db, actor, channel.space_id, "channels.update")
     changes = payload.model_dump(exclude_unset=True)
     for key, value in changes.items():
         setattr(channel, key, value)
@@ -161,9 +165,10 @@ def update_channel(channel_id: int, payload: schemas.ChannelUpdateIn, request: R
 
 @router.delete("/channels/{channel_id}", tags=["channels"])
 async def delete_channel(channel_id: int, request: Request,
-                         actor: models.User = Depends(require_permission("channels.delete")),
+                         actor: models.User = Depends(current_user),
                          db: Session = Depends(get_db)) -> dict[str, str]:
     channel = ensure_channel_member(db, actor.id, channel_id)
+    require_space_manager(db, actor, channel.space_id, "channels.delete")
     recipients = channel_participant_ids(db, channel_id)
     gone = [leave_voice(db, state) for state in
             db.scalars(select(models.VoiceState).where(models.VoiceState.channel_id == channel_id))]
@@ -180,12 +185,13 @@ async def delete_channel(channel_id: int, request: Request,
 
 @router.post("/channels/{channel_id}/members", tags=["channels"])
 def add_channel_member(channel_id: int, payload: schemas.MemberIn, request: Request,
-                       actor: models.User = Depends(require_permission("channels.members.manage")),
+                       actor: models.User = Depends(current_user),
                        db: Session = Depends(get_db)) -> dict[str, str]:
     channel = db.get(models.Channel, channel_id)
     user = db.get(models.User, payload.user_id)
     if not channel or channel.is_deleted or not user:
         raise HTTPException(status_code=404, detail="Канал или пользователь не найден")
+    require_space_manager(db, actor, channel.space_id, "channels.members.manage")
     if not db.get(models.SpaceMember, {"space_id": channel.space_id, "user_id": payload.user_id}):
         db.add(models.SpaceMember(space_id=channel.space_id, user_id=payload.user_id))
     if not db.get(models.ChannelMember, {"channel_id": channel_id, "user_id": payload.user_id}):
@@ -209,7 +215,7 @@ async def connect_channel(channel_id: int, payload: schemas.VoiceJoinIn, request
     if not has_permission(db, user.id, "voice.join"):
         raise HTTPException(status_code=403, detail="Нет права подключаться к голосовым каналам")
     existing = db.get(models.VoiceState, user.id)
-    if channel.user_limit and not has_permission(db, user.id, "voice.moderate"):
+    if channel.user_limit and not can_manage_space(db, user, channel.space_id, "voice.moderate"):
         inside = db.scalar(select(func.count()).select_from(models.VoiceState).where(
             models.VoiceState.channel_id == channel_id, models.VoiceState.user_id != user.id)) or 0
         if inside >= channel.user_limit:
@@ -303,7 +309,8 @@ def _target_state(db: Session, actor: models.User, user_id: int) -> models.Voice
     state = db.get(models.VoiceState, user_id)
     if not state:
         raise HTTPException(status_code=404, detail="Пользователь не в голосовом канале")
-    ensure_channel_member(db, actor.id, state.channel_id)
+    channel = ensure_channel_member(db, actor.id, state.channel_id)
+    require_space_manager(db, actor, channel.space_id, "voice.moderate")
     target = db.get(models.User, user_id)
     if target and target.is_owner and not actor.is_owner:
         raise HTTPException(status_code=403, detail="Нельзя модерировать владельца сервера")
@@ -312,7 +319,7 @@ def _target_state(db: Session, actor: models.User, user_id: int) -> models.Voice
 
 @router.post("/voice/{user_id}/move", response_model=schemas.VoiceStateOut, tags=["moderation"])
 async def move_user(user_id: int, payload: schemas.MoveIn, request: Request,
-                    actor: models.User = Depends(require_permission("voice.moderate")),
+                    actor: models.User = Depends(current_user),
                     db: Session = Depends(get_db)):
     state = _target_state(db, actor, user_id)
     target_channel = ensure_channel_member(db, actor.id, payload.channel_id)
@@ -338,7 +345,7 @@ async def move_user(user_id: int, payload: schemas.MoveIn, request: Request,
 
 @router.post("/voice/{user_id}/kick", tags=["moderation"])
 async def kick_user(user_id: int, request: Request,
-                    actor: models.User = Depends(require_permission("voice.moderate")),
+                    actor: models.User = Depends(current_user),
                     db: Session = Depends(get_db)) -> dict[str, str]:
     state = _target_state(db, actor, user_id)
     channel_id, _ = leave_voice(db, state)
@@ -352,7 +359,7 @@ async def kick_user(user_id: int, request: Request,
 
 @router.post("/voice/{user_id}/server-mute", response_model=schemas.VoiceStateOut, tags=["moderation"])
 async def server_mute(user_id: int, payload: schemas.ServerMuteIn, request: Request,
-                      actor: models.User = Depends(require_permission("voice.moderate")),
+                      actor: models.User = Depends(current_user),
                       db: Session = Depends(get_db)):
     state = _target_state(db, actor, user_id)
     state.server_muted = payload.muted

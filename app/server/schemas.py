@@ -63,7 +63,7 @@ class RegisterIn(BaseModel):
     code: str = Field(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
-    password: str = Field(min_length=12, max_length=256)
+    password: str = Field(min_length=8, max_length=256)
     device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
 
 
@@ -93,7 +93,7 @@ class PasswordChangeIn(OrmModel):
 class UserCreateIn(OrmModel):
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
-    temporary_password: str | None = Field(default=None, min_length=12, max_length=256)
+    temporary_password: str | None = Field(default=None, min_length=8, max_length=256)
     is_admin: bool = False
 
 

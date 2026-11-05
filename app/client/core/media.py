@@ -185,17 +185,22 @@ class MediaSession:
                     task.cancel()
             except Exception as exc:
                 logger.warning("Media connection failed: %s", exc)
+                if getattr(exc, "status_code", None) == 503:
+                    # The server has no media server configured: retrying fast will not help.
+                    self.cb.on_state("unavailable")
+                    backoff = 30.0
             finally:
                 self.connected = False
                 await self._teardown(room)
             if self._stop.is_set():
                 break
-            self.cb.on_state("reconnecting")
+            if backoff < 30.0:
+                self.cb.on_state("reconnecting")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 10.0)
+            backoff = min(backoff * 2, 10.0) if backoff < 30.0 else 1.0
         self.cb.on_state("closed")
 
     async def _wait_closed(self, room) -> None:

@@ -76,7 +76,7 @@ Item {
             Field {
                 id: password
                 Layout.fillWidth: true
-                placeholderText: root.inviteMode ? "Пароль (от 12 символов)" : "Пароль"
+                placeholderText: root.inviteMode ? "Пароль (от 8 символов)" : "Пароль"
                 echoMode: TextInput.Password
                 onAccepted: submit()
             }

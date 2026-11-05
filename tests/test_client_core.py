@@ -225,3 +225,13 @@ def test_mute_reaches_media_and_server():
     assert wait_for(lambda: ("update_voice", (10, True, False, False)) in api.calls)
     call.set_deafened(True)
     assert call.audio.mixer.deafened
+
+
+def test_missing_media_server_is_reported_once_instead_of_endless_reconnecting():
+    call, api, states, notices = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED)
+    call._on_media_state("unavailable")
+    call._on_media_state("unavailable")
+    assert call.state == "unavailable"
+    assert sum("LiveKit" in n for n in notices) == 1

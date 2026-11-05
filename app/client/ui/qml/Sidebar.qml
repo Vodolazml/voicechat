@@ -52,8 +52,10 @@ Rectangle {
                     ColumnLayout {
                         spacing: 0; Layout.fillWidth: true
                         Text {
-                            text: backend.callState === "connected" ? "Голос подключён" : (backend.callState === "reconnecting" ? "Переподключаюсь…" : "Подключаюсь…")
-                            color: backend.callState === "connected" ? Theme.good : Theme.warn
+                            text: backend.callState === "connected" ? "Голос подключён"
+                                  : backend.callState === "unavailable" ? "Голосовой сервер недоступен"
+                                  : backend.callState === "reconnecting" ? "Переподключаюсь…" : "Подключаюсь…"
+                            color: backend.callState === "connected" ? Theme.good : (backend.callState === "unavailable" ? Theme.bad : Theme.warn)
                             font.family: Theme.font; font.pixelSize: 13; font.weight: Font.Bold
                         }
                         Text {

@@ -32,6 +32,12 @@ def test_rejects_weak_password() -> None:
         validate_password_strength("short")
     with pytest.raises(HTTPException):
         validate_password_strength("NoSpecialPass123")
+    with pytest.raises(HTTPException):
+        validate_password_strength("Ab1!xyz")  # 7 characters
+
+
+def test_eight_character_password_is_enough() -> None:
+    validate_password_strength("Ab1!wxyz")
 
 
 def test_token_roundtrip() -> None:

@@ -22,6 +22,7 @@ HEARTBEAT_SECONDS = 15
 KEY_REFRESH_SECONDS = 300
 
 IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "reconnecting"
+UNAVAILABLE = "unavailable"  # we are in the channel, but the server's media server is not reachable
 
 
 @dataclass
@@ -289,7 +290,11 @@ class CallController:
     def _on_media_state(self, state: str) -> None:
         if self.channel_id is None:
             return
-        mapped = {"connected": CONNECTED, "reconnecting": RECONNECTING, "connecting": CONNECTING}.get(state)
+        if state == UNAVAILABLE and self.state != UNAVAILABLE:
+            self.listener.on_notice("error", "Голосовой сервер недоступен: на сервере не настроен LiveKit. "
+                                             "Каналы и чат работают, голос появится, когда его включат")
+        mapped = {"connected": CONNECTED, "reconnecting": RECONNECTING, "connecting": CONNECTING,
+                  UNAVAILABLE: UNAVAILABLE}.get(state)
         if mapped and mapped != self.state:
             self._set_state(mapped)
 
@@ -320,4 +325,5 @@ def _friendly_error(exc: Exception) -> str:
     return text or "Не удалось подключиться"
 
 
-__all__ = ["CallController", "CallListener", "IDLE", "CONNECTING", "CONNECTED", "RECONNECTING", "field"]
+__all__ = ["CallController", "CallListener", "IDLE", "CONNECTING", "CONNECTED", "RECONNECTING", "UNAVAILABLE",
+           "field"]

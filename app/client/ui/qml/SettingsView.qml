@@ -256,7 +256,7 @@ Rectangle {
                         Layout.fillWidth: true; spacing: 10
                         Field { id: oldPwd; Layout.fillWidth: true; placeholderText: "Текущий пароль"; echoMode: TextInput.Password }
                         Field { id: newPwd; Layout.fillWidth: true; placeholderText: "Новый пароль"; echoMode: TextInput.Password }
-                        PrimaryButton { text: "Сменить"; enabled: oldPwd.text && newPwd.text.length >= 12; onClicked: backend.changePassword(oldPwd.text, newPwd.text) }
+                        PrimaryButton { text: "Сменить"; enabled: oldPwd.text && newPwd.text.length >= 8; onClicked: backend.changePassword(oldPwd.text, newPwd.text) }
                     }
                                     }
                 }

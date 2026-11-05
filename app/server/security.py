@@ -106,8 +106,8 @@ def decode_token(token: str) -> TokenPayload:
 
 
 def validate_password_strength(password: str) -> None:
-    if len(password) < 12:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 12 символов")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
     if len(password) > 256:
         raise HTTPException(status_code=400, detail="Пароль слишком длинный")
     checks = (

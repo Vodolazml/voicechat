@@ -109,7 +109,7 @@ class _Rate:
 
 
 class ScreenCapturer:
-    PREVIEW_EVERY = 6  # frames; ~10 fps self-preview is plenty and costs almost nothing
+    PREVIEW_EVERY = 2  # frames: your own preview at full size and ~30 fps, so it shows the real quality
 
     def __init__(self, monitor: int, preset: Preset, preview=None) -> None:
         self.preview = preview  # called with a small QImage so you can see what you are sharing
@@ -134,6 +134,7 @@ class ScreenCapturer:
     def stats(self) -> dict:
         """What really happens right now: captured and sent frames per second, the encoded size and rate."""
         return {"capture_fps": self._captured.value(), "sent_fps": self._sent.value(), "width": self.width,
+                "source_width": self._info["width"], "source_height": self._info["height"],
                 "height": self.height, "grab_ms": round(self._grab_ms, 1), "backend": self.backend,
                 **self.encoder}
 
@@ -155,7 +156,8 @@ class ScreenCapturer:
                         if frame is None:
                             return None
                         h, w = frame.shape[:2]
-                        return QImage(frame.tobytes(), w, h, w * 4, QImage.Format_ARGB32)
+                        # copy(): the image must own its pixels, it outlives this numpy buffer (preview, scaling).
+                        return QImage(frame.data, w, h, w * 4, QImage.Format_RGB32).copy()
 
                     def close():
                         try:
@@ -202,9 +204,9 @@ class ScreenCapturer:
                             image = image.scaled(self.width, self.height, Qt.IgnoreAspectRatio,
                                                  Qt.SmoothTransformation)
                         count += 1
-                        if self.preview is not None and count % self.PREVIEW_EVERY == 1:
-                            self.preview(image.scaled(960, 540, Qt.KeepAspectRatio, Qt.FastTransformation))
                         latest[0] = bytes(image.constBits())
+                        if self.preview is not None and count % self.PREVIEW_EVERY == 1:
+                            self.preview(image)  # owns its pixels and is not touched again here
                         self._captured.tick()
                         wake()
                     spent = time.perf_counter() - started

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -423,6 +425,19 @@ class MediaSession:
             video_encoding=rtc.VideoEncoding(max_bitrate=capturer.max_bitrate, max_framerate=capturer.fps),
             simulcast=False)
         try:
+            # H.264 keeps up better than VP8 on big screens (about 52 vs 44 fps at 1440p -> 1080p in tests).
+            options.video_codec = rtc.VideoCodec.H264
+        except Exception:
+            pass
+        backend = os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper()  # e.g. NVENC or HARDWARE, for trials
+        if backend:
+            try:
+                from livekit.rtc._proto import room_pb2
+
+                options.video_encoder = getattr(room_pb2, f"ENCODER_BACKEND_{backend}")
+            except Exception:
+                logger.warning("Unknown video encoder backend %s", backend)
+        try:
             # Keep both the full size and the frame rate; WebRTC drops a frame only when really overloaded,
             # instead of quietly shrinking the picture (the default for screens).
             options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE_AND_RESOLUTION)
@@ -437,22 +452,37 @@ class MediaSession:
         self._report_streams()
 
     async def _screen_stats(self, track, capturer) -> None:
-        """Once a second: what the encoder really sends (size, frames per second, why it holds back)."""
+        """Once a second: what the encoder really sends. Frame rates are counted from the encoded and sent
+        frame counters (WebRTC's own frames_per_second field is often left at 0)."""
         reasons = {0: "", 1: "cpu", 2: "bandwidth", 3: "other"}
+        last: tuple[float, int, int] | None = None
+        last_bytes: tuple[float, int] | None = None
         while True:
             await asyncio.sleep(1.0)
             try:
-                for stat in await track.get_stats():
-                    if stat.WhichOneof("stats") != "outbound_rtp":
-                        continue
-                    out = stat.outbound_rtp.outbound
-                    capturer.encoder = {
-                        "sent_width": out.frame_width, "sent_height": out.frame_height,
-                        "encoded_fps": round(out.frames_per_second, 1), "encoder": out.encoder_implementation,
-                        "limited_by": reasons.get(int(out.quality_limitation_reason), ""),
-                        "target_kbps": int(out.target_bitrate / 1000),
-                    }
-                    break
+                outbound = [stat.outbound_rtp for stat in await track.get_stats()
+                            if stat.WhichOneof("stats") == "outbound_rtp"]
+                if not outbound:
+                    capturer.encoder = {}
+                    continue
+                out = outbound[0].outbound
+                sent = outbound[0].sent
+                now = time.monotonic()
+                encoded_fps = sent_fps = 0.0
+                if last is not None and now > last[0]:
+                    encoded_fps = max(0, out.frames_encoded - last[1]) / (now - last[0])
+                    sent_fps = max(0, out.frames_sent - last[2]) / (now - last[0])
+                last = (now, out.frames_encoded, out.frames_sent)
+                capturer.encoder = {
+                    "sent_width": out.frame_width, "sent_height": out.frame_height,
+                    "encoded_fps": round(encoded_fps, 1), "network_fps": round(sent_fps, 1),
+                    "encoder": out.encoder_implementation,
+                    "limited_by": reasons.get(int(out.quality_limitation_reason), ""),
+                    "target_kbps": int(out.target_bitrate / 1000),
+                    "kbps": int(8 * max(0, sent.bytes_sent - last_bytes[1]) / (now - last_bytes[0]) / 1000)
+                    if last_bytes and now > last_bytes[0] else 0,
+                }
+                last_bytes = (now, sent.bytes_sent)
             except asyncio.CancelledError:
                 raise
             except Exception:

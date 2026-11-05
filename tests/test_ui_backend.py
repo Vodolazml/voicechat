@@ -220,8 +220,13 @@ def test_dxcam_output_is_matched_to_the_right_screen():
 
 
 def test_sent_stream_is_described_from_measured_numbers():
-    text, detail = backend_module.describe_sent({"width": 1920, "height": 1080, "capture_fps": 59.0,
-                                                 "sent_width": 1920, "sent_height": 1080, "encoded_fps": 58.4,
-                                                 "target_kbps": 7800, "limited_by": "cpu", "backend": "dxcam"})
-    assert text == "1920×1080 · 58 к/с"
+    base = {"width": 1920, "height": 1080, "source_width": 2560, "source_height": 1440, "capture_fps": 59.0,
+            "backend": "dxcam"}
+    text, detail = backend_module.describe_sent({**base, "sent_width": 1600, "sent_height": 900,
+                                                 "encoded_fps": 58.4, "network_fps": 57.6, "kbps": 7800,
+                                                 "limited_by": "cpu"})
+    assert text == "2560×1440 → 1600×900 · 58 к/с"  # the encoder's real size, not the preset's
     assert "захват 59 к/с" in detail and "7.8 Мбит/с" in detail and "процессора" in detail
+    paused = backend_module.describe_sent({**base, "sent_width": 1920, "sent_height": 1080, "network_fps": 0.0})
+    assert paused[0] == "2560×1440 → 1920×1080 · нет зрителей, отправка на паузе"
+    assert "кодер запускается" in backend_module.describe_sent(base)[0]

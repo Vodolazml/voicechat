@@ -128,14 +128,23 @@ _LIMITS = {"cpu": "не хватает процессора", "bandwidth": "не
 
 
 def describe_sent(stats: dict) -> tuple[str, str]:
-    """Our own share, as measured: what leaves the encoder, and what feeds it."""
-    width = stats.get("sent_width") or stats.get("width", 0)
-    height = stats.get("sent_height") or stats.get("height", 0)
-    fps = stats.get("encoded_fps", stats.get("sent_fps", 0.0))
-    text = f"{width}×{height} · {fps:.0f} к/с"
+    """Our own share, as measured: what the encoder really produces and sends, and what feeds it."""
+    source = f"{stats.get('source_width', 0)}×{stats.get('source_height', 0)}"
+    size = f"{stats.get('sent_width') or stats.get('width', 0)}×{stats.get('sent_height') or stats.get('height', 0)}"
+    if source != size and stats.get("source_width"):
+        size = f"{source} → {size}"
+    if not stats.get("sent_width"):
+        text = f"{size} · кодер запускается"
+    elif stats.get("network_fps", 0) < 0.5 and stats.get("kbps", 0) < 50:
+        # LiveKit pauses a stream nobody is watching (dynacast), so nothing leaves the computer.
+        text = f"{size} · нет зрителей, отправка на паузе"
+    else:
+        text = f"{size} · {stats.get('network_fps', 0):.0f} к/с"
     detail = [f"захват {stats.get('capture_fps', 0):.0f} к/с"]
-    if stats.get("target_kbps"):
-        detail.append(f"{stats['target_kbps'] / 1000:.1f} Мбит/с")
+    if stats.get("sent_width") and stats.get("encoded_fps"):
+        detail.append(f"кодер {stats['encoded_fps']:.0f} к/с")
+    if stats.get("kbps"):
+        detail.append(f"{stats['kbps'] / 1000:.1f} Мбит/с")
     if stats.get("limited_by"):
         detail.append(_LIMITS.get(stats["limited_by"], stats["limited_by"]))
     if stats.get("backend") == "mss":

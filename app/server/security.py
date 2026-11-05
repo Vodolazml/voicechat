@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from fastapi import HTTPException, status
 from .config import get_settings
 
@@ -25,8 +25,21 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return password_hasher.verify(password_hash, password)
-    except VerifyMismatchError:
+    except (VerifyMismatchError, InvalidHashError):
         return False
+
+
+_DUMMY_HASH = password_hasher.hash(secrets.token_urlsafe(24))
+
+
+def burn_password_check(password: str) -> None:
+    """Spend the same Argon2 time as a real check so login timing does not reveal which usernames exist."""
+    verify_password(password, _DUMMY_HASH)
+
+
+def hash_secret_token(value: str) -> str:
+    """Hash for high-entropy tokens (refresh tokens, invite codes) stored in the database."""
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _b64(data: bytes) -> str:
@@ -43,11 +56,12 @@ def password_fingerprint(password_hash: str) -> str:
     return _b64(digest)[:32]
 
 
-def create_token(user_id: int, password_hash: str) -> str:
+def create_token(user_id: int, password_hash: str, session_id: int = 0) -> str:
     settings = get_settings()
     now = int(time.time())
     payload = {
         "sub": str(user_id),
+        "sid": session_id,
         "iat": now,
         "exp": now + settings.access_token_minutes * 60,
         "jti": secrets.token_urlsafe(16),
@@ -64,6 +78,7 @@ class TokenPayload:
     expires_at: int
     jti: str
     password_fingerprint: str
+    session_id: int = 0
 
 
 def decode_token(token: str) -> TokenPayload:
@@ -84,6 +99,7 @@ def decode_token(token: str) -> TokenPayload:
             expires_at=int(raw["exp"]),
             jti=str(raw["jti"]),
             password_fingerprint=str(raw["pwd"]),
+            session_id=int(raw.get("sid", 0)),
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется повторный вход") from exc

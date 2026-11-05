@@ -1,10 +1,10 @@
 import hmac
 from datetime import timezone
 
-from fastapi import Depends, Header, HTTPException, WebSocket, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 from . import models
-from .database import get_db, SessionLocal
+from .database import get_db
 from .permissions import has_permission
 from .security import decode_token, password_fingerprint
 
@@ -16,7 +16,14 @@ def user_from_token(db: Session, token: str) -> models.User:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Учетная запись недоступна")
     if not hmac.compare_digest(payload.password_fingerprint, password_fingerprint(user.password_hash)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется повторный вход")
+    session = db.get(models.LoginSession, payload.session_id) if payload.session_id else None
+    if not session or session.user_id != user.id or session.revoked_at is not None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Сессия завершена, войдите снова")
     return user
+
+
+def token_session_id(token: str) -> int:
+    return decode_token(token).session_id
 
 
 def current_user(request: Request, authorization: str = Header(default=""), db: Session = Depends(get_db)) -> models.User:
@@ -40,14 +47,6 @@ def require_permission(permission: str):
     return dependency
 
 
-def websocket_user(token: str) -> models.User:
-    db = SessionLocal()
-    try:
-        return user_from_token(db, token)
-    finally:
-        db.close()
-
-
 def ensure_channel_member(db: Session, user_id: int, channel_id: int) -> models.Channel:
     channel = db.get(models.Channel, channel_id)
     if not channel or channel.is_deleted:
@@ -56,7 +55,3 @@ def ensure_channel_member(db: Session, user_id: int, channel_id: int) -> models.
     if not member:
         raise HTTPException(status_code=403, detail="Нет доступа к каналу")
     return channel
-
-
-async def close_ws_policy_violation(ws: WebSocket, reason: str) -> None:
-    await ws.close(code=1008, reason=reason)

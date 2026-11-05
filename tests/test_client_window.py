@@ -18,7 +18,7 @@ class FakeApi:
     def __init__(self) -> None:
         self.base_url = "http://127.0.0.1:8765"
 
-    def set_base_url(self, value: str, *, allow_insecure_http: bool = False) -> None:
+    def set_base_url(self, value: str) -> None:
         self.base_url = value.rstrip("/")
 
     def me(self) -> dict:
@@ -195,9 +195,8 @@ def test_login_dialog_locked_server_is_not_editable(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(
         "app.client.main.load_client_config",
         lambda: ClientConfig(
-            server_url="http://72.35.246.230:8765",
+            server_url="https://chat.example.com",
             lock_server_url=True,
-            allow_insecure_http=True,
         ),
     )
     app = QApplication.instance() or QApplication([])
@@ -206,7 +205,7 @@ def test_login_dialog_locked_server_is_not_editable(tmp_path, monkeypatch) -> No
 
     assert isinstance(dialog.server, QLabel)
     assert not isinstance(dialog.server, QLineEdit)
-    assert dialog.server.text() == "http://72.35.246.230:8765"
+    assert dialog.server.text() == "https://chat.example.com"
     dialog.close()
     app.processEvents()
 
@@ -224,9 +223,8 @@ def test_login_dialog_loads_remembered_password(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "app.client.main.load_client_config",
         lambda: ClientConfig(
-            server_url="http://72.35.246.230:8765",
+            server_url="https://chat.example.com",
             lock_server_url=True,
-            allow_insecure_http=True,
         ),
     )
     app = QApplication.instance() or QApplication([])

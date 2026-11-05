@@ -30,7 +30,9 @@ python -m app.client.main
 Первый пользователь создается автоматически:
 
 - логин: `admin`;
-- пароль: значение `VOICECHAT_BOOTSTRAP_PASSWORD` из `.env`.
+- пароль: значение `VOICECHAT_BOOTSTRAP_PASSWORD` из `.env`, а если оно пустое — одноразовый пароль, который сервер печатает в консоль при первом запуске.
+
+В `.env` для разработки обязательно `VOICECHAT_ENVIRONMENT=development` и свой `VOICECHAT_SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`).
 
 ## Git
 

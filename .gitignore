@@ -23,7 +23,6 @@ env/
 .env.*
 !.env.example
 !.env.production.example
-!.env.ip.example
 client_config.json
 *.key
 *.pem

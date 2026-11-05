@@ -1,13 +1,27 @@
-{$VOICECHAT_DOMAIN} {
-    encode zstd gzip
+# chat.<domain>: API and client downloads. rtc.<domain>: LiveKit signalling (wss://).
+# Caddy obtains and renews Let's Encrypt certificates for both names automatically.
+{
+    email {$VOICECHAT_ACME_EMAIL}
+}
 
+(security_headers) {
     header {
         X-Content-Type-Options nosniff
         X-Frame-Options DENY
         Referrer-Policy no-referrer
         Permissions-Policy "camera=(), microphone=(), display-capture=()"
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
     }
+}
 
-    reverse_proxy api:8765
+chat.{$VOICECHAT_DOMAIN} {
+    import security_headers
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8765
+}
+
+rtc.{$VOICECHAT_DOMAIN} {
+    import security_headers
+    reverse_proxy 127.0.0.1:7880
 }

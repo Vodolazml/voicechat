@@ -16,6 +16,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), default="active")
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
+    # The owner cannot be disabled or have the password reset by other administrators.
+    is_owner: Mapped[bool] = mapped_column(Boolean, default=False)
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -29,11 +31,38 @@ class TemporaryCredential(Base):
 
 
 class LoginSession(Base):
+    """One signed-in device. Refresh tokens rotate on every use; reusing an old one revokes the user's sessions."""
+
     __tablename__ = "login_sessions"
-    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    token_hash: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    previous_token_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_fingerprint: Mapped[str] = mapped_column(String(64))
+    device_name: Mapped[str] = mapped_column(String(120), default="")
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Invite(Base):
+    """One-time sign-up code. Only its hash is stored."""
+
+    __tablename__ = "invites"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    space_id: Mapped[int | None] = mapped_column(ForeignKey("spaces.id"), nullable=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str] = mapped_column(String(120), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Role(Base):

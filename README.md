@@ -14,7 +14,7 @@ python -m pip install -r requirements.txt
 $bytes = New-Object byte[] 32
 [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 $env:VOICECHAT_SECRET_KEY=[Convert]::ToBase64String($bytes)
-$env:VOICECHAT_BOOTSTRAP_PASSWORD="Admin12345!Local"
+$env:VOICECHAT_ENVIRONMENT="development"
 python -m uvicorn app.server.main:app --reload --host 127.0.0.1 --port 8765
 ```
 
@@ -25,7 +25,9 @@ python -m uvicorn app.server.main:app --reload --host 127.0.0.1 --port 8765
 python -m app.client.main
 ```
 
-Первый вход: `admin` / пароль из `VOICECHAT_BOOTSTRAP_PASSWORD`. При первом входе администратор обязан сменить временный пароль.
+Первый вход: `admin` и одноразовый пароль, который сервер печатает в консоль при первом запуске. Его сразу нужно сменить.
+
+**Запуск на своём сервере с доменом:** [docs/DEPLOY.md](docs/DEPLOY.md) — одна команда `sudo deploy/install.sh <домен> <email>`.
 
 ## Текущий этап
 
@@ -42,22 +44,15 @@ python -m app.client.main
 
 ## Безопасность
 
-- задавайте `VOICECHAT_SECRET_KEY` длинной случайной строкой, сервер не стартует с примерным секретом;
-- для доступа по сети добавьте домены или IP в `VOICECHAT_ALLOWED_HOSTS`;
-- браузерные Origin для WebSocket и CORS разрешаются только через `VOICECHAT_CORS_ORIGINS`;
-- старые токены становятся недействительными после смены пароля.
-- голос и демонстрация экрана шифруются на клиенте через AES-256-GCM перед отправкой в WebSocket;
-- медиа-ключи отправителей не выдаются сервером в открытом виде: они публикуются как X25519/HKDF/AES-GCM конверты для public key участников.
+- только HTTPS/WSS: клиент не подключается к удалённому серверу по `http://`, а к медиасерверу по `ws://`;
+- сервер в production не стартует с опубликованными или слабыми секретами, `/docs` выключен;
+- короткие access-токены (15 минут) и refresh-токены, которые меняются при каждом обновлении; повтор старого токена завершает все сессии;
+- вход по одноразовым приглашениям, список устройств и выход на любом из них;
+- голос и демонстрация экрана шифруются на клиентах (E2EE через LiveKit), медиа-ключи раздаются X25519/HKDF/AES-GCM конвертами.
 
-Подробный текущий аудит: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+Подробности и схема развёртывания: [docs/DEPLOY.md](docs/DEPLOY.md).
 
-Экспериментальный деплой на сервер: [docs/EXPERIMENT_DEPLOY.md](docs/EXPERIMENT_DEPLOY.md).
-
-Для раздачи клиента без ручного ввода домена используйте `client_config.example.json`: скопируйте его в `client_config.json`, впишите свой `server_url` и оставьте `lock_server_url: true`.
-
-Клиент при входе проверяет `/client/update`. Сервер может сообщить новую версию, ссылку на пакет и SHA-256 для проверки скачанного файла.
-
-Временный запуск без домена, по IP: [docs/FIRST_RELEASE_IP.md](docs/FIRST_RELEASE_IP.md).
+Для раздачи клиента без ручного ввода адреса используйте `client_config.example.json`: скопируйте его в `client_config.json`, впишите `https://chat.<домен>` и оставьте `lock_server_url: true`.
 
 ## Порядок разработки
 

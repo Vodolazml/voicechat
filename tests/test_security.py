@@ -54,7 +54,10 @@ def test_token_is_bound_to_current_password_hash() -> None:
         user = models.User(username="admin", display_name="Администратор", password_hash=old_hash)
         db.add(user)
         db.flush()
-        token = create_token(user.id, old_hash)
+        session = models.LoginSession(user_id=user.id, password_fingerprint="x", expires_at=models.utcnow())
+        db.add(session)
+        db.flush()
+        token = create_token(user.id, old_hash, session.id)
 
         assert user_from_token(db, token).id == user.id
 

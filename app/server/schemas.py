@@ -1,4 +1,6 @@
 from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 USERNAME_PATTERN = r"^[a-zA-Z0-9_.-]+$"
@@ -9,9 +11,13 @@ class OrmModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+DEVICE_NAME_PATTERN = r"^[^\x00-\x1f\x7f<>]*$"
+
+
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64, pattern=USERNAME_PATTERN)
     password: str = Field(min_length=1, max_length=256)
+    device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
 
 
 class TokenOut(OrmModel):
@@ -22,6 +28,43 @@ class TokenOut(OrmModel):
 
 class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=256)
+
+
+class SessionOut(BaseModel):
+    id: int
+    device_name: str
+    ip_address: str
+    created_at: datetime
+    last_used_at: datetime
+    current: bool
+
+
+class InviteCreateIn(BaseModel):
+    space_id: int | None = None
+    is_admin: bool = False
+    note: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
+
+
+class InviteOut(BaseModel):
+    id: int
+    note: str
+    is_admin: bool
+    space_id: int | None
+    created_at: datetime
+    expires_at: datetime
+    used: bool
+
+
+class InviteCreatedOut(InviteOut):
+    code: str
+
+
+class RegisterIn(BaseModel):
+    code: str = Field(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
+    display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    password: str = Field(min_length=12, max_length=256)
+    device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
 
 
 class ClientUpdateOut(BaseModel):
@@ -43,8 +86,8 @@ class MeOut(OrmModel):
 
 
 class PasswordChangeIn(OrmModel):
-    old_password: str
-    new_password: str
+    old_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
 
 
 class UserCreateIn(OrmModel):
@@ -142,7 +185,7 @@ class VoiceStateIn(OrmModel):
     muted: bool
     deafened: bool
     speaking: bool = False
-    status: str = "connected"
+    status: Literal["connected", "reconnecting"] = "connected"
 
 
 class VoiceStateOut(OrmModel):

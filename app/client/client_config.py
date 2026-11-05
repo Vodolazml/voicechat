@@ -15,7 +15,6 @@ CONFIG_NAME = "client_config.json"
 class ClientConfig:
     server_url: str | None = None
     lock_server_url: bool = False
-    allow_insecure_http: bool = False
 
 
 def config_paths() -> list[Path]:
@@ -37,7 +36,6 @@ def load_client_config() -> ClientConfig:
         return ClientConfig(
             server_url=env_server_url.strip(),
             lock_server_url=os.getenv("VOICECHAT_LOCK_SERVER_URL") == "1",
-            allow_insecure_http=os.getenv("VOICECHAT_ALLOW_INSECURE_HTTP") == "1",
         )
     for path in config_paths():
         try:
@@ -49,6 +47,5 @@ def load_client_config() -> ClientConfig:
         return ClientConfig(
             server_url=server_url.strip() if isinstance(server_url, str) else None,
             lock_server_url=bool(data.get("lock_server_url", False)),
-            allow_insecure_http=bool(data.get("allow_insecure_http", False)),
         )
     return ClientConfig()

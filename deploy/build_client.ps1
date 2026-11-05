@@ -1,11 +1,12 @@
-param([string]$ServerUrl = "http://194.85.249.53:8765")
+param([Parameter(Mandatory = $true)][string]$ServerUrl)
 $ErrorActionPreference = "Stop"
+if (-not $ServerUrl.StartsWith("https://")) { throw "ServerUrl must be https://chat.<your-domain>" }
 Set-Location (Split-Path $PSScriptRoot -Parent)
 python -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw "Tests failed" }
 python -m PyInstaller --noconfirm PrivateVoiceChat.spec
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
-$config = @{server_url=$ServerUrl; lock_server_url=$true; allow_insecure_http=$ServerUrl.StartsWith("http://")}
+$config = @{server_url=$ServerUrl; lock_server_url=$true}
 $target = Join-Path (Get-Location) "dist\PrivateVoiceChat\client_config.json"
 [IO.File]::WriteAllText($target, ($config | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 $version = python -c "from app.version import APP_VERSION; print(APP_VERSION)"

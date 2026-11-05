@@ -38,6 +38,10 @@ Name: "startwithwindows"; Description: "Запускать при старте W
 [Files]
 Source: "..\dist\PrivateVoiceChat\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+; Older installers named the desktop shortcut after the app ("Private VoiceChat"); keep only "VoiceChat".
+Type: files; Name: "{userdesktop}\{#MyAppName}.lnk"
+
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{userdesktop}\VoiceChat"; Filename: "{app}\{#MyAppExeName}"

@@ -23,6 +23,7 @@ from app.server.database import get_db  # noqa: E402
 from tests.test_client_core import FakeAudio, FakeMedia  # noqa: E402
 
 STRONG = "ChangedAdmin123!Secure"
+TEMP = "TemporaryFriend123!"
 
 
 def _free_port() -> int:
@@ -69,6 +70,11 @@ def server(tmp_path, monkeypatch):
                                                   "password": main.settings.bootstrap_password}).json()["access_token"]
     httpx.post(url + "/me/password", headers={"Authorization": "Bearer " + token},
                json={"old_password": main.settings.bootstrap_password, "new_password": STRONG})
+    admin = httpx.post(url + "/auth/login", json={"username": "admin", "password": STRONG}).json()["access_token"]
+    created = httpx.post(url + "/users", headers={"Authorization": "Bearer " + admin},
+                         json={"username": "friend", "display_name": "Друг", "temporary_password": TEMP,
+                               "is_admin": False})
+    assert created.status_code == 200, created.text
     yield url
     srv.should_exit = True
     thread.join(timeout=5)
@@ -126,6 +132,10 @@ def test_ui_flow_in_clean_process():
 @pytest.mark.skipif(not ISOLATED, reason="runs in its own process via test_ui_flow_in_clean_process")
 def test_sign_in_chat_and_call_flow(ui, qt_app, server):
     assert pump(qt_app, lambda: ui.view == "login")
+    ui.login(server, "friend", TEMP, False)
+    assert pump(qt_app, lambda: ui.view == "password"), ui.error
+    ui.changePassword(TEMP, "FriendStrong123!x")
+    assert pump(qt_app, lambda: ui.view == "login" and not ui.busy)
     ui.login(server, "admin", "wrong-password", False)
     assert pump(qt_app, lambda: ui.error != "")
     ui.login(server, "admin", STRONG, True)

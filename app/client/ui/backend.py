@@ -448,7 +448,8 @@ class Backend(QObject):
 
         def load():
             me = self.api.me()
-            spaces = self.api.spaces()
+            # A temporary password must be changed first; the server refuses everything else until then.
+            spaces = [] if me.get("must_change_password") else self.api.spaces()
             return me, spaces
         self._bg(load, self._loaded, lambda exc: self._show_login(str(exc)))
 

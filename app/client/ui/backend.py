@@ -467,6 +467,8 @@ class Backend(QObject):
     def _set(self, name: str, value: Any, signal: Signal) -> None:
         if getattr(self, name) != value:
             setattr(self, name, value)
+            if name == "_view" and value in ("login", "password", "main"):
+                _startup_finished()
             signal.emit()
 
     # =========================================================================================
@@ -1238,11 +1240,11 @@ class Backend(QObject):
             try:
                 import sounddevice as sd
 
-                from app.client.core.audio import _device_index
+                from app.client.core.audio import _device_index, _extra_settings
 
                 samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-                sd.play(samples, SAMPLE_RATE, device=_device_index(self.audio_settings.output_device, "output"),
-                        blocking=True)
+                device = _device_index(self.audio_settings.output_device, "output")
+                sd.play(samples, SAMPLE_RATE, device=device, extra_settings=_extra_settings(device), blocking=True)
             except Exception:
                 logger.debug("UI sound not played", exc_info=True)
         self._pool.submit(play)
@@ -1998,6 +2000,16 @@ class Backend(QObject):
 
 
 _crash_file = None
+STARTUP_HANG_SECONDS = 150  # longer than the update watchdog (2 minutes), which starts the app anyway
+
+
+def _startup_finished() -> None:
+    import faulthandler
+
+    try:
+        faulthandler.cancel_dump_traceback_later()
+    except Exception:
+        pass
 
 
 def _enable_crash_log() -> None:
@@ -2015,6 +2027,9 @@ def _enable_crash_log() -> None:
         _crash_file.write(f"--- {datetime.now():%Y-%m-%d %H:%M:%S} start {APP_VERSION} ---\n")
         _crash_file.flush()
         faulthandler.enable(_crash_file, all_threads=True)
+        # A start-up that hangs (it happened: frozen for 40 minutes, nothing in the log) writes where
+        # every thread is stuck. Cancelled once the login or main screen is reached.
+        faulthandler.dump_traceback_later(STARTUP_HANG_SECONDS, repeat=False, file=_crash_file)
     except Exception:
         logging.getLogger("voicechat.ui").info("Crash log unavailable", exc_info=True)
 

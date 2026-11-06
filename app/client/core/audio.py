@@ -65,15 +65,72 @@ def list_devices() -> tuple[list[str], list[str]]:
 
 
 def _device_index(name: str, kind: str) -> int | None:
+    """PortAudio index for a device name (\"\" = the Windows default device), preferring WASAPI.
+
+    The same headset is listed once per host API (MME, DirectSound, WASAPI). MME cuts names at 31
+    characters, so a plain name search used to land on DirectSound, which hands over sound in uneven
+    pieces: about a third of the microphone was thrown away and friends heard a broken voice.
+    """
     import sounddevice as sd
 
-    if not name:
-        return None
     channels_key = "max_input_channels" if kind == "input" else "max_output_channels"
-    for index, device in enumerate(sd.query_devices()):
-        if device["name"] == name and device[channels_key] > 0:
-            return index
+    try:
+        apis = sd.query_hostapis()
+        wasapi = next((i for i, api in enumerate(apis) if "WASAPI" in api["name"]), None)
+        devices = sd.query_devices()
+    except Exception:
+        logger.info("Device lookup failed", exc_info=True)
+        return None
+    if not name:
+        if wasapi is not None:
+            default = apis[wasapi]["default_input_device" if kind == "input" else "default_output_device"]
+            if default is not None and default >= 0:
+                return default
+        return None
+    matches = [i for i, d in enumerate(devices) if d["name"] == name and d[channels_key] > 0]
+    preferred = [i for i in matches if wasapi is not None and devices[i]["hostapi"] == wasapi]
+    if preferred:
+        return preferred[0]
+    if matches:
+        return matches[0]
     return None  # unplugged: fall back to the default device
+
+
+def _extra_settings(device: int | None):
+    """Shared-mode WASAPI only opens at the device's own rate unless told to convert."""
+    import sounddevice as sd
+
+    try:
+        if device is None or "WASAPI" not in sd.query_hostapis(sd.query_devices(device)["hostapi"])["name"]:
+            return None
+    except Exception:
+        return None
+    try:
+        return sd.WasapiSettings(auto_convert=True)
+    except TypeError:  # sounddevice < 0.5
+        return None
+
+
+class _Rechunker:
+    """Turns pieces of any size into exact 10 ms frames. Some drivers (DirectSound, Bluetooth) deliver
+    uneven blocks; dropping those lost up to a third of the sound."""
+
+    def __init__(self, frame_bytes: int) -> None:
+        self.frame_bytes = frame_bytes
+        self._pending = bytearray()
+
+    def push(self, data: bytes) -> list[bytes]:
+        self._pending += data
+        frames = []
+        while len(self._pending) >= self.frame_bytes:
+            frames.append(bytes(self._pending[:self.frame_bytes]))
+            del self._pending[:self.frame_bytes]
+        if len(self._pending) > self.frame_bytes * 50:  # never let a backlog build up
+            self._pending.clear()
+        return frames
+
+    def clear(self) -> None:
+        self._pending.clear()
 
 
 class AudioEngine:
@@ -96,6 +153,8 @@ class AudioEngine:
         self._output = None
         self._running = False
         self._delay_ms = 40
+        self._in_chunks = _Rechunker(FRAME_BYTES)
+        self._out_pending = bytearray()
         self._reset_counters()
         self.apply_settings(settings)
 
@@ -104,6 +163,7 @@ class AudioEngine:
     def _reset_counters(self) -> None:
         # Written only by the audio callbacks, read and reset by stats(); plain ints are fine for that.
         self._frames_in = 0
+        self._odd_blocks = 0
         self._frames_sent = 0
         self._frames_out = 0
         self._overflows = 0
@@ -114,7 +174,8 @@ class AudioEngine:
         """What the microphone and speakers did since the last call, for the log."""
         stats = {
             "running": self._running, "mic_frames": self._frames_in, "sent_frames": self._frames_sent,
-            "speaker_frames": self._frames_out, "mic_peak_db": round(self._peak_db, 1),
+            "speaker_frames": self._frames_out, "uneven_blocks": self._odd_blocks,
+            "mic_peak_db": round(self._peak_db, 1),
             "threshold_db": round(getattr(self.gate, "threshold_db", self.settings.threshold_db), 1),
             "overflows": self._overflows, "underflows": self._underflows, "muted": self.muted,
             "mode": self.settings.mode,
@@ -170,14 +231,12 @@ class AudioEngine:
             if self._running:
                 return
             try:
-                self._input = sd.RawInputStream(
-                    samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1, dtype="int16",
-                    device=_device_index(self.settings.input_device, "input"), latency=DEVICE_LATENCY,
-                    callback=self._capture, finished_callback=self._stream_finished)
-                self._output = sd.RawOutputStream(
-                    samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1, dtype="int16",
-                    device=_device_index(self.settings.output_device, "output"), latency=DEVICE_LATENCY,
-                    callback=self._playback, finished_callback=self._stream_finished)
+                self._in_chunks.clear()
+                self._out_pending.clear()
+                self._input = self._open(sd.RawInputStream, _device_index(self.settings.input_device, "input"),
+                                         self._capture)
+                self._output = self._open(sd.RawOutputStream,
+                                          _device_index(self.settings.output_device, "output"), self._playback)
                 self._input.start()
                 self._output.start()
                 self._delay_ms = min(500, int((self._input.latency + self._output.latency) * 1000))
@@ -191,6 +250,20 @@ class AudioEngine:
                 logger.warning("Audio device could not be opened (mic %r, speakers %r): %s",
                                self.settings.input_device or "default", self.settings.output_device or "default", exc)
                 raise RuntimeError(f"Не удалось открыть аудиоустройство: {exc}") from exc
+
+    def _open(self, stream_class, device: int | None, callback):
+        def make(dev, extra):
+            return stream_class(samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, channels=1, dtype="int16",
+                                device=dev, latency=DEVICE_LATENCY, extra_settings=extra,
+                                callback=callback, finished_callback=self._stream_finished)
+        try:
+            return make(device, _extra_settings(device))
+        except Exception as exc:
+            if device is None:
+                raise
+            # A device that refuses WASAPI (rare drivers): let PortAudio pick its default way.
+            logger.warning("Opening device %s failed (%s); using the system default", device, exc)
+            return make(None, None)
 
     def stop(self) -> None:
         with self._lock:
@@ -236,9 +309,13 @@ class AudioEngine:
         if status and status.input_overflow:
             self._overflows += 1
         if frames != FRAME_SAMPLES:
-            return
-        self._frames_in += 1
-        frame = apply_gain(bytes(indata), self.settings.input_gain)
+            self._odd_blocks += 1
+        for frame in self._in_chunks.push(bytes(indata)):
+            self._frames_in += 1
+            self._process_frame(frame)
+
+    def _process_frame(self, frame: bytes) -> None:
+        frame = apply_gain(frame, self.settings.input_gain)
         apm = self._apm
         if apm is not None:
             try:
@@ -273,17 +350,25 @@ class AudioEngine:
     def _playback(self, outdata, frames, time_info, status) -> None:
         if status and status.output_underflow:
             self._underflows += 1
-        self._frames_out += 1
-        mixed = self.mixer.mix() if frames == FRAME_SAMPLES else bytes(frames * 2)
-        outdata[:] = mixed
-        apm = self._apm
-        if apm is not None and frames == FRAME_SAMPLES and self.settings.echo_cancellation:
-            try:
-                from livekit import rtc
+        if frames != FRAME_SAMPLES:
+            self._odd_blocks += 1
+        needed = frames * 2
+        # Whole 10 ms frames from the mixer, whatever block size the driver asks for (it used to get
+        # silence for any other size).
+        while len(self._out_pending) < needed:
+            mixed = self.mixer.mix()
+            self._frames_out += 1
+            self._out_pending += mixed
+            apm = self._apm
+            if apm is not None and self.settings.echo_cancellation:
+                try:
+                    from livekit import rtc
 
-                apm.process_reverse_stream(rtc.AudioFrame(mixed, SAMPLE_RATE, 1, FRAME_SAMPLES))
-            except Exception:
-                pass
+                    apm.process_reverse_stream(rtc.AudioFrame(mixed, SAMPLE_RATE, 1, FRAME_SAMPLES))
+                except Exception:
+                    pass
+        outdata[:] = bytes(self._out_pending[:needed])
+        del self._out_pending[:needed]
 
 
 def _describe(device) -> str:

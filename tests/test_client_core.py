@@ -293,3 +293,43 @@ def test_undecryptable_friend_fetches_keys_at_once():
     api.calls.clear()
     FakeMedia.instances[-1].kwargs["callbacks"].on_key_problem(2)
     assert wait_for(lambda: ("e2ee_state", (10,)) in api.calls)
+
+
+def test_uneven_driver_blocks_lose_no_sound():
+    from types import SimpleNamespace
+
+    from app.client.core.audio import AudioEngine
+
+    sent = []
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False, mode="ptt"),
+                         on_frame=sent.append)
+    engine.ptt_pressed = True
+    ok = SimpleNamespace(input_overflow=False, output_underflow=False)
+    # DirectSound-style blocks: 441 samples at a time instead of 480.
+    for _ in range(480):
+        engine._capture(bytes(441 * 2), 441, None, ok)
+    assert len(sent) == 441, "every sample reaches the call"
+    out = bytearray(300 * 2)
+    engine._playback(out, 300, None, ok)
+    engine._playback(out, 300, None, ok)
+    assert engine.stats()["uneven_blocks"] == 482
+
+
+def test_named_device_prefers_wasapi(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from app.client.core import audio
+
+    devices = [
+        {"name": "Микрофон (Razer Barracuda X 2.", "hostapi": 0, "max_input_channels": 1, "max_output_channels": 0},
+        {"name": "Микрофон (Razer Barracuda X 2.4)", "hostapi": 1, "max_input_channels": 1, "max_output_channels": 0},
+        {"name": "Микрофон (Razer Barracuda X 2.4)", "hostapi": 2, "max_input_channels": 1, "max_output_channels": 0},
+    ]
+    apis = [{"name": "MME", "default_input_device": 0}, {"name": "Windows DirectSound", "default_input_device": 1},
+            {"name": "Windows WASAPI", "default_input_device": 2, "default_output_device": -1}]
+    fake = SimpleNamespace(query_devices=lambda *a: devices, query_hostapis=lambda *a: apis)
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    assert audio._device_index("Микрофон (Razer Barracuda X 2.4)", "input") == 2
+    assert audio._device_index("", "input") == 2
+    assert audio._device_index("", "output") is None

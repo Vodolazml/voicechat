@@ -161,11 +161,18 @@ class Mixer:
         self.normalize = True
         self.limiter = Limiter()
         self.output_level_db = -96.0
+        self._received: dict[int, int] = {}  # frames per person since the last stats(), for the log
+
+    def stats(self) -> dict[int, int]:
+        with self._lock:
+            received, self._received = self._received, {}
+        return received
 
     def put(self, user_id: int, frame: bytes) -> None:
         if len(frame) != FRAME_BYTES:
             return
         with self._lock:
+            self._received[user_id] = self._received.get(user_id, 0) + 1
             buffer = self._speakers.setdefault(user_id, _SpeakerBuffer())
             buffer.frames.append(frame)
             while len(buffer.frames) > self.MAX_FRAMES:

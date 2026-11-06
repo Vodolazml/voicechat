@@ -311,6 +311,8 @@ class CallController:
             media = self.media
             stats["media"] = "connected" if media is not None and media.connected else "not connected"
             stats["state"] = self.state
+            # Frames received from each person (100 a second while they talk; 0 = we hear nothing).
+            stats["heard"] = self.audio.mixer.stats()
             muted = self.muted or self.deafened
             if stats["running"] and stats["mic_frames"] == 0:
                 logger.warning("Channel %s: the microphone delivers no sound at all: %s", channel_id, stats)

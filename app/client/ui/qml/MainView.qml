@@ -72,6 +72,7 @@ Item {
     SafetyDialog { id: safety }
     ChannelDialog { id: channelDialog }
     ConfirmDialog { id: confirm }
+    NicknameDialog { id: nicknameDialog; objectName: "nicknameDialog" }
 
     function openSettings(tab) { settings.tab = tab; settings.visible = true; settings.forceActiveFocus() }
 }

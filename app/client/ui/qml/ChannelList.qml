@@ -119,7 +119,7 @@ ListView {
                 HoverHandler { id: memberHover }
                 TapHandler {
                     acceptedButtons: Qt.RightButton
-                    enabled: !member.modelData.isMe && (backend.canModerate || member.modelData.muted || member.modelData.deafened)
+                    enabled: !member.modelData.isMe
                     onTapped: modMenu.popup()
                 }
                 ModerationMenu { id: modMenu; userId: member.modelData.id; name: member.modelData.name; muted: member.modelData.muted; deafened: member.modelData.deafened }

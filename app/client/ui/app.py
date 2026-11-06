@@ -8,6 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Qt, QUrl, Slot
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QIcon
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
+from PySide6.QtQuick import QQuickWindow
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from app.client.single_instance import SingleInstanceGuard
@@ -72,6 +73,9 @@ def main() -> int:
     configure_logging()
     os.environ.setdefault("QT_QUICK_CONTROLS_STYLE", "Basic")
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # Windows with real per-pixel transparency (the overlay): without an alpha buffer Windows shows its
+    # background either fully on or fully off, so the "background opacity" slider seemed to do nothing.
+    QQuickWindow.setDefaultAlphaBuffer(True)
     app = QApplication(sys.argv)
     app.setApplicationName("VoiceChat")
     app.setOrganizationName("PrivateVoiceChat")

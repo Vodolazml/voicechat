@@ -227,7 +227,8 @@ def test_sent_stream_is_described_from_measured_numbers():
                                                  "limited_by": "cpu"})
     assert text == "2560×1440 → 1600×900 · 58 к/с"  # the encoder's real size, not the preset's
     assert "захват 59 к/с" in detail and "7.8 Мбит/с" in detail and "процессора" in detail
-    paused = backend_module.describe_sent({**base, "sent_width": 1920, "sent_height": 1080, "network_fps": 0.0})
+    paused = backend_module.describe_sent({**base, "sent_width": 1920, "sent_height": 1080, "encoded_fps": 0.0,
+                                           "network_fps": 0.0})
     assert paused[0] == "2560×1440 → 1920×1080 · нет зрителей, отправка на паузе"
     assert "кодер запускается" in backend_module.describe_sent(base)[0]
 

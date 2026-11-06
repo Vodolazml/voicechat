@@ -36,7 +36,7 @@ Window {
                 height: visible ? 30 * win.k : 0
                 width: row.implicitWidth + 16 * win.k
                 radius: height / 2
-                color: Qt.rgba(0.05, 0.05, 0.08, win.s.overlay_opacity === undefined ? 0.85 : win.s.overlay_opacity)
+                color: Qt.rgba(0.05, 0.05, 0.08, win.s.overlay_opacity === undefined ? 0.5 : win.s.overlay_opacity)
                 border.width: model.speaking ? 2 : 0
                 border.color: Theme.speaking
                 RowLayout {

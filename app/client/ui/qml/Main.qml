@@ -33,7 +33,13 @@ ApplicationWindow {
     }
     Component { id: login; LoginView {} }
     Component { id: password; PasswordView {} }
-    Component { id: main; MainView { objectName: "mainView"; onToggleFullscreen: window.visibility === Window.FullScreen ? window.showNormal() : window.showFullScreen() } }
+    Component { id: main; MainView { objectName: "mainView"; onToggleFullscreen: window.videoFullscreen() } }
+    // Only the video goes full screen, never the app window.
+    function videoFullscreen() {
+        if (backend.focusUserId !== 0)
+            videoFull.showFor(backend.focusUserId, window.screen)
+    }
+    VideoFullscreen { id: videoFull }
     Component {
         id: loading
         Rectangle {
@@ -51,7 +57,7 @@ ApplicationWindow {
         z: 1000
     }
 
-    Shortcut { sequence: "F11"; onActivated: window.visibility === Window.FullScreen ? window.showNormal() : window.showFullScreen() }
+    Shortcut { sequence: "F11"; onActivated: window.videoFullscreen() }
     Shortcut { sequence: "Ctrl+M"; enabled: backend.inCall; onActivated: backend.toggleMute() }
 
     OverlayWindow {}

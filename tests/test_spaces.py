@@ -167,3 +167,17 @@ def test_avatars_for_people_and_spaces(client):
     # An empty body removes the picture.
     assert client.put("/me/avatar", headers=alice, content=b"").json()["avatar_version"] == 0
     assert client.get(f"/avatars/user/{alice_id}", headers=bob).status_code == 404
+
+
+def test_people_change_their_own_name(client):
+    alice = signup(client, "alice")
+    bob = signup(client, "bob")
+    space = client.post("/spaces", headers=alice, json={"name": "Имена"}).json()
+    client.post("/spaces/join", headers=bob, json={"code": space["invite_code"]})
+    assert client.patch("/me", headers=alice, json={"display_name": "  Алиса   Чудесная "}).json() == {
+        "display_name": "Алиса Чудесная"}
+    assert client.get("/me", headers=alice).json()["display_name"] == "Алиса Чудесная"
+    names = {m["display_name"] for m in client.get(f"/spaces/{space['id']}/members", headers=bob).json()}
+    assert "Алиса Чудесная" in names
+    assert client.patch("/me", headers=alice, json={"display_name": ""}).status_code == 422
+    assert client.patch("/me", headers=alice, json={"display_name": "<script>"}).status_code == 422

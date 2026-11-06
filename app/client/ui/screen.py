@@ -168,8 +168,8 @@ def monitor_for_rect(rect: tuple[int, int, int, int], monitors: list[dict]) -> d
     return best
 
 
-def cursor_position() -> tuple[int, int] | None:
-    """Where the mouse pointer is (physical screen pixels), or None if it is hidden (e.g. in a game)."""
+def cursor_info() -> tuple[int, int, int] | None:
+    """(x, y, handle) of the mouse pointer in physical screen pixels, or None if it is hidden (e.g. in a game)."""
     if os.name != "nt":
         return None
     import ctypes
@@ -186,7 +186,162 @@ def cursor_position() -> tuple[int, int] | None:
             return None
     except Exception:
         return None
-    return info.ptScreenPos.x, info.ptScreenPos.y
+    return info.ptScreenPos.x, info.ptScreenPos.y, int(info.hCursor or 0)
+
+
+def cursor_position() -> tuple[int, int] | None:
+    info = cursor_info()
+    return None if info is None else (info[0], info[1])
+
+
+_cursor_cache: dict[int, tuple[QImage | None, QImage | None, int, int] | None] = {}
+
+
+def _cursor_bitmap(handle: int):
+    """The real system pointer as images: (colour ARGB image, 'invert' mask image, hotspot x, hotspot y).
+
+    Cached per cursor handle, so it costs nothing per frame. The invert part is what the text I-beam and
+    a few old cursors use: pixels that flip the colour under them."""
+    if not handle:
+        return None
+    if handle in _cursor_cache:
+        return _cursor_cache[handle]
+    result = None
+    try:
+        result = _read_cursor(handle)
+    except Exception:
+        logger.debug("Pointer image unavailable", exc_info=True)
+    if len(_cursor_cache) > 64:
+        _cursor_cache.clear()
+    _cursor_cache[handle] = result
+    return result
+
+
+def _read_cursor(handle: int):
+    import ctypes
+    from ctypes import wintypes
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
+                    ("hbmMask", wintypes.HBITMAP), ("hbmColor", wintypes.HBITMAP)]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG), ("bmHeight", wintypes.LONG),
+                    ("bmWidthBytes", wintypes.LONG), ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                    ("bmBits", ctypes.c_void_p)]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    user32.GetIconInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(ICONINFO)]
+    gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+    gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                                ctypes.c_void_p, wintypes.UINT]
+    gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+
+    icon = ICONINFO()
+    if not user32.GetIconInfo(wintypes.HANDLE(handle), ctypes.byref(icon)):
+        return None
+
+    def pixels(bitmap) -> tuple[bytes, int, int] | None:
+        info = BITMAP()
+        if not gdi32.GetObjectW(bitmap, ctypes.sizeof(info), ctypes.byref(info)):
+            return None
+        width, height = info.bmWidth, abs(info.bmHeight)
+        header = BITMAPINFOHEADER()
+        header.biSize = ctypes.sizeof(header)
+        header.biWidth, header.biHeight = width, -height  # top-down rows
+        header.biPlanes, header.biBitCount = 1, 32
+        buffer = ctypes.create_string_buffer(width * height * 4)
+        dc = user32.GetDC(None)
+        try:
+            # The structure is followed by room for a colour table, which 32-bit DIBs do not use.
+            holder = ctypes.create_string_buffer(ctypes.sizeof(header) + 1024)
+            ctypes.memmove(holder, ctypes.byref(header), ctypes.sizeof(header))
+            if not gdi32.GetDIBits(dc, bitmap, 0, height, buffer, holder, 0):
+                return None
+        finally:
+            user32.ReleaseDC(None, dc)
+        return buffer.raw, width, height
+
+    try:
+        mask = pixels(icon.hbmMask) if icon.hbmMask else None
+        color = pixels(icon.hbmColor) if icon.hbmColor else None
+    finally:
+        for bitmap in (icon.hbmMask, icon.hbmColor):
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+    if mask is None:
+        return None
+    return _compose_cursor(color, mask, icon.xHotspot, icon.yHotspot)
+
+
+def _compose_cursor(color, mask, hot_x: int, hot_y: int):
+    """Turns Windows cursor bitmaps (BGRA bytes, width, height) into (ARGB image, invert image, hotspot).
+
+    Colour cursors carry their own alpha (or, for old ones, a transparency mask); monochrome cursors keep
+    an AND mask on top and an XOR mask below it in one double-height bitmap."""
+    mask_bytes, width, mask_height = mask
+    if color is not None:
+        color_bytes, width, height = color
+        out = bytearray(color_bytes)
+        has_alpha = any(out[i] for i in range(3, len(out), 4))
+        invert = bytearray(width * height * 4)
+        any_invert = False
+        if not has_alpha:
+            for i in range(width * height):
+                transparent = mask_bytes[i * 4] != 0 if i * 4 < len(mask_bytes) else False
+                bright = out[i * 4] | out[i * 4 + 1] | out[i * 4 + 2]
+                if transparent and bright:  # mask on + colour: the XOR pixels
+                    invert[i * 4:i * 4 + 4] = b"\xff\xff\xff\xff"
+                    out[i * 4 + 3] = 0
+                    any_invert = True
+                else:
+                    out[i * 4 + 3] = 0 if transparent else 255
+        image = QImage(bytes(out), width, height, width * 4, QImage.Format_ARGB32).copy()
+        inverted = QImage(bytes(invert), width, height, width * 4, QImage.Format_ARGB32).copy() if any_invert else None
+        return image, inverted, hot_x, hot_y
+    height = mask_height // 2
+    out = bytearray(width * height * 4)
+    invert = bytearray(width * height * 4)
+    any_invert = False
+    for i in range(width * height):
+        and_bit = mask_bytes[i * 4] != 0
+        xor_bit = mask_bytes[(i + width * height) * 4] != 0
+        if not and_bit:
+            value = 255 if xor_bit else 0
+            out[i * 4:i * 4 + 4] = bytes((value, value, value, 255))
+        elif xor_bit:
+            invert[i * 4:i * 4 + 4] = b"\xff\xff\xff\xff"
+            any_invert = True
+    image = QImage(bytes(out), width, height, width * 4, QImage.Format_ARGB32).copy()
+    inverted = QImage(bytes(invert), width, height, width * 4, QImage.Format_ARGB32).copy() if any_invert else None
+    return image, inverted, hot_x, hot_y
+
+
+def paint_pointer(image: QImage, x: float, y: float, handle: int, scale: float = 1.0) -> None:
+    """Draws the real system pointer at (x, y) in image pixels; a drawn arrow only if its picture is unknown."""
+    bitmap = _cursor_bitmap(handle)
+    if bitmap is None:
+        draw_cursor(image, x, y, scale)
+        return
+    picture, inverted, hot_x, hot_y = bitmap
+    left, top = int(round(x - hot_x)), int(round(y - hot_y))
+    if left > image.width() or top > image.height() or left + picture.width() < 0 or top + picture.height() < 0:
+        return
+    painter = QPainter(image)
+    painter.drawImage(left, top, picture)
+    if inverted is not None:
+        painter.setCompositionMode(QPainter.CompositionMode_Difference)
+        painter.drawImage(left, top, inverted)
+    painter.end()
 
 
 def draw_cursor(image: QImage, x: float, y: float, scale: float = 1.0) -> None:
@@ -242,9 +397,10 @@ def snapshot(kind: str, ident: int, width: int) -> QImage | None:
             region = grabber.monitors[ident]
         shot = grabber.grab(region)
         image = QImage(shot.raw, shot.width, shot.height, shot.width * 4, QImage.Format_RGB32).copy()
-        position = cursor_position()
-        if position is not None:
-            draw_cursor(image, position[0] - region["left"], position[1] - region["top"], max(1.0, shot.height / 1080))
+        pointer = cursor_info()
+        if pointer is not None:
+            paint_pointer(image, pointer[0] - region["left"], pointer[1] - region["top"], pointer[2],
+                          max(1.0, shot.height / 1080))
     return image.scaledToWidth(max(16, width), Qt.SmoothTransformation)
 
 
@@ -330,9 +486,9 @@ def _make_grabber(info: dict, monitor_count: int, fps: int):
                 return last[0]  # moved to another screen
             image = image.copy(x0, y0, x1 - x0, y1 - y0)
             left, top = origin_x + x0, origin_y + y0
-        position = cursor_position()
-        if position is not None:
-            draw_cursor(image, position[0] - left, position[1] - top, cursor_scale)
+        pointer = cursor_info()
+        if pointer is not None:
+            paint_pointer(image, pointer[0] - left, pointer[1] - top, pointer[2], cursor_scale)
         last[0] = image
         return image
     return grab_with_extras, close, paced, backend
@@ -455,7 +611,10 @@ def capture_process_main(info: dict, monitor_count: int, width: int, height: int
 
 
 class ScreenCapturer:
-    PREVIEW_FPS = 20  # your own preview: full size, sharp, but not so often that it costs the call anything
+    # Your own preview: small and not too often. A full-size 1440p picture 20 times a second kept the
+    # app's window busy redrawing it, and everything else (the status line, menus) lagged behind.
+    PREVIEW_FPS = 10
+    PREVIEW_WIDTH = 960
     SLOTS = 3
 
     def __init__(self, monitor: int, preset: Preset, preview=None, kind: str = "monitor") -> None:
@@ -507,7 +666,12 @@ class ScreenCapturer:
         now = time.perf_counter()
         if self.preview is not None and now - last_preview[0] >= 1.0 / self.PREVIEW_FPS:
             last_preview[0] = now
-            self.preview(QImage(data, self.width, self.height, self.width * 4, QImage.Format_RGB32).copy())
+            image = QImage(data, self.width, self.height, self.width * 4, QImage.Format_RGB32)
+            if self.width > self.PREVIEW_WIDTH:
+                image = image.scaledToWidth(self.PREVIEW_WIDTH, Qt.SmoothTransformation)
+            else:
+                image = image.copy()
+            self.preview(image)
 
     async def _run_process(self, source) -> None:
         import multiprocessing as mp

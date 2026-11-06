@@ -68,7 +68,7 @@ Rectangle {
                         anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 6
                         opacity: focusHover.hovered ? 1 : 0
                         Behavior on opacity { NumberAnimation { duration: Theme.fast } }
-                        IconButton { glyph: "fullscreen"; tip: "Во весь экран (F11)"; fill: Qt.rgba(0, 0, 0, 0.6); onClicked: root.toggleFullscreen() }
+                        IconButton { glyph: "fullscreen"; tip: "Видео на весь экран (F11)"; fill: Qt.rgba(0, 0, 0, 0.6); onClicked: root.toggleFullscreen() }
                         IconButton { glyph: "fullscreen_exit"; tip: "Вернуться к сетке"; fill: Qt.rgba(0, 0, 0, 0.6); onClicked: backend.focusUser(0) }
                     }
                     HoverHandler { id: focusHover }

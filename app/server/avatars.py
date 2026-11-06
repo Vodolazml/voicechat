@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session, undefer
 
-from . import models
+from . import models, schemas
 from .audit import write_audit
 from .database import get_db
 from .deps import current_user, require_space_manager
@@ -66,6 +66,21 @@ async def set_my_avatar(request: Request, user: models.User = Depends(current_us
     hub.publish(_friends_of(db, user.id), {"type": "user.avatar", "user_id": user.id,
                                            "avatar_version": user.avatar_version if data else 0})
     return {"avatar_version": user.avatar_version if data else 0}
+
+
+@router.patch("/me")
+def update_profile(payload: schemas.ProfileIn, request: Request, user: models.User = Depends(current_user),
+                   db: Session = Depends(get_db)):
+    """Your own name, the one everybody sees."""
+    rate_limit(f"profile:{user.id}", 10, 3600)
+    name = " ".join(payload.display_name.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="Имя не может быть пустым")
+    user.display_name = name
+    write_audit(db, actor_id=user.id, action="users.rename", target_type="user", target_id=user.id, request=request)
+    db.commit()
+    hub.publish(_friends_of(db, user.id), {"type": "user.renamed", "user_id": user.id, "display_name": name})
+    return {"display_name": name}
 
 
 @router.get("/avatars/user/{user_id}")

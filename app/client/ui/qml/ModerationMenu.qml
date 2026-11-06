@@ -18,7 +18,8 @@ StyledMenu {
         text: menu.wakeWait > 0 ? "Разбудить (через " + menu.wakeWait + " с)" : "Разбудить"
         onTriggered: backend.wakeUser(menu.userId)
     }
-    MenuSeparator { visible: menu.canWake && backend.canModerate; height: visible ? implicitHeight : 0; contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
+    MenuItem { text: "Изменить имя для себя"; onTriggered: backend.askNickname(menu.userId) }
+    MenuSeparator { visible: backend.canModerate; height: visible ? implicitHeight : 0; contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
     StyledMenu {
         id: moveMenu
         title: "Переместить в…"

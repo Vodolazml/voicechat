@@ -500,14 +500,22 @@ class MediaSession:
         reasons = {0: "", 1: "cpu", 2: "bandwidth", 3: "other"}
         last: tuple[float, int, int] | None = None
         last_bytes: tuple[float, int] | None = None
+        misses = 0
+        logged = 0.0
         while True:
             await asyncio.sleep(1.0)
             try:
-                outbound = [stat.outbound_rtp for stat in await track.get_stats()
-                            if stat.WhichOneof("stats") == "outbound_rtp"]
+                # A busy WebRTC thread (a big screen at 60 fps) can take long to answer; never let the
+                # status wait on it, and keep showing the last good numbers through a short gap
+                # instead of flipping back to "the encoder is starting".
+                report = await asyncio.wait_for(track.get_stats(), timeout=3.0)
+                outbound = [stat.outbound_rtp for stat in report if stat.WhichOneof("stats") == "outbound_rtp"]
                 if not outbound:
-                    capturer.encoder = {}
+                    misses += 1
+                    if misses >= 5:
+                        capturer.encoder = {}
                     continue
+                misses = 0
                 out = outbound[0].outbound
                 sent = outbound[0].sent
                 now = time.monotonic()
@@ -526,8 +534,13 @@ class MediaSession:
                     if last_bytes and now > last_bytes[0] else 0,
                 }
                 last_bytes = (now, sent.bytes_sent)
+                if now - logged >= 15:
+                    logged = now
+                    logger.info("Screen share: %s", {**capturer.stats(), "preview": capturer.preview is not None})
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError:
+                logger.info("Screen share stats took over 3 s")
             except Exception:
                 logger.debug("Screen share stats unavailable", exc_info=True)
 

@@ -52,7 +52,7 @@ TOKEN_RE = re.compile(r"(https?://[^\s<>\"']+)|@([A-Za-z0-9_.-]{3,64})")
 
 UI_DEFAULTS: dict[str, Any] = {
     "key_ptt": "", "key_mute": "Ctrl+Shift+M", "key_deafen": "Ctrl+Shift+D", "key_overlay": "Ctrl+Shift+O",
-    "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.9,
+    "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.5,
     "overlay_speakers_only": False,
     "sound_join_leave": True, "sound_messages": True, "notify_mentions": True, "voice_prompts": True,
     "overlay_x": 0.02, "overlay_y": 0.03,
@@ -136,7 +136,7 @@ def describe_sent(stats: dict) -> tuple[str, str]:
     size = f"{stats.get('sent_width') or stats.get('width', 0)}×{stats.get('sent_height') or stats.get('height', 0)}"
     if source != size and stats.get("source_width"):
         size = f"{source} → {size}"
-    if not stats.get("sent_width"):
+    if "encoded_fps" not in stats:
         text = f"{size} · кодер запускается"
     elif stats.get("network_fps", 0) < 0.5 and stats.get("kbps", 0) < 50:
         # LiveKit pauses a stream nobody is watching (dynacast), so nothing leaves the computer.
@@ -247,6 +247,7 @@ class Backend(QObject):
     showWindowRequested = Signal()
     inviteCreated = Signal(str)
     membersChanged = Signal()
+    nicknameRequested = Signal(int)
     _post = Signal(object)
 
     def __init__(self, parent=None) -> None:
@@ -325,6 +326,7 @@ class Backend(QObject):
         self._cameras: set[int] = set()            # who has a camera on in our call
         self._avatars: dict[int, int] = {}         # user id -> picture version (0: none)
         self._members: list[dict] = []             # people in the current space
+        self._members_raw: list[dict] = []
         self._wake_until: dict[int, float] = {}    # user id -> when they can be woken again
         self._video_info: dict[int, tuple[str, str]] = {}
         QTimer.singleShot(0, self._startup)
@@ -365,6 +367,70 @@ class Backend(QObject):
     @Slot(int)
     def dismissToast(self, toast_id: int) -> None:
         self.toasts.remove(toast_id)
+
+    # --- names: your own, and the ones you give other people ---------------------------------
+
+    @property
+    def _nicknames(self) -> dict[str, str]:
+        """Names you gave other people. Only you see them; kept per server, because ids are per server."""
+        every = self.client_settings.setdefault("nicknames", {})
+        return every.setdefault(self._server_url or "", {})
+
+    def _name(self, user_id: int, real: str) -> str:
+        if user_id == self._me.get("id"):
+            return real
+        return self._nicknames.get(str(user_id)) or real
+
+    @Slot(int)
+    def askNickname(self, user_id: int) -> None:
+        self.nicknameRequested.emit(user_id)
+
+    @Slot(int, result=str)
+    def nickname(self, user_id: int) -> str:
+        return self._nicknames.get(str(user_id), "")
+
+    @Slot(int, result=str)
+    def realName(self, user_id: int) -> str:
+        state = self._voice.get(user_id)
+        if state:
+            return state.get("display_name", "")
+        member = next((m for m in self._members_raw if m["id"] == user_id), None)
+        if member:
+            return member.get("display_name", "")
+        row = next((r for r in self.messages.rows if r["authorId"] == user_id), None)
+        return row.get("authorReal", "") if row else ""
+
+    @Slot(int, str)
+    def setNickname(self, user_id: int, name: str) -> None:
+        """Empty name: show the person's own name again."""
+        name = " ".join((name or "").split())[:60]
+        if name and name != self.realName(user_id):
+            self._nicknames[str(user_id)] = name
+        else:
+            self._nicknames.pop(str(user_id), None)
+        self._save()
+        self._names_changed(user_id)
+
+    def _names_changed(self, user_id: int) -> None:
+        for row in self.messages.rows:
+            if row["authorId"] == user_id:
+                author = self._name(user_id, row.get("authorReal", row["author"]))
+                self.messages.update(row["id"], author=author, initials=initials(author))
+        self._set_members(self._members_raw)
+        self._rebuild()
+
+    @Slot(str)
+    def setDisplayName(self, name: str) -> None:
+        name = " ".join((name or "").split())
+        if not name or name == self._me.get("display_name"):
+            return
+
+        def done(result):
+            self._me = {**self._me, "display_name": result["display_name"],
+                        "initials": initials(result["display_name"])}
+            self.meChanged.emit()
+            self.toast("success", "Имя изменено")
+        self._bg(lambda: self.api.update_profile(name), done)
 
     def _save(self) -> None:
         self.client_settings["ui_settings"] = self.ui
@@ -833,11 +899,12 @@ class Backend(QObject):
         for channel in self._channels:
             members = []
             for state in sorted((v for v in self._voice.values() if v["channel_id"] == channel["id"]),
-                                key=lambda v: v["display_name"].lower()):
+                                key=lambda v: self._name(v["user_id"], v["display_name"]).lower()):
                 uid = state["user_id"]
+                name = self._name(uid, state["display_name"])
                 in_my_call = channel["id"] == self._call_channel
                 members.append({
-                    "id": uid, "name": state["display_name"], "initials": initials(state["display_name"]),
+                    "id": uid, "name": name, "initials": initials(name),
                     "color": avatar_color(uid), "muted": state["muted"] or state.get("server_muted", False),
                     "avatar": self._avatar_url(uid),
                     "deafened": state["deafened"], "speaking": in_my_call and uid in self._speakers,
@@ -867,11 +934,13 @@ class Backend(QObject):
                            "deafened": self._deafened, "server_muted": False})
         rows = []
         mixer = self.call.audio.mixer if self.call else None
-        for state in sorted(states, key=lambda v: (v["user_id"] != my_id, v["display_name"].lower())):
+        for state in sorted(states, key=lambda v: (v["user_id"] != my_id,
+                                                   self._name(v["user_id"], v["display_name"]).lower())):
             uid = state["user_id"]
             is_me = uid == my_id
+            name = self._name(uid, state["display_name"])
             rows.append({
-                "id": uid, "name": state["display_name"], "initials": initials(state["display_name"]),
+                "id": uid, "name": name, "initials": initials(name),
                 "color": avatar_color(uid),
                 "speaking": (self._transmitting and not self._muted) if is_me else uid in self._speakers,
                 "muted": self._muted if is_me else state["muted"], "deafened": self._deafened if is_me else
@@ -953,6 +1022,19 @@ class Backend(QObject):
                 if row["authorId"] == uid:
                     self.messages.update(row["id"], avatar=self._avatar_url(uid))
             self._rebuild()
+        elif kind == "user.renamed":
+            uid, name = event.get("user_id", 0), event.get("display_name", "")
+            if name:
+                if uid in self._voice:
+                    self._voice[uid] = {**self._voice[uid], "display_name": name}
+                self._members_raw = [{**m, "display_name": name} if m["id"] == uid else m for m in self._members_raw]
+                for row in self.messages.rows:
+                    if row["authorId"] == uid:
+                        row["authorReal"] = name
+                if uid == self._me.get("id"):
+                    self._me = {**self._me, "display_name": name, "initials": initials(name)}
+                    self.meChanged.emit()
+                self._names_changed(uid)
         elif kind == "voice.wake":
             self._on_wake(event)
         elif kind == "channel.deleted":
@@ -974,7 +1056,7 @@ class Backend(QObject):
 
     def _identity_changed(self, user_id: int) -> None:
         self._key_changed.add(user_id)
-        name = self._voice.get(user_id, {}).get("display_name", f"Пользователь {user_id}")
+        name = self._name(user_id, self._voice.get(user_id, {}).get("display_name", f"Пользователь {user_id}"))
         self.toast("warning", f"У {name} сменился ключ шифрования. Сверьте код безопасности")
         self._rebuild_stage()
 
@@ -1287,7 +1369,7 @@ class Backend(QObject):
 
     @Slot(int)
     def wakeUser(self, user_id: int) -> None:
-        name = self._voice.get(user_id, {}).get("display_name", "")
+        name = self._name(user_id, self._voice.get(user_id, {}).get("display_name", ""))
 
         def done(result):
             self._wake_until[user_id] = float(result.get("until", time.time() + 60))
@@ -1316,7 +1398,10 @@ class Backend(QObject):
     def _set_members(self, members: list[dict]) -> None:
         for member in members:
             self._avatars[member["id"]] = member.get("avatar_version", 0)
-        self._members = [{**m, "initials": initials(m["display_name"]), "color": avatar_color(m["id"]),
+        self._members_raw = members
+        self._members = [{**m, "display_name": self._name(m["id"], m["display_name"]),
+                          "realName": m["display_name"], "nickname": self._nicknames.get(str(m["id"]), ""),
+                          "initials": initials(self._name(m["id"], m["display_name"])), "color": avatar_color(m["id"]),
                           "avatar": self._avatar_url(m["id"]), "isMe": m["id"] == self._me.get("id")}
                          for m in members]
         self.membersChanged.emit()
@@ -1492,9 +1577,11 @@ class Backend(QObject):
             day = _day_title(moment)
             grouped = bool(previous and previous["authorId"] == message["author_id"] and not previous["deleted"]
                            and previous["day"] == day and moment.timestamp() - previous["_ts"] < 300)
+            author = self._name(message["author_id"], message["author_name"])
             row = {
-                "id": message["id"], "authorId": message["author_id"], "author": message["author_name"],
-                "initials": initials(message["author_name"]), "color": avatar_color(message["author_id"]),
+                "id": message["id"], "authorId": message["author_id"], "author": author,
+                "authorReal": message["author_name"],
+                "initials": initials(author), "color": avatar_color(message["author_id"]),
                 "html": body_html, "raw": message["body"], "time": moment.strftime("%H:%M"), "day": day,
                 "showDay": not previous or previous["day"] != day, "edited": bool(message.get("edited_at")),
                 "deleted": bool(message.get("deleted")), "mine": message["author_id"] == my_id,
@@ -1568,7 +1655,7 @@ class Backend(QObject):
         if not mine:
             _, mentioned = render_message(message["body"], self._me.get("username", ""))
             if mentioned and self.ui.get("notify_mentions", True):
-                self.toast("mention", f"{message['author_name']} упомянул вас: {message['body'][:80]}")
+                self.toast("mention", f"{self._name(message['author_id'], message['author_name'])} упомянул вас: {message['body'][:80]}")
                 self._sound("message", "sound_messages", force=True)
             elif channel_id == self._call_channel:
                 self._sound("message", "sound_messages")
@@ -1764,7 +1851,7 @@ class Backend(QObject):
                     continue
                 code = keys.safety_code_with(uid)
                 if code:
-                    rows.append({"id": uid, "name": state["display_name"], "code": code,
+                    rows.append({"id": uid, "name": self._name(uid, state["display_name"]), "code": code,
                                  "changed": uid in self._key_changed})
             return rows
 

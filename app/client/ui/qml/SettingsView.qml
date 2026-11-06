@@ -171,7 +171,7 @@ Rectangle {
                         onPicked: (v) => backend.setSetting("screen_preset", v)
                     }
                     Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13
-                        text: "Смотреть трансляцию друга: кнопка «Смотреть» на его плитке. Двойной клик разворачивает картинку, F11 — на весь экран. Пока вы не смотрите, видео не скачивается и не тратит интернет." }
+                        text: "Смотреть трансляцию друга: кнопка «Смотреть» на его плитке. Двойной клик разворачивает картинку в окне, F11 или ещё один двойной клик открывают видео на весь экран. Пока вы не смотрите, видео не скачивается и не тратит интернет." }
                                     }
                 }
 
@@ -211,7 +211,7 @@ Rectangle {
                     RowLayout {
                         Layout.fillWidth: true; spacing: 28
                         SliderRow { title: "Размер"; from: 0.7; to: 1.6; value: root.s.overlay_scale; onMoved: (v) => backend.setSetting("overlay_scale", v) }
-                        SliderRow { title: "Прозрачность фона"; from: 0.2; to: 1; value: root.s.overlay_opacity; onMoved: (v) => backend.setSetting("overlay_opacity", v) }
+                        SliderRow { title: "Видимость фона"; from: 0; to: 1; value: root.s.overlay_opacity; onMoved: (v) => backend.setSetting("overlay_opacity", v) }
                     }
                     Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12
                         text: "Оверлей виден в играх в режиме «Оконный без рамки» / «Borderless». В эксклюзивном полноэкранном режиме Windows не позволяет рисовать поверх игры." }
@@ -247,6 +247,15 @@ Rectangle {
                                 Text { text: "@" + (backend.me.username || ""); color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
                             }
                             PrimaryButton { secondary: true; text: "Коды безопасности"; onClicked: root.openSafety() }
+                        }
+                    }
+                    Text { text: "ИМЯ"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Card {
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Так вас видят все друзья: в каналах, в чате и на сцене. Логин для входа не меняется."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Field { id: myName; Layout.fillWidth: true; text: backend.me.display_name || ""; maximumLength: 120; onAccepted: backend.setDisplayName(text) }
+                            PrimaryButton { text: "Сохранить"; enabled: myName.text.trim().length > 0 && myName.text.trim() !== (backend.me.display_name || ""); onClicked: backend.setDisplayName(myName.text) }
                         }
                     }
                     Text { text: "АВАТАРКА"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }
@@ -285,6 +294,7 @@ Rectangle {
                         Field { id: newPwd; Layout.fillWidth: true; placeholderText: "Новый пароль"; echoMode: TextInput.Password }
                         PrimaryButton { text: "Сменить"; enabled: oldPwd.text && newPwd.text.length >= 8; onClicked: backend.changePassword(oldPwd.text, newPwd.text) }
                     }
+                    PasswordMeter { Layout.fillWidth: true; value: newPwd.text }
                                     }
                 }
 

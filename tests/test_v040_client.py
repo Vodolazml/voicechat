@@ -66,3 +66,35 @@ def test_camera_frames_have_their_own_key():
     from app.client.core.media import CAMERA_KEY_OFFSET, camera_key
 
     assert camera_key(7) == CAMERA_KEY_OFFSET + 7 and camera_key(7) != 7
+
+
+def test_real_pointer_bitmaps_are_composed():
+    from app.client.ui.screen import _compose_cursor
+
+    w, h = 4, 2
+    # Colour cursor without alpha: mask says which pixels are see-through.
+    color = (bytes([255, 255, 255, 0]) * (w * h), w, h)
+    mask = (bytes([0, 0, 0, 0]) * 4 + bytes([255, 255, 255, 0]) * 4, w, h)
+    picture, inverted, hx, hy = _compose_cursor(color, mask, 1, 1)
+    assert (hx, hy) == (1, 1) and picture.pixelColor(0, 0).alpha() == 255 and picture.pixelColor(0, 1).alpha() == 0
+    assert inverted is not None and inverted.pixelColor(0, 1).alpha() == 255  # mask on + colour = invert
+    # Monochrome: AND on top, XOR below.
+    and_rows = bytes([0, 0, 0, 0]) * 2 + bytes([255, 255, 255, 0]) * 6
+    xor_rows = bytes([255, 255, 255, 0]) * 1 + bytes([0, 0, 0, 0]) * 1 + bytes([255, 255, 255, 0]) * 6
+    picture, inverted, _, _ = _compose_cursor(None, (and_rows + xor_rows, w, h * 2), 0, 0)
+    assert picture.pixelColor(0, 0) == QColor("white") and picture.pixelColor(1, 0) == QColor("black")
+    assert picture.pixelColor(2, 0).alpha() == 0 and inverted.pixelColor(2, 0).alpha() == 255
+
+
+def test_names_you_give_people_are_yours_only(tmp_path, monkeypatch):
+    from app.client.ui import backend as backend_module
+
+    backend = backend_module.Backend.__new__(backend_module.Backend)
+    backend.client_settings = {}
+    backend._server_url = "https://a.example"
+    backend._me = {"id": 1}
+    backend._nicknames["2"] = "Брат"
+    assert backend._name(2, "Борис") == "Брат" and backend._name(3, "Вера") == "Вера"
+    assert backend._name(1, "Я") == "Я"  # your own name is never replaced
+    backend._server_url = "https://b.example"  # ids are per server
+    assert backend._name(2, "Борис") == "Борис"

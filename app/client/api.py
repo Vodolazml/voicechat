@@ -267,6 +267,9 @@ class ApiClient:
     def set_moderator(self, space_id: int, user_id: int, moderator: bool) -> list[dict[str, Any]]:
         return self.request("PUT", f"/spaces/{space_id}/moderators/{user_id}", json={"moderator": moderator})
 
+    def update_profile(self, display_name: str) -> dict[str, Any]:
+        return self.request("PATCH", "/me", json={"display_name": display_name})
+
     def set_my_avatar(self, picture: bytes) -> dict[str, Any]:
         return self.request("PUT", "/me/avatar", content=picture,
                             headers={"Content-Type": "application/octet-stream"})

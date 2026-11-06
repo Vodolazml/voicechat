@@ -138,13 +138,14 @@ def make_click_through(win_id: int) -> None:
     try:
         user32 = ctypes.windll.user32
         GWL_EXSTYLE = -20
-        WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = 0x80000, 0x20, 0x80
+        WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW = 0x20, 0x80
         WS_EX_NOACTIVATE, WS_EX_TOPMOST = 0x08000000, 0x8
         get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
         put = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
         style = get(win_id, GWL_EXSTYLE)
-        put(win_id, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW
-            | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+        # No WS_EX_LAYERED here: Qt already made the window input-transparent, and forcing the layered
+        # style afterwards switched off its per-pixel transparency (the background opacity stopped working).
+        put(win_id, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
     except Exception:
         logger.debug("Overlay style not applied", exc_info=True)
 

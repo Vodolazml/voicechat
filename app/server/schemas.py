@@ -88,6 +88,10 @@ class MeOut(OrmModel):
     avatar_version: int = 0
 
 
+class ProfileIn(OrmModel):
+    display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
+
+
 class PasswordChangeIn(OrmModel):
     old_password: str = Field(min_length=1, max_length=256)
     new_password: str = Field(min_length=1, max_length=256)

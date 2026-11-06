@@ -117,7 +117,15 @@ Rectangle {
                         Row {
                             visible: !msg.model.grouped
                             spacing: 8
-                            Text { text: msg.model.author; color: msg.model.color; font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold }
+                            Text {
+                                text: msg.model.author; color: msg.model.color; font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold
+                                HoverHandler { enabled: !msg.model.mine; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { enabled: !msg.model.mine; acceptedButtons: Qt.LeftButton | Qt.RightButton; onTapped: authorMenu.popup() }
+                                StyledMenu {
+                                    id: authorMenu
+                                    MenuItem { text: "Изменить имя для себя"; onTriggered: backend.askNickname(msg.model.authorId) }
+                                }
+                            }
                             Text { text: msg.model.time; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11; anchors.baseline: parent.children[0].baseline }
                         }
                         Text {

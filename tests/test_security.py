@@ -31,13 +31,16 @@ def test_rejects_weak_password() -> None:
     with pytest.raises(HTTPException):
         validate_password_strength("short")
     with pytest.raises(HTTPException):
-        validate_password_strength("onlyletters")
+        validate_password_strength("Password")  # a well-known one
+    with pytest.raises(HTTPException):
+        validate_password_strength("aaaabbbb")  # too few different characters
     with pytest.raises(HTTPException):
         validate_password_strength("Ab1!xyz")  # 7 characters
 
 
 def test_eight_character_password_is_enough() -> None:
     validate_password_strength("Ab1!wxyz")
+    validate_password_strength("solnyshko")  # letters only are fine now, no digits or symbols needed
 
 
 def test_token_roundtrip() -> None:

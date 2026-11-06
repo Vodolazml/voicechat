@@ -49,12 +49,6 @@ Item {
                 text: backend.serverUrl
             }
             Field {
-                id: code
-                Layout.fillWidth: true
-                visible: root.inviteMode
-                placeholderText: "Код приглашения, если есть (можно ввести позже)"
-            }
-            Field {
                 id: username
                 Layout.fillWidth: true
                 placeholderText: "Логин"
@@ -70,10 +64,11 @@ Item {
             Field {
                 id: password
                 Layout.fillWidth: true
-                placeholderText: root.inviteMode ? "Пароль: от 8 символов, буквы и цифра" : "Пароль"
+                placeholderText: root.inviteMode ? "Пароль: от 8 символов" : "Пароль"
                 echoMode: TextInput.Password
                 onAccepted: submit()
             }
+            PasswordMeter { Layout.fillWidth: true; visible: root.inviteMode && password.text.length > 0; value: password.text }
 
             CheckBox {
                 id: remember
@@ -129,7 +124,7 @@ Item {
 
     function submit() {
         if (root.inviteMode)
-            backend.register(server.text, code.text, username.text, displayName.text, password.text, remember.checked)
+            backend.register(server.text, "", username.text, displayName.text, password.text, remember.checked)
         else
             backend.login(server.text, username.text, password.text, remember.checked)
     }

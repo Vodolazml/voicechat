@@ -105,14 +105,24 @@ def decode_token(token: str) -> TokenPayload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется повторный вход") from exc
 
 
+# The passwords people try first; a dictionary attack starts with exactly these.
+COMMON_PASSWORDS = {
+    "password", "password1", "passw0rd", "qwertyui", "qwerty123", "qwertyuiop", "asdfghjk", "zxcvbnm1",
+    "12345678", "123456789", "1234567890", "87654321", "11111111", "00000000", "1q2w3e4r", "1qaz2wsx",
+    "abcd1234", "abc12345", "iloveyou", "sunshine", "princess", "football", "baseball", "superman",
+    "starwars", "welcome1", "admin123", "letmein1", "trustno1", "dragon12", "monkey12", "michael1",
+    "йцукенгш", "пароль12", "qwerty12", "aaaaaaaa", "q1w2e3r4", "zaq12wsx", "1q2w3e4r5t", "password123",
+}
+
+
 def validate_password_strength(password: str) -> None:
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
     if len(password) > 256:
         raise HTTPException(status_code=400, detail="Пароль слишком длинный")
-    # Letters and a digit; no upper-case/symbol puzzle (friends kept failing it at sign-up). Length and
-    # Argon2 with login rate limits do the real work.
-    if not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
-        raise HTTPException(status_code=400, detail="В пароле нужны буквы и хотя бы одна цифра")
+    # No required digits, capitals or symbols (friends kept failing that at sign-up): length, a few
+    # different characters, not a well-known password. Argon2 and login rate limits do the rest.
+    if password.lower() in COMMON_PASSWORDS:
+        raise HTTPException(status_code=400, detail="Этот пароль слишком известный, придумайте другой")
     if len(set(password)) < 4:
         raise HTTPException(status_code=400, detail="Пароль слишком простой")

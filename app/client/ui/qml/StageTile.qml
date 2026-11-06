@@ -133,6 +133,7 @@ Rectangle {
             background: null
         }
         MenuItem { text: tile.person.localMuted ? "Снова слышать" : "Заглушить у себя"; onTriggered: backend.setUserLocallyMuted(tile.person.id, !tile.person.localMuted) }
+        MenuItem { text: "Изменить имя для себя"; onTriggered: backend.askNickname(tile.person.id) }
         MenuItem { visible: tile.person.streaming; height: visible ? implicitHeight : 0; text: tile.person.watching ? "Перестать смотреть" : "Смотреть трансляцию"; onTriggered: backend.watch(tile.person.id, !tile.person.watching) }
         MenuSeparator { visible: backend.canModerate; contentItem: Rectangle { implicitHeight: 1; color: Theme.line } }
         MenuItem { visible: backend.canModerate; height: visible ? implicitHeight : 0; text: tile.person.serverMuted ? "Разрешить говорить" : "Заглушить для всех"; onTriggered: backend.serverMute(tile.person.id, !tile.person.serverMuted) }

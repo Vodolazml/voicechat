@@ -90,6 +90,8 @@ def test_events_stream_shows_join_and_leave_immediately(client):
         assert joined["type"] == "voice.state" and joined["state"]["user_id"] == 1
         client.post(f"/channels/{voice[0]}/disconnect", headers=admin)
         assert ws.receive_json() == {"type": "voice.left", "channel_id": voice[0], "user_id": 1}
+        ws.send_text("x" * 2000)  # the server closes the stream itself (see the chat test below)
+        assert ws.receive()["type"] == "websocket.close"
 
 
 def test_events_requires_auth_message(client):

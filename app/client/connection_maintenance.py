@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from time import monotonic
 
 
 class ConnectionMaintenance:
@@ -23,13 +22,9 @@ class ConnectionMaintenance:
             raise RuntimeError("Не удалось завершить обслуживание соединения")
 
     def _run(self):
-        renewed = monotonic()
+        # Access tokens are short-lived; ApiClient refreshes them transparently on 401.
         while not self._stop.is_set():
             try:
-                if monotonic() - renewed > 600:
-                    data = self.api.request("POST", "/auth/renew")
-                    self.api.token = data["access_token"]
-                    renewed = monotonic()
                 muted, deafened, speaking = self.flags()
                 try:
                     self.api.update_voice(self.channel_id, muted, deafened, speaking)

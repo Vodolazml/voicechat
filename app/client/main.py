@@ -452,7 +452,7 @@ class LoginDialog(QDialog):
             configured_server_url = saved_server_url
         if configured_server_url:
             try:
-                self.api.set_base_url(configured_server_url, allow_insecure_http=self.packaged_config.allow_insecure_http)
+                self.api.set_base_url(configured_server_url)
             except ApiError:
                 pass
         
@@ -528,12 +528,9 @@ class LoginDialog(QDialog):
     def try_login(self) -> None:
         try:
             if self.packaged_config.server_url and self.packaged_config.lock_server_url:
-                self.api.set_base_url(
-                    self.packaged_config.server_url,
-                    allow_insecure_http=self.packaged_config.allow_insecure_http,
-                )
+                self.api.set_base_url(self.packaged_config.server_url)
             else:
-                self.api.set_base_url(self.server.text(), allow_insecure_http=self.packaged_config.allow_insecure_http)
+                self.api.set_base_url(self.server.text())
             if not self.ensure_update_checked():
                 return
             if self.remembered_refresh and not self.password.text():
@@ -556,9 +553,9 @@ class LoginDialog(QDialog):
                     self.client_settings["remembered_refresh_dpapi"] = protect_text(self.api.refresh_token)
                     self.client_settings["remembered_server_url"] = self.api.base_url
                     self.client_settings.pop("remembered_password_dpapi", None)
+                    self.api.on_refresh_token = self.persist_rotated_refresh
                 except CredentialError:
                     self.client_settings.pop("remembered_password_dpapi", None)
-                # В будущем здесь можно сохранить encrypted token
             else:
                 self.client_settings.pop("remembered_username", None)
                 self.client_settings.pop("remember_me", None)
@@ -571,6 +568,15 @@ class LoginDialog(QDialog):
             self.accept()
         except ApiError as exc:
             self.error.setText(str(exc))
+
+    def persist_rotated_refresh(self, token: str) -> None:
+        """The server rotates refresh tokens; keep the stored one current or the next start is signed out."""
+        try:
+            settings = load_client_settings()
+            settings["remembered_refresh_dpapi"] = protect_text(token)
+            save_client_settings(settings)
+        except (CredentialError, OSError):
+            pass
 
     def ensure_update_checked(self) -> bool:
         if self.update_checked_for == self.api.base_url:
@@ -1134,7 +1140,7 @@ class MainWindow(QMainWindow):
             e2ee = self.ensure_e2ee_for_channel(channel_id, force=True)
             _key_id, outgoing_key = e2ee.ensure_outgoing_key()
             self.voice_audio = VoiceAudioClient(
-                media_credentials=lambda: self.api.request("POST", f"/channels/{channel_id}/video-token?audio=true"),
+                media_credentials=lambda: self.api.media_credentials(channel_id, audio=True),
                 ws_url=self.api.voice_ws_url(channel_id),
                 ws_headers=self.api.ws_headers,
                 channel_id=channel_id,
@@ -1178,7 +1184,7 @@ class MainWindow(QMainWindow):
         e2ee = self.ensure_e2ee_for_channel(channel_id)
         _key_id, outgoing_key = e2ee.ensure_outgoing_key()
         self.screen_client = LiveKitScreenClient(
-            lambda: self.api.request("POST", f"/channels/{channel_id}/video-token"),
+            lambda: self.api.media_credentials(channel_id, audio=False),
             int(self.me["id"]),
             outgoing_key,
             lambda user_id: self.media_key_for_sender(channel_id, user_id),

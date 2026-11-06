@@ -11,7 +11,11 @@ if "%VERSION%"=="" (
     exit /b 1
 )
 
-if "%VOICECHAT_RELEASE_SERVER_URL%"=="" set "VOICECHAT_RELEASE_SERVER_URL=http://72.35.246.230:8765"
+if "%VOICECHAT_RELEASE_SERVER_URL%"=="" (
+    echo Set VOICECHAT_RELEASE_SERVER_URL to your server, e.g. https://chat.example.org
+    popd
+    exit /b 1
+)
 
 set "ISCC="
 where iscc >nul 2>&1
@@ -20,6 +24,13 @@ if "%ISCC%"=="" if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" set "IS
 if "%ISCC%"=="" (
     echo Inno Setup compiler is not installed or is not in PATH.
     echo Install Inno Setup 6, then run this script again.
+    popd
+    exit /b 1
+)
+
+python -m pip install --no-deps -r requirements-native.txt
+if errorlevel 1 (
+    echo Failed to install RNNoise. Strong noise suppression would be missing.
     popd
     exit /b 1
 )
@@ -36,7 +47,7 @@ if errorlevel 1 (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$cfg=[ordered]@{server_url=$env:VOICECHAT_RELEASE_SERVER_URL;lock_server_url=$true;allow_insecure_http=$true}|ConvertTo-Json; Set-Content -Encoding UTF8 -Path 'dist\PrivateVoiceChat\client_config.json' -Value $cfg"
+  "$cfg=[ordered]@{server_url=$env:VOICECHAT_RELEASE_SERVER_URL;lock_server_url=$true}|ConvertTo-Json; Set-Content -Encoding UTF8 -Path 'dist\PrivateVoiceChat\client_config.json' -Value $cfg"
 if errorlevel 1 (
     echo Failed to write client_config.json.
     popd

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from fastapi import HTTPException, status
 from .config import get_settings
 
@@ -25,8 +25,21 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str) -> bool:
     try:
         return password_hasher.verify(password_hash, password)
-    except VerifyMismatchError:
+    except (VerifyMismatchError, InvalidHashError):
         return False
+
+
+_DUMMY_HASH = password_hasher.hash(secrets.token_urlsafe(24))
+
+
+def burn_password_check(password: str) -> None:
+    """Spend the same Argon2 time as a real check so login timing does not reveal which usernames exist."""
+    verify_password(password, _DUMMY_HASH)
+
+
+def hash_secret_token(value: str) -> str:
+    """Hash for high-entropy tokens (refresh tokens, invite codes) stored in the database."""
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _b64(data: bytes) -> str:
@@ -43,11 +56,12 @@ def password_fingerprint(password_hash: str) -> str:
     return _b64(digest)[:32]
 
 
-def create_token(user_id: int, password_hash: str) -> str:
+def create_token(user_id: int, password_hash: str, session_id: int = 0) -> str:
     settings = get_settings()
     now = int(time.time())
     payload = {
         "sub": str(user_id),
+        "sid": session_id,
         "iat": now,
         "exp": now + settings.access_token_minutes * 60,
         "jti": secrets.token_urlsafe(16),
@@ -64,6 +78,7 @@ class TokenPayload:
     expires_at: int
     jti: str
     password_fingerprint: str
+    session_id: int = 0
 
 
 def decode_token(token: str) -> TokenPayload:
@@ -84,24 +99,30 @@ def decode_token(token: str) -> TokenPayload:
             expires_at=int(raw["exp"]),
             jti=str(raw["jti"]),
             password_fingerprint=str(raw["pwd"]),
+            session_id=int(raw.get("sid", 0)),
         )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Требуется повторный вход") from exc
 
 
+# The passwords people try first; a dictionary attack starts with exactly these.
+COMMON_PASSWORDS = {
+    "password", "password1", "passw0rd", "qwertyui", "qwerty123", "qwertyuiop", "asdfghjk", "zxcvbnm1",
+    "12345678", "123456789", "1234567890", "87654321", "11111111", "00000000", "1q2w3e4r", "1qaz2wsx",
+    "abcd1234", "abc12345", "iloveyou", "sunshine", "princess", "football", "baseball", "superman",
+    "starwars", "welcome1", "admin123", "letmein1", "trustno1", "dragon12", "monkey12", "michael1",
+    "йцукенгш", "пароль12", "qwerty12", "aaaaaaaa", "q1w2e3r4", "zaq12wsx", "1q2w3e4r5t", "password123",
+}
+
+
 def validate_password_strength(password: str) -> None:
-    if len(password) < 12:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 12 символов")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Пароль должен быть не короче 8 символов")
     if len(password) > 256:
         raise HTTPException(status_code=400, detail="Пароль слишком длинный")
-    checks = (
-        any(c.islower() for c in password),
-        any(c.isupper() for c in password),
-        any(c.isdigit() for c in password),
-        any(not c.isalnum() and not c.isspace() for c in password),
-    )
-    if not all(checks):
-        raise HTTPException(
-            status_code=400,
-            detail="Пароль должен содержать строчные и заглавные буквы, цифру и спецсимвол",
-        )
+    # No required digits, capitals or symbols (friends kept failing that at sign-up): length, a few
+    # different characters, not a well-known password. Argon2 and login rate limits do the rest.
+    if password.lower() in COMMON_PASSWORDS:
+        raise HTTPException(status_code=400, detail="Этот пароль слишком известный, придумайте другой")
+    if len(set(password)) < 4:
+        raise HTTPException(status_code=400, detail="Пароль слишком простой")

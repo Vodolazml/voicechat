@@ -24,13 +24,15 @@ API будет доступен на `http://127.0.0.1:8765`.
 Клиент запускается отдельно:
 
 ```powershell
-python -m app.client.main
+python run_client.py
 ```
 
 Первый пользователь создается автоматически:
 
 - логин: `admin`;
-- пароль: значение `VOICECHAT_BOOTSTRAP_PASSWORD` из `.env`.
+- пароль: значение `VOICECHAT_BOOTSTRAP_PASSWORD` из `.env`, а если оно пустое — одноразовый пароль, который сервер печатает в консоль при первом запуске.
+
+В `.env` для разработки обязательно `VOICECHAT_ENVIRONMENT=development` и свой `VOICECHAT_SECRET_KEY` (`python -c "import secrets; print(secrets.token_urlsafe(48))"`).
 
 ## Git
 

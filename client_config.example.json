@@ -1,5 +1,4 @@
 {
-  "server_url": "http://194.85.249.53:8765",
-  "lock_server_url": true,
-  "allow_insecure_http": true
+  "server_url": "https://chat.example.org",
+  "lock_server_url": true
 }

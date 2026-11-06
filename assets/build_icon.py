@@ -51,7 +51,9 @@ def build_ico(png_frames: list[tuple[int, bytes]]) -> bytes:
 def main() -> None:
     app = QGuiApplication.instance() or QGuiApplication([])
     renderer = QSvgRenderer(str(ROOT / "logo.svg"))
-    frames = [(size, render_png(renderer, size)) for size in SIZES]
+    # Small sizes (taskbar, tray, title bar) use a bolder three-bar mark that stays readable.
+    small = QSvgRenderer(str(ROOT / "logo_small.svg"))
+    frames = [(size, render_png(small if size <= 32 else renderer, size)) for size in SIZES]
     (ROOT / "app_icon.ico").write_bytes(build_ico(frames))
     (ROOT / "app_icon_256.png").write_bytes(dict(frames)[256])
     print("Wrote", ROOT / "app_icon.ico")

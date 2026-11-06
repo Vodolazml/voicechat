@@ -1,4 +1,6 @@
 from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 USERNAME_PATTERN = r"^[a-zA-Z0-9_.-]+$"
@@ -9,9 +11,13 @@ class OrmModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+DEVICE_NAME_PATTERN = r"^[^\x00-\x1f\x7f<>]*$"
+
+
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=64, pattern=USERNAME_PATTERN)
     password: str = Field(min_length=1, max_length=256)
+    device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
 
 
 class TokenOut(OrmModel):
@@ -22,6 +28,44 @@ class TokenOut(OrmModel):
 
 class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=256)
+
+
+class SessionOut(BaseModel):
+    id: int
+    device_name: str
+    ip_address: str
+    created_at: datetime
+    last_used_at: datetime
+    current: bool
+
+
+class InviteCreateIn(BaseModel):
+    space_id: int | None = None
+    is_admin: bool = False
+    note: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
+
+
+class InviteOut(BaseModel):
+    id: int
+    note: str
+    is_admin: bool
+    space_id: int | None
+    created_at: datetime
+    expires_at: datetime
+    used: bool
+
+
+class InviteCreatedOut(InviteOut):
+    code: str
+
+
+class RegisterIn(BaseModel):
+    # Empty: open sign-up. Otherwise a one-time invite or a space's invite code.
+    code: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_ -]*$")
+    username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
+    display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    password: str = Field(min_length=8, max_length=256)
+    device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
 
 
 class ClientUpdateOut(BaseModel):
@@ -40,17 +84,23 @@ class MeOut(OrmModel):
     display_name: str
     must_change_password: bool
     permissions: list[str]
+    is_owner: bool = False
+    avatar_version: int = 0
+
+
+class ProfileIn(OrmModel):
+    display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
 
 
 class PasswordChangeIn(OrmModel):
-    old_password: str
-    new_password: str
+    old_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
 
 
 class UserCreateIn(OrmModel):
     username: str = Field(min_length=3, max_length=64, pattern=USERNAME_PATTERN)
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
-    temporary_password: str | None = Field(default=None, min_length=12, max_length=256)
+    temporary_password: str | None = Field(default=None, min_length=8, max_length=256)
     is_admin: bool = False
 
 
@@ -73,12 +123,59 @@ class SpaceCreateIn(OrmModel):
 class SpaceOut(OrmModel):
     id: int
     name: str
+    can_manage: bool = False
+    is_mine: bool = False
+    member_count: int = 0
+    # Only for people who manage the space.
+    invite_code: str | None = None
+    role: str = "member"  # admin (creator, owner), moderator or member
+    created_by: int = 0
+    avatar_version: int = 0
+    max_share_quality: str = "1440p60"
+    camera_allowed: bool = True
+
+
+SHARE_QUALITY_PATTERN = r"^(720p30|1080p30|1080p60|1440p60|2160p30)$"
+
+
+class SpaceUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    max_share_quality: str | None = Field(default=None, pattern=SHARE_QUALITY_PATTERN)
+    camera_allowed: bool | None = None
+
+
+class SpaceMemberOut(BaseModel):
+    id: int
+    display_name: str
+    role: str
+    avatar_version: int = 0
+
+
+class ModeratorIn(BaseModel):
+    moderator: bool
+
+
+class SpaceJoinIn(BaseModel):
+    code: str = Field(min_length=4, max_length=32, pattern=r"^[A-Za-z0-9 -]+$")
 
 
 class ChannelCreateIn(OrmModel):
     space_id: int
     name: str = Field(min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
     type: str = Field(pattern=r"^(text|voice)$")
+    is_private: bool = False
+    user_limit: int = Field(default=0, ge=0, le=99)
+
+
+class ChannelUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    position: int | None = Field(default=None, ge=0, le=10_000)
+    user_limit: int | None = Field(default=None, ge=0, le=99)
+    is_private: bool | None = None
+
+
+class ChannelOrderIn(BaseModel):
+    channel_ids: list[int] = Field(min_length=1, max_length=500)
 
 
 class ChannelOut(OrmModel):
@@ -86,6 +183,9 @@ class ChannelOut(OrmModel):
     space_id: int
     name: str
     type: str
+    position: int = 0
+    user_limit: int = 0
+    is_private: bool = False
 
 
 class DeviceKeyIn(BaseModel):
@@ -131,6 +231,17 @@ class MessageOut(OrmModel):
     body: str
     created_at: datetime
     edited_at: datetime | None
+    deleted: bool = False
+    mentions: list[int] = []
+
+
+class ReadIn(BaseModel):
+    message_id: int = Field(ge=0)
+
+
+class UnreadOut(BaseModel):
+    channel_id: int
+    count: int
 
 
 class VoiceJoinIn(OrmModel):
@@ -142,7 +253,7 @@ class VoiceStateIn(OrmModel):
     muted: bool
     deafened: bool
     speaking: bool = False
-    status: str = "connected"
+    status: Literal["connected", "reconnecting"] = "connected"
 
 
 class VoiceStateOut(OrmModel):
@@ -152,7 +263,17 @@ class VoiceStateOut(OrmModel):
     muted: bool
     deafened: bool
     speaking: bool
+    server_muted: bool = False
     status: str
+    avatar_version: int = 0
+
+
+class MoveIn(BaseModel):
+    channel_id: int
+
+
+class ServerMuteIn(BaseModel):
+    muted: bool
 
 
 class AuditOut(OrmModel):

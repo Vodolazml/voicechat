@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- VoiceChat mark: a white voice wave on a coral-to-pink tile. Bolder version for 16-32 px icons. -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="256" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7849"/>
+      <stop offset="1" stop-color="#ff3d9a"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="85" fill="url(#g)"/>
+  <g fill="#ffffff">
+    <rect x="25.0" y="100.0" width="30.0" height="56.0" rx="15.0"/>
+    <rect x="69.0" y="68.0" width="30.0" height="120.0" rx="15.0"/>
+    <rect x="113.0" y="36.0" width="30.0" height="184.0" rx="15.0"/>
+    <rect x="157.0" y="68.0" width="30.0" height="120.0" rx="15.0"/>
+    <rect x="201.0" y="100.0" width="30.0" height="56.0" rx="15.0"/>
+  </g>
+</svg>

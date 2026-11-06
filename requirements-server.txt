@@ -6,3 +6,5 @@ pydantic-settings==2.14.2
 SQLAlchemy==2.0.48
 uvicorn[standard]==0.41.0
 livekit-api==1.2.1
+alembic==1.18.4
+psycopg[binary]==3.2.13

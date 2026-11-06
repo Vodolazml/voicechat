@@ -23,7 +23,6 @@ env/
 .env.*
 !.env.example
 !.env.production.example
-!.env.ip.example
 client_config.json
 *.key
 *.pem
@@ -48,3 +47,7 @@ Desktop.ini
 # Docker local state
 .docker-data/
 deploy/livekit.generated.yaml
+
+# Release signing key: keep a backup, never commit it.
+release-signing.key
+*.key

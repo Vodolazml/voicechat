@@ -31,7 +31,16 @@ def test_rejects_weak_password() -> None:
     with pytest.raises(HTTPException):
         validate_password_strength("short")
     with pytest.raises(HTTPException):
-        validate_password_strength("NoSpecialPass123")
+        validate_password_strength("Password")  # a well-known one
+    with pytest.raises(HTTPException):
+        validate_password_strength("aaaabbbb")  # too few different characters
+    with pytest.raises(HTTPException):
+        validate_password_strength("Ab1!xyz")  # 7 characters
+
+
+def test_eight_character_password_is_enough() -> None:
+    validate_password_strength("Ab1!wxyz")
+    validate_password_strength("solnyshko")  # letters only are fine now, no digits or symbols needed
 
 
 def test_token_roundtrip() -> None:
@@ -54,7 +63,10 @@ def test_token_is_bound_to_current_password_hash() -> None:
         user = models.User(username="admin", display_name="Администратор", password_hash=old_hash)
         db.add(user)
         db.flush()
-        token = create_token(user.id, old_hash)
+        session = models.LoginSession(user_id=user.id, password_fingerprint="x", expires_at=models.utcnow())
+        db.add(session)
+        db.flush()
+        token = create_token(user.id, old_hash, session.id)
 
         assert user_from_token(db, token).id == user.id
 

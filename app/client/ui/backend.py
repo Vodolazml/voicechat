@@ -548,6 +548,7 @@ class Backend(QObject):
     myFingerprint = Property(str, lambda self: self.keys.identity.fingerprint if self.keys else "", notify=meChanged)
     updateInfo = Property("QVariantMap", lambda self: self._update, notify=updateChanged)
     updateProgress = Property(float, lambda self: self._update_progress, notify=updateChanged)
+    updateSizes = Property(str, lambda self: getattr(self, "_update_sizes", ""), notify=updateChanged)
 
     spacesModel = Property(QObject, lambda self: self.spaces, constant=True)
     channelsModel = Property(QObject, lambda self: self.channels, constant=True)
@@ -1920,7 +1921,9 @@ class Backend(QObject):
                 return
             last_report[0] = now
             value = done / total if total else 0.0
-            self._ui(lambda: (setattr(self, "_update_progress", value), self.updateChanged.emit()))
+            sizes = f"{done / 1048576:.0f} из {total / 1048576:.0f} МБ" if total else f"{done / 1048576:.0f} МБ"
+            self._ui(lambda: (setattr(self, "_update_progress", value), setattr(self, "_update_sizes", sizes),
+                              self.updateChanged.emit()))
 
         def work():
             path = download_update(info, progress)

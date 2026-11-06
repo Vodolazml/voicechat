@@ -241,8 +241,12 @@ def test_old_update_installers_are_removed(tmp_path, monkeypatch):
         (tmp_path / name).write_bytes(b"x")
     keep = tmp_path / "PrivateVoiceChat-0.3.1-setup.exe"
     keep.write_bytes(b"x")
+    old = time.time() - 3 * 86400
+    os.utime(tmp_path / "x.partial", (old, old))
+    (tmp_path / "fresh.partial").write_bytes(b"x")  # a download cut short today: continued next start
     updater.remove_old_installers(keep=keep)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["PrivateVoiceChat-0.3.1-setup.exe", "notes.txt"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["PrivateVoiceChat-0.3.1-setup.exe", "fresh.partial",
+                                                          "notes.txt"]
 
 
 def test_voice_prompts_load_as_whole_frames(tmp_path):

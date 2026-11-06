@@ -83,7 +83,9 @@ Window {
             Text {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
-                text: splash.downloading ? Math.round(backend.updateProgress * 100) + "% · программа перезапустится сама"
+                text: splash.downloading ? Math.round(backend.updateProgress * 100) + "%"
+                                           + (backend.updateSizes ? " · " + backend.updateSizes : "")
+                                           + "\nпрограмма перезапустится сама"
                                          : "Версия " + backend.version
                 color: Theme.muted; font.family: Theme.font; font.pixelSize: 12
             }

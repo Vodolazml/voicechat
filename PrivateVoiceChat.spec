@@ -5,7 +5,31 @@ datas = []
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('PySide6')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+# collect_all takes every Qt module (WebEngine alone is well over 100 MB). The app uses Core, Gui, Widgets,
+# Network, Qml, Quick (Controls, Layouts, Shapes, Dialogs, Window) and Multimedia; leave out what nothing
+# imports, so updates download much less.
+_UNUSED_QT = ('WebEngine', 'WebView', 'WebChannel', 'WebSockets', 'Qt3D', 'Qt63D', 'Quick3D', 'Pdf', 'Designer',
+              'Charts', 'DataVisualization', 'Graphs', 'Location', 'Positioning', 'Bluetooth', 'Nfc',
+              'SerialPort', 'SerialBus', 'Sensors', 'RemoteObjects', 'Scxml', 'StateMachine', 'VirtualKeyboard',
+              'Lottie', 'TextToSpeech', 'HttpServer', 'SpatialAudio', 'Help', 'UiTools', 'NetworkAuth',
+              'QtTest', 'QuickTest', 'Sql', 'QmlLocalStorage',
+              'QmlXmlListModel', 'CanvasPainter', 'Wayland', 'EglFS', 'assistant', 'designer',
+              'linguist', 'lupdate', 'lrelease', 'qmlls', 'qmlformat', 'qmllint', 'qmlcachegen', 'qmltyperegistrar',
+              'balsam', 'svgtoqml', 'lottietoqml')
+
+
+def _qt_used(entry) -> bool:
+    path = str(entry[0]).replace('\\', '/')
+    name = path.rsplit('/', 1)[-1]
+    if '/translations/' in path and not ('qt_ru' in name or 'qtbase_ru' in name or 'qtmultimedia_ru' in name
+                                         or 'qtdeclarative_ru' in name):
+        return False
+    return not any(part in path for part in _UNUSED_QT)
+
+
+datas += [d for d in tmp_ret[0] if _qt_used(d)]
+binaries += [b for b in tmp_ret[1] if _qt_used(b)]
+hiddenimports += [m for m in tmp_ret[2] if not any(part in m for part in _UNUSED_QT)]
 tmp_ret = collect_all('sounddevice')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -58,7 +82,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['PySide6.' + m for m in ('QtWebEngineCore', 'QtWebEngineWidgets', 'QtWebEngineQuick', 'Qt3DCore',
+              'QtPdf', 'QtCharts', 'QtDataVisualization', 'QtDesigner', 'QtQuick3D', 'QtGraphs', 'QtLocation',
+              'QtBluetooth', 'QtSensors', 'QtSql', 'QtTest', 'QtHelp')],
     noarchive=False,
     optimize=0,
 )

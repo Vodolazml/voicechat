@@ -13,6 +13,17 @@ ListView {
     signal renameRequested(int channelId, string name, int limit, string type)
     signal deleteRequested(int channelId, string name)
 
+    // One menu for the whole list, not one per member row: the rows under a voice channel are rebuilt
+    // every time someone starts or stops speaking, and a menu living inside a row vanished with it.
+    function openMemberMenu(person) {
+        memberMenu.userId = person.id
+        memberMenu.name = person.name
+        memberMenu.muted = person.muted
+        memberMenu.deafened = person.deafened
+        memberMenu.popup()
+    }
+    ModerationMenu { id: memberMenu }
+
     section.property: "type"
     section.delegate: Item {
         width: list.width; height: 34
@@ -120,9 +131,8 @@ ListView {
                 TapHandler {
                     acceptedButtons: Qt.RightButton
                     enabled: !member.modelData.isMe
-                    onTapped: modMenu.popup()
+                    onTapped: list.openMemberMenu(member.modelData)
                 }
-                ModerationMenu { id: modMenu; userId: member.modelData.id; name: member.modelData.name; muted: member.modelData.muted; deafened: member.modelData.deafened }
             }
         }
         Item { width: 1; height: channelItem.voice && channelItem.model.memberCount > 0 ? 4 : 0 }

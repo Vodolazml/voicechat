@@ -183,6 +183,10 @@ def test_chat_in_voice_channel_is_live_and_encrypted_at_rest(client):
         event = ws.receive_json()
         assert event["type"] == "message.created"
         assert event["message"]["body"].startswith("Заходи") and event["message"]["mentions"] == [2]
+        # Let the server end the stream itself (an oversized frame), so the test client never has to
+        # cancel a handler that is still running (that race made this test fail now and then).
+        ws.send_text("x" * 2000)
+        assert ws.receive()["type"] == "websocket.close"
     with presence.SessionLocal() as db:
         from app.server import models
         stored = db.get(models.Message, sent.json()["id"]).body

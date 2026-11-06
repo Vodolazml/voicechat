@@ -572,6 +572,7 @@ class Backend(QObject):
             self._continue_startup()
             return
         self._set("_view", "updating", self.viewChanged)
+        self._watch_update()
 
         def got(info) -> None:
             if info.update_available and _newer(info.latest_version, APP_VERSION) and info.download_url:
@@ -583,6 +584,28 @@ class Backend(QObject):
                 self._continue_startup()
         # Offline or the server is down: start normally, the update waits for the next launch.
         self._bg(self.api.check_update, got, lambda exc: self._continue_startup())
+
+    def _watch_update(self) -> None:
+        """Never stay stuck on the launcher: if the check or the download makes no progress for two minutes,
+        start the installed version (the update is tried again next time)."""
+        seen = [self._update_progress, time.monotonic()]
+
+        def check() -> None:
+            if self._view != "updating":
+                timer.stop()
+                return
+            if self._update_progress != seen[0]:
+                seen[0], seen[1] = self._update_progress, time.monotonic()
+                return
+            if time.monotonic() - seen[1] > 120:
+                timer.stop()
+                logger.warning("Update stalled at %.0f%%, starting the installed version",
+                               max(0.0, self._update_progress) * 100)
+                self._update_progress = -1.0
+                self.updateChanged.emit()
+                self._continue_startup()
+        timer = QTimer(self, interval=10_000, timeout=check)
+        timer.start()
 
     def _can_self_update(self) -> bool:
         return (bool(getattr(sys, "frozen", False)) and sys.platform == "win32" and bool(self._server_url)
@@ -1886,17 +1909,39 @@ class Backend(QObject):
             return
         from app.client.updater import download_update
 
+        last_report = [0.0]
+
         def progress(done: int, total: int) -> None:
+            # A few updates a second: one per received chunk flooded the UI thread with tens of thousands
+            # of events for a 200 MB installer.
+            now = time.monotonic()
+            if now - last_report[0] < 0.2 and done < total:
+                return
+            last_report[0] = now
             value = done / total if total else 0.0
             self._ui(lambda: (setattr(self, "_update_progress", value), self.updateChanged.emit()))
+
+        def work():
+            path = download_update(info, progress)
+            logger.info("Update %s downloaded: %s", info.latest_version, path)
+            return path
 
         def finished(path):
             import subprocess
 
+            if on_failure is not None and self._view != "updating":
+                logger.info("Update %s arrived after the app had started; it installs next launch",
+                            info.latest_version)
+                return
             logger.info("Installing update %s", info.latest_version)
+            try:
+                # Silent install closes this app, replaces the files and starts the new version again.
+                subprocess.Popen([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Update installer did not start")
+                failed(exc)
+                return
             self.shutdown()
-            # Silent install closes this app, replaces the files and starts the new version again.
-            subprocess.Popen([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
             QGuiApplication.quit()
 
         def failed(exc):
@@ -1910,7 +1955,7 @@ class Backend(QObject):
                 self.toast("error", f"Обновление не установлено: {exc}")
         self._update_progress = 0.0
         self.updateChanged.emit()
-        self._bg(lambda: download_update(info, progress), finished, failed)
+        self._bg(work, finished, failed)
 
     @Slot()
     def saveReport(self) -> None:

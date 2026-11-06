@@ -7,6 +7,9 @@ Window {
     id: splash
     width: 300; height: 340
     flags: Qt.SplashScreen | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    // Declared inside the (still hidden) main window, Qt would make that its transient parent, and a
+    // transient window is not shown before its parent is: in 0.4.0 the splash never appeared.
+    transientParent: null
     color: "transparent"
     title: "VoiceChat"
     x: Screen.virtualX + (Screen.width - width) / 2

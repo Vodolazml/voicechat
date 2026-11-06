@@ -63,12 +63,24 @@ ApplicationWindow {
     OverlayWindow {}
 
     UpdateSplash {
-        visible: window.starting && (!startHidden || backend.updateProgress >= 0)
+        id: splash
+        visible: window.starting && !splash.dismissed && (!startHidden || backend.updateProgress >= 0)
     }
 
     Connections {
         target: backend
-        function onShowWindowRequested() { if (window.starting) return; window.everShown = true; window.show(); window.raise(); window.requestActivate() }
+        function onShowWindowRequested() {
+            if (window.starting) {  // still updating: the tray icon brings back the hidden launcher
+                splash.dismissed = false
+                if (splash.visible) {
+                    if (splash.visibility === Window.Minimized)
+                        splash.showNormal()
+                    splash.raise(); splash.requestActivate()
+                }
+                return
+            }
+            window.everShown = true; window.show(); window.raise(); window.requestActivate()
+        }
     }
     onClosing: (close) => {
         if (backend.view === "main" && backend.settings.close_to_tray && trayAvailable) {

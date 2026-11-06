@@ -6,7 +6,9 @@ import QtQuick.Window
 Window {
     id: splash
     width: 300; height: 340
-    flags: Qt.SplashScreen | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+    // A normal window (not "stays on top"): any app the user clicks comes in front of it, and it has a
+    // taskbar button to bring it back.
+    flags: Qt.Window | Qt.FramelessWindowHint
     // Declared inside the (still hidden) main window, Qt would make that its transient parent, and a
     // transient window is not shown before its parent is: in 0.4.0 the splash never appeared.
     transientParent: null
@@ -16,6 +18,14 @@ Window {
     y: Screen.virtualY + (Screen.height - height) / 2
 
     readonly property bool downloading: backend.updateProgress >= 0
+    // "Скрыть": the update keeps going in the background; the tray icon brings the window back.
+    property bool dismissed: false
+    function hideToBackground() {
+        if (trayAvailable)
+            splash.dismissed = true
+        else
+            splash.showMinimized()
+    }
 
     Rectangle {
         anchors.fill: parent
@@ -25,6 +35,25 @@ Window {
         clip: true
 
         Aurora { anchors.fill: parent; opacity: 0.8 }
+
+        // Frameless, so the whole window is the handle for moving it.
+        DragHandler { target: null; onActiveChanged: if (active) splash.startSystemMove() }
+
+        Rectangle {
+            id: hideButton
+            anchors.top: parent.top; anchors.right: parent.right; anchors.margins: 10
+            width: hideLabel.implicitWidth + 20; height: 26; radius: 13
+            color: hideHover.hovered ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.06)
+            Text {
+                id: hideLabel
+                anchors.centerIn: parent
+                text: "Скрыть"
+                color: hideHover.hovered ? Theme.text : Theme.muted
+                font.family: Theme.font; font.pixelSize: 12
+            }
+            HoverHandler { id: hideHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: splash.hideToBackground() }
+        }
 
         Column {
             anchors.centerIn: parent

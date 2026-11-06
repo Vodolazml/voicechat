@@ -4,10 +4,11 @@ from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 datas = []
 binaries = []
 hiddenimports = []
-tmp_ret = collect_all('PySide6')
-# collect_all takes every Qt module (WebEngine alone is well over 100 MB). The app uses Core, Gui, Widgets,
-# Network, Qml, Quick (Controls, Layouts, Shapes, Dialogs, Window) and Multimedia; leave out what nothing
-# imports, so updates download much less.
+# No collect_all('PySide6'): it took every Qt module (WebEngine alone is well over 100 MB), and filtering
+# its list was not enough, because the QML hook and the DLL dependency scan pulled the same files back in.
+# PyInstaller's own PySide6 hooks bring in what the imported modules need; the filter below then runs on
+# the final file list. The app uses Core, Gui, Widgets, Network, Qml, Quick (Controls, Layouts, Shapes,
+# Dialogs, Window) and Multimedia.
 _UNUSED_QT = ('WebEngine', 'WebView', 'WebChannel', 'WebSockets', 'Qt3D', 'Qt63D', 'Quick3D', 'Pdf', 'Designer',
               'Charts', 'DataVisualization', 'Graphs', 'Location', 'Positioning', 'Bluetooth', 'Nfc',
               'SerialPort', 'SerialBus', 'Sensors', 'RemoteObjects', 'Scxml', 'StateMachine', 'VirtualKeyboard',
@@ -27,9 +28,8 @@ def _qt_used(entry) -> bool:
     return not any(part in path for part in _UNUSED_QT)
 
 
-datas += [d for d in tmp_ret[0] if _qt_used(d)]
-binaries += [b for b in tmp_ret[1] if _qt_used(b)]
-hiddenimports += [m for m in tmp_ret[2] if not any(part in m for part in _UNUSED_QT)]
+hiddenimports += ['PySide6.' + m for m in ('QtCore', 'QtGui', 'QtWidgets', 'QtNetwork', 'QtQml', 'QtQuick',
+                                            'QtQuickControls2', 'QtMultimedia', 'QtOpenGL', 'QtSvg')]
 tmp_ret = collect_all('sounddevice')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
@@ -88,6 +88,11 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Drop unused Qt from the final list, whichever hook or dependency scan brought it in.
+_before = len(a.binaries) + len(a.datas)
+a.binaries = [b for b in a.binaries if _qt_used(b)]
+a.datas = [d for d in a.datas if _qt_used(d)]
+print(f'Qt filter removed {_before - len(a.binaries) - len(a.datas)} files')
 pyz = PYZ(a.pure)
 
 exe = EXE(

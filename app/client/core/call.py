@@ -19,6 +19,7 @@ from .media import MediaCallbacks, MediaSession
 logger = logging.getLogger("voicechat.call")
 
 HEARTBEAT_SECONDS = 15
+AUDIO_LOG_EVERY = 4  # heartbeats: one line about the microphone and speakers per minute
 KEY_REFRESH_SECONDS = 300
 
 IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "reconnecting"
@@ -123,9 +124,11 @@ class CallController:
         kind = event.get("type")
         channel_id = self.channel_id
         if kind == "voice.moved":
+            logger.info("Moved to channel %s by %s", event.get("channel_id"), event.get("by"))
             self.listener.on_notice("info", f"{event.get('by', 'Модератор')} переместил вас в другой канал")
             self.join(int(event["channel_id"]))
         elif kind == "voice.kicked":
+            logger.info("Disconnected from the channel by %s", event.get("by"))
             self.listener.on_notice("warning", f"{event.get('by', 'Модератор')} отключил вас от канала")
             self._submit(lambda: self._leave(notify_server=False), "kicked")
         elif channel_id is None:
@@ -135,6 +138,7 @@ class CallController:
                 self._submit(lambda: self._sync_keys(channel_id), "keys")
         elif kind == "voice.left" and event.get("channel_id") == channel_id and event.get("user_id") != self.keys.my_id:
             # Whoever left must not be able to decrypt what comes next.
+            logger.info("User %s left channel %s: rotating our key", event.get("user_id"), channel_id)
             self._submit(lambda: self._rotate_keys(channel_id), "rotate")
         elif kind == "e2ee.updated" and event.get("channel_id") == channel_id:
             self._submit(lambda: self._sync_keys(channel_id), "keys")
@@ -172,6 +176,7 @@ class CallController:
     def _join(self, channel_id: int) -> None:
         if self.channel_id == channel_id and self.state in (CONNECTED, CONNECTING, RECONNECTING):
             return
+        logger.info("Joining channel %s (from %s)", channel_id, self.channel_id)
         if self.channel_id is not None:
             # The server moves us and kicks us from the old room. No IDLE in between, so the UI
             # switches channels without flashing "disconnected".
@@ -214,6 +219,8 @@ class CallController:
 
     def _leave(self, notify_server: bool = True, final: bool = True, keep_audio: bool = False) -> None:
         channel_id = self.channel_id
+        if channel_id is not None:
+            logger.info("Leaving channel %s (tell server: %s, switching: %s)", channel_id, notify_server, not final)
         self._stop_heartbeat()
         media, self.media = self.media, None
         if media:
@@ -260,16 +267,19 @@ class CallController:
         stop = self._heartbeat_stop
 
         def beat() -> None:
+            beats = 0
             while not stop.wait(HEARTBEAT_SECONDS):
+                beats += 1
+                if beats % AUDIO_LOG_EVERY == 1:
+                    self._log_audio(channel_id)
                 try:
                     self.api.update_voice(channel_id, self.muted, self.deafened, False)
                 except Exception as exc:
                     if getattr(exc, "status_code", None) == 404 and not stop.is_set():
-                        # The server dropped us (e.g. it restarted): rejoin quietly.
-                        try:
-                            self.api.connect(channel_id, self.muted, self.deafened)
-                        except Exception:
-                            logger.info("Rejoin after 404 failed")
+                        # The server dropped us (e.g. it restarted). Rejoin on the call worker, after
+                        # checking we are still in this channel: from this thread the rejoin could land
+                        # after a switch and put us back into the channel we had just left.
+                        self._submit(lambda: self._rejoin_after_drop(channel_id), "rejoin")
                     else:
                         logger.info("Heartbeat failed: %s", exc)
                 if time.monotonic() - self._last_key_refresh > KEY_REFRESH_SECONDS:
@@ -277,6 +287,33 @@ class CallController:
 
         self._heartbeat = threading.Thread(target=beat, name="call-heartbeat", daemon=True)
         self._heartbeat.start()
+
+    def _rejoin_after_drop(self, channel_id: int) -> None:
+        if self.channel_id != channel_id:
+            return
+        logger.warning("Server no longer had us in channel %s: rejoining", channel_id)
+        try:
+            self.api.connect(channel_id, self.muted, self.deafened)
+        except Exception:
+            logger.info("Rejoin after 404 failed", exc_info=True)
+
+    def _log_audio(self, channel_id: int) -> None:
+        try:
+            stats = self.audio.stats()
+            media = self.media
+            stats["media"] = "connected" if media is not None and media.connected else "not connected"
+            stats["state"] = self.state
+            muted = self.muted or self.deafened
+            if stats["running"] and stats["mic_frames"] == 0:
+                logger.warning("Channel %s: the microphone delivers no sound at all: %s", channel_id, stats)
+            elif stats["running"] and not muted and stats["mic_peak_db"] > stats["threshold_db"] \
+                    and stats["sent_frames"] == 0:
+                logger.warning("Channel %s: the mic hears sound but nothing passes the voice gate: %s",
+                               channel_id, stats)
+            else:
+                logger.info("Channel %s audio: %s", channel_id, stats)
+        except Exception:
+            logger.debug("Audio stats failed", exc_info=True)
 
     def _stop_heartbeat(self) -> None:
         self._heartbeat_stop.set()
@@ -298,9 +335,12 @@ class CallController:
         for attempt in range(5):
             try:
                 self.audio.restart()
+                logger.info("Audio devices reopened after a loss (attempt %d)", attempt + 1)
                 return
             except Exception:
+                logger.info("Audio reopen attempt %d failed", attempt + 1, exc_info=True)
                 time.sleep(1 + attempt)
+        logger.warning("Audio devices could not be reopened")
         self.listener.on_notice("error", "Не удалось открыть микрофон или наушники. Проверьте устройство в настройках")
 
     def _on_media_state(self, state: str) -> None:

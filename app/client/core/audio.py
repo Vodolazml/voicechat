@@ -96,7 +96,31 @@ class AudioEngine:
         self._output = None
         self._running = False
         self._delay_ms = 40
+        self._reset_counters()
         self.apply_settings(settings)
+
+    # --- diagnostics ------------------------------------------------------------------------------
+
+    def _reset_counters(self) -> None:
+        # Written only by the audio callbacks, read and reset by stats(); plain ints are fine for that.
+        self._frames_in = 0
+        self._frames_sent = 0
+        self._frames_out = 0
+        self._overflows = 0
+        self._underflows = 0
+        self._peak_db = -96.0
+
+    def stats(self) -> dict:
+        """What the microphone and speakers did since the last call, for the log."""
+        stats = {
+            "running": self._running, "mic_frames": self._frames_in, "sent_frames": self._frames_sent,
+            "speaker_frames": self._frames_out, "mic_peak_db": round(self._peak_db, 1),
+            "threshold_db": round(getattr(self.gate, "threshold_db", self.settings.threshold_db), 1),
+            "overflows": self._overflows, "underflows": self._underflows, "muted": self.muted,
+            "mode": self.settings.mode,
+        }
+        self._reset_counters()
+        return stats
 
     # --- settings ---------------------------------------------------------------------------------
 
@@ -158,8 +182,14 @@ class AudioEngine:
                 self._output.start()
                 self._delay_ms = min(500, int((self._input.latency + self._output.latency) * 1000))
                 self._running = True
+                self._reset_counters()
+                logger.info("Audio opened: mic %s, speakers %s, delay %d ms, noise %s, echo %s, agc %s",
+                            _describe(self._input.device), _describe(self._output.device), self._delay_ms,
+                            self.settings.noise, self.settings.echo_cancellation, self.settings.auto_gain)
             except Exception as exc:
                 self._close_streams()
+                logger.warning("Audio device could not be opened (mic %r, speakers %r): %s",
+                               self.settings.input_device or "default", self.settings.output_device or "default", exc)
                 raise RuntimeError(f"Не удалось открыть аудиоустройство: {exc}") from exc
 
     def stop(self) -> None:
@@ -197,13 +227,17 @@ class AudioEngine:
 
     def _stream_finished(self) -> None:
         if self._running:
+            logger.warning("Audio stream stopped by the system (device unplugged or taken over)")
             self.on_problem("device_lost")
 
     # --- real-time callbacks ----------------------------------------------------------------------
 
     def _capture(self, indata, frames, time_info, status) -> None:
+        if status and status.input_overflow:
+            self._overflows += 1
         if frames != FRAME_SAMPLES:
             return
+        self._frames_in += 1
         frame = apply_gain(bytes(indata), self.settings.input_gain)
         apm = self._apm
         if apm is not None:
@@ -224,6 +258,8 @@ class AudioEngine:
             frame = to_bytes(samples)
         is_voice = self.gate.process(samples, probability)
         self.input_level_db = self.gate.level_db
+        if self.input_level_db > self._peak_db:
+            self._peak_db = self.input_level_db
         if self.settings.mode == MODE_PTT:
             send = self.ptt_pressed
         else:
@@ -231,9 +267,13 @@ class AudioEngine:
         send = send and not self.muted
         self.transmitting = send
         if send:
+            self._frames_sent += 1
             self.on_frame(frame)
 
     def _playback(self, outdata, frames, time_info, status) -> None:
+        if status and status.output_underflow:
+            self._underflows += 1
+        self._frames_out += 1
         mixed = self.mixer.mix() if frames == FRAME_SAMPLES else bytes(frames * 2)
         outdata[:] = mixed
         apm = self._apm
@@ -244,6 +284,18 @@ class AudioEngine:
                 apm.process_reverse_stream(rtc.AudioFrame(mixed, SAMPLE_RATE, 1, FRAME_SAMPLES))
             except Exception:
                 pass
+
+
+def _describe(device) -> str:
+    """'Name (host API)' of the device PortAudio actually opened."""
+    try:
+        import sounddevice as sd
+
+        info = sd.query_devices(device)
+        api = sd.query_hostapis(info["hostapi"])["name"]
+        return f"{info['name']!r} ({api}, {int(info['default_samplerate'])} Hz)"
+    except Exception:
+        return repr(device)
 
 
 def mic_test_level(samples: np.ndarray) -> float:

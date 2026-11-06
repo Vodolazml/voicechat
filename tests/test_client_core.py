@@ -255,3 +255,32 @@ def test_missing_media_server_is_reported_once_instead_of_endless_reconnecting()
     call._on_media_state("unavailable")
     assert call.state == "unavailable"
     assert sum("LiveKit" in n for n in notices) == 1
+
+
+def test_heartbeat_rejoin_never_returns_to_a_channel_we_left():
+    call, api, states, _ = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED and call.channel_id == 10)
+    call.join(11)
+    assert wait_for(lambda: call.channel_id == 11 and call.state == CONNECTED)
+    api.calls.clear()
+    # A late 404 from channel 10's heartbeat, after the switch to 11.
+    call._submit(lambda: call._rejoin_after_drop(10), "rejoin")
+    call._submit(lambda: call._rejoin_after_drop(11), "rejoin")
+    assert wait_for(lambda: any(name == "connect" for name, _ in api.calls))
+    assert [args[0] for name, args in api.calls if name == "connect"] == [11]
+
+
+def test_audio_stats_count_and_reset():
+    from types import SimpleNamespace
+
+    from app.client.core.audio import AudioEngine
+
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False), on_frame=lambda f: None)
+    quiet = bytes(FRAME_BYTES)
+    for _ in range(5):
+        engine._capture(quiet, FRAME_SAMPLES, None, SimpleNamespace(input_overflow=False))
+    engine._capture(quiet, FRAME_SAMPLES, None, SimpleNamespace(input_overflow=True))
+    stats = engine.stats()
+    assert stats["mic_frames"] == 6 and stats["overflows"] == 1 and stats["sent_frames"] == 0
+    assert engine.stats()["mic_frames"] == 0

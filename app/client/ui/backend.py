@@ -856,6 +856,7 @@ class Backend(QObject):
 
     def shutdown(self) -> None:
         """App exit: leave the call so friends see it immediately."""
+        logger.info("Closing VoiceChat")
         native.set_call_active(False)
         self._end_session()
         self._pool.shutdown(wait=False, cancel_futures=True)
@@ -1996,10 +1997,33 @@ class Backend(QObject):
         return native.foreground_is_fullscreen()
 
 
+_crash_file = None
+
+
+def _enable_crash_log() -> None:
+    """A crash inside native code (LiveKit, audio drivers, Qt) kills the process without a Python
+    traceback, so the normal log just stops. faulthandler writes every thread's stack to crash.log
+    then, and the report includes it."""
+    global _crash_file
+    import faulthandler
+
+    try:
+        path = LOG_DIR / "crash.log"
+        if path.exists() and path.stat().st_size > 1_000_000:
+            path.unlink()
+        _crash_file = open(path, "a", encoding="utf-8")
+        _crash_file.write(f"--- {datetime.now():%Y-%m-%d %H:%M:%S} start {APP_VERSION} ---\n")
+        _crash_file.flush()
+        faulthandler.enable(_crash_file, all_threads=True)
+    except Exception:
+        logging.getLogger("voicechat.ui").info("Crash log unavailable", exc_info=True)
+
+
 def configure_logging() -> None:
     from logging.handlers import RotatingFileHandler
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _enable_crash_log()
     handler = RotatingFileHandler(LOG_DIR / "client.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     root = logging.getLogger()
@@ -2007,6 +2031,8 @@ def configure_logging() -> None:
     root.addHandler(handler)
     if os.environ.get("VOICECHAT_DEBUG"):
         root.addHandler(logging.StreamHandler())
+    # A start line without a "closing" line before it means the previous run was killed or crashed.
+    logging.getLogger("voicechat.ui").info("Starting VoiceChat %s on %s", APP_VERSION, py_platform.platform())
     _ = time  # keep import for profiling hooks
 
 

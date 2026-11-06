@@ -200,6 +200,8 @@ class MediaSession:
                 self._apply_keys()
                 self._apply_subscriptions()
                 self.connected = True
+                logger.info("Media connected as %s, key slot %d, %d others in the room", identity,
+                            key_index(key_id), len(room.remote_participants))
                 self.cb.on_state("connected")
                 self._report_participants()
                 backoff = 1.0
@@ -382,6 +384,11 @@ class MediaSession:
 
         @room.on("participant_disconnected")
         def _left(participant):
+            if participant.identity in room.remote_participants:
+                # The same person is already back on a new connection (their app was killed and
+                # restarted): the old connection's end must not drop their sound or keys.
+                logger.info("Old connection of %s closed; the new one stays", participant.identity)
+                return
             user_id = user_id_from_identity(participant.identity)
             if user_id is not None:
                 self.mixer.remove(user_id)

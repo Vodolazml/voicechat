@@ -44,7 +44,7 @@ Window {
                     anchors.verticalCenter: parent.verticalCenter
                     x: 4 * win.k
                     spacing: 6 * win.k
-                    Avatar { size: 22 * win.k; initials: model.initials; color: model.color; speaking: model.speaking }
+                    Avatar { size: 22 * win.k; initials: model.initials; color: model.color; source: model.avatar || ""; speaking: model.speaking }
                     Text { text: model.name; color: model.speaking ? "white" : "#c9cbe0"; font.family: Theme.font; font.pixelSize: 13 * win.k; font.weight: model.speaking ? Font.DemiBold : Font.Normal; style: Text.Outline; styleColor: Qt.rgba(0, 0, 0, 0.4) }
                     Icon { visible: model.muted || model.serverMuted; name: "mic_off"; color: Theme.bad; width: 14 * win.k; height: 14 * win.k }
                     Icon { visible: model.deafened; name: "headset_off"; color: Theme.bad; width: 14 * win.k; height: 14 * win.k }

@@ -9,6 +9,7 @@ Rectangle {
     property bool chatOpen: true
     signal openSettings()
     signal openScreenShare()
+    signal openCamera()
     signal openSafety()
     signal toggleFullscreen()
 
@@ -133,6 +134,7 @@ Rectangle {
                     IconButton { size: 44; glyph: backend.muted || backend.serverMuted ? "mic_off" : "mic"; danger: backend.muted || backend.serverMuted; tip: backend.muted ? "Включить микрофон" : "Выключить микрофон"; onClicked: backend.toggleMute() }
                     IconButton { size: 44; glyph: backend.deafened ? "headset_off" : "headset"; danger: backend.deafened; tip: backend.deafened ? "Включить звук" : "Выключить звук"; onClicked: backend.toggleDeafen() }
                     IconButton { size: 44; visible: backend.canShare; glyph: "screen"; active: backend.sharing; tip: backend.sharing ? "Остановить показ экрана" : "Показать экран"; onClicked: backend.sharing ? backend.stopScreen() : root.openScreenShare() }
+                    IconButton { size: 44; visible: backend.canShare && (backend.cameraAllowed || backend.cameraOn); glyph: backend.cameraOn ? "videocam" : "videocam_off"; active: backend.cameraOn; tip: backend.cameraOn ? "Выключить камеру" : "Включить камеру"; onClicked: backend.cameraOn ? backend.stopCamera() : root.openCamera() }
                     IconButton { size: 44; glyph: "settings"; tip: "Настройки звука"; onClicked: root.openSettings() }
                     Rectangle {
                         width: 64; height: 44; radius: 22; color: leaveHover.hovered ? Qt.lighter(Theme.bad, 1.1) : Theme.bad

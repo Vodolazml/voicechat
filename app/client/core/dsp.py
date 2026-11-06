@@ -153,7 +153,7 @@ class Mixer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._speakers: dict[int, _SpeakerBuffer] = {}
-        self._effects: deque[tuple[bytes, bool]] = deque(maxlen=600)
+        self._effects: deque[tuple[bytes, bool]] = deque(maxlen=1000)  # up to 10 s (the wake-up tune)
         self.master_volume = 1.0
         self.user_volume: dict[int, float] = {}
         self.muted_users: set[int] = set()

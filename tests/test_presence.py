@@ -195,3 +195,23 @@ def test_chat_in_voice_channel_is_live_and_encrypted_at_rest(client):
     assert client.patch(f"/messages/{history[0]['id']}", headers=friend, json={"body": "x"}).status_code == 403
     assert client.delete(f"/messages/{history[0]['id']}", headers=admin).status_code == 200
     assert client.get(f"/channels/{voice[0]}/messages", headers=friend).json()[0]["deleted"] is True
+
+
+def test_wake_only_when_something_is_off_and_one_minute_for_everyone(client):
+    from app.server import presence as presence_module
+
+    presence_module._last_wake.clear()
+    admin, friend, space, voice = setup_admin_and_friend(client)
+    friend_id = client.get("/me", headers=friend).json()["id"]
+    client.post(f"/channels/{voice[0]}/connect", headers=friend, json={"muted": False, "deafened": False})
+    # Everything on: nothing to wake.
+    assert client.post(f"/voice/{friend_id}/wake", headers=admin).status_code == 409
+    client.put(f"/channels/{voice[0]}/voice-state", headers=friend, json={"muted": True, "deafened": False})
+    first = client.post(f"/voice/{friend_id}/wake", headers=admin)
+    assert first.status_code == 200, first.text
+    # The cooldown belongs to the person being woken, so it applies to every caller.
+    again = client.post(f"/voice/{friend_id}/wake", headers=admin)
+    assert again.status_code == 429 and "через" in again.json()["detail"]
+    assert client.post(f"/voice/{friend_id}/wake", headers=friend).status_code == 400  # not yourself
+    presence_module._last_wake[friend_id] -= 61
+    assert client.post(f"/voice/{friend_id}/wake", headers=admin).status_code == 200

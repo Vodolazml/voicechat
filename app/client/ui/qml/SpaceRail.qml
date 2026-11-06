@@ -51,7 +51,16 @@ Rectangle {
                     }
                     border.width: space.current ? 0 : 1
                     border.color: Qt.rgba(1, 1, 1, 0.05)
+                    Image {
+                        id: spacePic
+                        anchors.fill: parent
+                        visible: (model.avatar || "") !== "" && status === Image.Ready
+                        source: model.avatar || ""
+                        sourceSize.width: 96; sourceSize.height: 96; smooth: true; mipmap: true; asynchronous: true
+                        opacity: space.current || hover.hovered ? 1 : 0.85
+                    }
                     Text {
+                        visible: !spacePic.visible
                         anchors.centerIn: parent; text: model.initials
                         color: space.current || hover.hovered ? "white" : Theme.muted
                         font.family: Theme.font; font.pixelSize: 15; font.weight: Font.Bold

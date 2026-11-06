@@ -17,7 +17,7 @@ from . import media_sessions, models, schemas
 from .audit import write_audit
 from .config import get_settings
 from .database import get_db
-from .deps import can_manage_space, current_user, require_space_manager
+from .deps import can_manage_space, current_user, require_space_manager, space_role
 from .events import hub
 from .limits import rate_limit
 from .presence import grant_public_channels, leave_voice, space_member_ids
@@ -102,8 +102,14 @@ def space_out(db: Session, user: models.User, space: models.Space) -> schemas.Sp
     count = db.scalar(select(func.count()).select_from(models.SpaceMember).join(
         models.User, models.User.id == models.SpaceMember.user_id).where(
         models.SpaceMember.space_id == space.id, models.User.is_owner.is_(False))) or 0
+    has_picture = space.avatar_version and db.scalar(
+        select(models.Space.avatar.isnot(None)).where(models.Space.id == space.id))
     return schemas.SpaceOut(id=space.id, name=space.name, can_manage=manage, is_mine=space.created_by == user.id,
-                            member_count=count, invite_code=format_code(space.invite_code))
+                            member_count=count, invite_code=format_code(space.invite_code),
+                            role=space_role(db, user, space.id), created_by=space.created_by,
+                            avatar_version=space.avatar_version if has_picture else 0,
+                            max_share_quality=space.max_share_quality or "1440p60",
+                            camera_allowed=bool(space.camera_allowed))
 
 
 def _publish_space(db: Session, space: models.Space, kind: str, extra: dict | None = None) -> None:
@@ -207,6 +213,7 @@ async def leave_space(space_id: int, request: Request, user: models.User = Depen
                                           models.ChannelMember.channel_id.in_(channel_ids)).delete(
         synchronize_session=False)
     db.query(models.SpaceMember).filter_by(space_id=space_id, user_id=user.id).delete()
+    db.query(models.SpaceModerator).filter_by(space_id=space_id, user_id=user.id).delete()
     write_audit(db, actor_id=user.id, action="spaces.leave", target_type="space", target_id=space_id, request=request)
     db.commit()
     _publish_space(db, space, "space.members", {"user_id": user.id})
@@ -247,3 +254,82 @@ def add_space_member(space_id: int, payload: schemas.MemberIn, request: Request,
                 request=request, details={"user_id": payload.user_id})
     db.commit()
     return {"status": "ok"}
+
+
+# --- settings, members and moderators -------------------------------------------------------------
+
+def _live_space(db: Session, space_id: int) -> models.Space:
+    space = db.get(models.Space, space_id)
+    if not space or space.is_deleted:
+        raise HTTPException(status_code=404, detail="Пространство не найдено")
+    return space
+
+
+@router.patch("/spaces/{space_id}", response_model=schemas.SpaceOut)
+def update_space(space_id: int, payload: schemas.SpaceUpdateIn, request: Request,
+                 user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    """Name, best screen share quality, cameras on or off: the creator and moderators."""
+    space = _live_space(db, space_id)
+    require_space_manager(db, user, space_id, "spaces.update")
+    changes = payload.model_dump(exclude_none=True)
+    if "name" in changes:
+        space.name = changes["name"].strip()
+    if "max_share_quality" in changes:
+        space.max_share_quality = changes["max_share_quality"]
+    if "camera_allowed" in changes:
+        space.camera_allowed = changes["camera_allowed"]
+    write_audit(db, actor_id=user.id, action="spaces.update", target_type="space", target_id=space_id,
+                request=request, details=changes)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Пространство с таким названием уже есть") from exc
+    _publish_space(db, space, "space.updated")
+    return space_out(db, user, space)
+
+
+@router.get("/spaces/{space_id}/members", response_model=list[schemas.SpaceMemberOut])
+def list_space_members(space_id: int, user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    space = _live_space(db, space_id)
+    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": user.id}):
+        raise HTTPException(status_code=404, detail="Пространство не найдено")
+    moderators = set(db.scalars(select(models.SpaceModerator.user_id).where(
+        models.SpaceModerator.space_id == space_id)))
+    rows = db.execute(
+        select(models.User.id, models.User.display_name, models.User.avatar_version, models.User.is_owner,
+               models.User.avatar.isnot(None))
+        .join(models.SpaceMember, models.SpaceMember.user_id == models.User.id)
+        .where(models.SpaceMember.space_id == space_id, models.User.status == "active")
+        .order_by(models.User.display_name)).all()
+    out = []
+    for member_id, name, version, owner, has_picture in rows:
+        if owner and member_id != space.created_by and member_id != user.id:
+            continue  # the server owner sees every space, but is not shown as a member of each
+        role = "admin" if member_id == space.created_by or owner else (
+            "moderator" if member_id in moderators else "member")
+        out.append(schemas.SpaceMemberOut(id=member_id, display_name=name, role=role,
+                                          avatar_version=version if has_picture else 0))
+    return out
+
+
+@router.put("/spaces/{space_id}/moderators/{user_id}", response_model=list[schemas.SpaceMemberOut])
+def set_moderator(space_id: int, user_id: int, payload: schemas.ModeratorIn, request: Request,
+                  user: models.User = Depends(current_user), db: Session = Depends(get_db)):
+    """Only the creator (or the server owner) appoints and removes moderators."""
+    space = _live_space(db, space_id)
+    require_space_manager(db, user, space_id, "spaces.moderators")
+    if not db.get(models.SpaceMember, {"space_id": space_id, "user_id": user_id}):
+        raise HTTPException(status_code=404, detail="Такого участника нет")
+    if user_id == space.created_by:
+        raise HTTPException(status_code=400, detail="Создатель и так управляет пространством")
+    existing = db.get(models.SpaceModerator, {"space_id": space_id, "user_id": user_id})
+    if payload.moderator and not existing:
+        db.add(models.SpaceModerator(space_id=space_id, user_id=user_id))
+    elif not payload.moderator and existing:
+        db.delete(existing)
+    write_audit(db, actor_id=user.id, action="spaces.moderator", target_type="space", target_id=space_id,
+                request=request, details={"user_id": user_id, "moderator": payload.moderator})
+    db.commit()
+    _publish_space(db, space, "space.updated")
+    return list_space_members(space_id, user, db)

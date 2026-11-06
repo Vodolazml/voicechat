@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import chat, download_page, presence, spaces
+from . import avatars, chat, download_page, presence, spaces
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -80,6 +80,7 @@ if settings.cors_origins:
 app.include_router(presence.router)
 app.include_router(chat.router)
 app.include_router(spaces.router)
+app.include_router(avatars.router)
 app.include_router(download_page.router)
 
 
@@ -404,6 +405,8 @@ def me(user: models.User = Depends(current_user), db: Session = Depends(get_db))
         must_change_password=user.must_change_password,
         permissions=sorted(user_permissions(db, user.id)),
         is_owner=user.is_owner,
+        avatar_version=user.avatar_version if db.scalar(
+            select(models.User.avatar.isnot(None)).where(models.User.id == user.id)) else 0,
     )
 
 

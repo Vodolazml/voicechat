@@ -28,6 +28,8 @@ CloseApplications=force
 RestartApplications=no
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Tell Explorer to refresh icons after an update, so the existing shortcut shows the new logo.
+ChangesAssociations=yes
 
 [Languages]
 Name: "rus"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -44,7 +46,9 @@ Type: files; Name: "{userdesktop}\{#MyAppName}.lnk"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{userdesktop}\VoiceChat"; Filename: "{app}\{#MyAppExeName}"
+; The desktop shortcut is created once and never rewritten: rewriting it on every update made Windows
+; forget where the user had placed it. Its picture comes from the exe, so it still updates.
+Name: "{userdesktop}\VoiceChat"; Filename: "{app}\{#MyAppExeName}"; Check: not DesktopShortcutExists
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Registry]
@@ -59,3 +63,18 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait runasoriginaluser; Check: Wizar
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function DesktopShortcutExists: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{userdesktop}\VoiceChat.lnk'));
+end;
+
+procedure SHChangeNotify(wEventId: Integer; uFlags: Cardinal; dwItem1, dwItem2: Cardinal);
+  external 'SHChangeNotify@shell32.dll stdcall';
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    SHChangeNotify($08000000, 0, 0, 0);  { SHCNE_ASSOCCHANGED: drop cached icons }
+end;

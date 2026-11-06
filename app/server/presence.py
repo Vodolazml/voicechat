@@ -21,7 +21,7 @@ from .audit import write_audit
 from .config import get_settings
 from .database import SessionLocal, get_db
 from .deps import (can_manage_space, channel_participant_ids, current_user, ensure_channel_member,
-                   require_space_manager, user_from_token)
+                   is_space_admin, require_space_manager, user_from_token)
 from .events import hub
 from .limits import rate_limit
 from .permissions import has_permission
@@ -34,6 +34,10 @@ settings = get_settings()
 EVENTS_AUTH_TIMEOUT_SECONDS = 5
 EVENTS_RECHECK_SECONDS = 60
 JANITOR_INTERVAL_SECONDS = 10
+WAKE_COOLDOWN_SECONDS = 60
+# Last time each person was woken up. One cooldown per person shared by everybody: after anyone wakes
+# them, nobody can do it again for a minute. (One API process, so memory is enough.)
+_last_wake: dict[int, float] = {}
 
 
 # --- serialisation and event helpers -------------------------------------------------------------
@@ -53,6 +57,7 @@ def voice_state_out(db: Session, state: models.VoiceState) -> schemas.VoiceState
         speaking=state.speaking,
         server_muted=state.server_muted,
         status=state.status,
+        avatar_version=user.avatar_version if user else 0,
     )
 
 
@@ -338,6 +343,8 @@ def _target_state(db: Session, actor: models.User, user_id: int) -> models.Voice
     target = db.get(models.User, user_id)
     if target and target.is_owner and not actor.is_owner:
         raise HTTPException(status_code=403, detail="Нельзя модерировать владельца сервера")
+    if target and is_space_admin(db, target, channel.space_id) and not is_space_admin(db, actor, channel.space_id):
+        raise HTTPException(status_code=403, detail="Модератор не может модерировать создателя пространства")
     return state
 
 
@@ -395,6 +402,38 @@ async def server_mute(user_id: int, payload: schemas.ServerMuteIn, request: Requ
     return voice_state_out(db, state)
 
 
+# --- waking someone up ---------------------------------------------------------------------------
+
+@router.post("/voice/{user_id}/wake", tags=["voice"])
+def wake_user(user_id: int, request: Request, actor: models.User = Depends(current_user),
+              db: Session = Depends(get_db)) -> dict:
+    """Plays a short tune for someone sitting in voice with the microphone or the sound off."""
+    import time
+
+    state = db.get(models.VoiceState, user_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Пользователь не в голосовом канале")
+    ensure_channel_member(db, actor.id, state.channel_id)
+    if user_id == actor.id:
+        raise HTTPException(status_code=400, detail="Себя разбудить нельзя")
+    if not (state.muted or state.deafened or state.server_muted):
+        raise HTTPException(status_code=409, detail="У него всё включено, он и так вас слышит")
+    rate_limit(f"wake:{actor.id}", 10, 600)
+    now = time.time()
+    last = _last_wake.get(user_id, 0.0)
+    if now - last < WAKE_COOLDOWN_SECONDS:
+        wait = int(WAKE_COOLDOWN_SECONDS - (now - last)) + 1
+        raise HTTPException(status_code=429, detail=f"Его только что будили, попробуйте через {wait} с")
+    _last_wake[user_id] = now
+    until = now + WAKE_COOLDOWN_SECONDS
+    write_audit(db, actor_id=actor.id, action="voice.wake", target_type="user", target_id=user_id, request=request)
+    db.commit()
+    event = {"type": "voice.wake", "user_id": user_id, "channel_id": state.channel_id, "by": actor.display_name,
+             "by_id": actor.id, "until": until}
+    hub.publish(channel_participant_ids(db, state.channel_id) | {user_id}, event)
+    return {"status": "ok", "until": until}
+
+
 # --- media tokens --------------------------------------------------------------------------------
 
 def _media_token(db: Session, user: models.User, channel_id: int, identity: str, sources: list[str],
@@ -430,6 +469,9 @@ def media_token(channel_id: int, user: models.User = Depends(current_user), db: 
         sources.append("microphone")
     if has_permission(db, user.id, "screen_share.start"):
         sources += ["screen_share", "screen_share_audio"]
+        space = db.get(models.Space, db.get(models.Channel, channel_id).space_id)
+        if space is not None and space.camera_allowed:
+            sources.append("camera")
     can_publish = bool(sources) and not state.server_muted
     can_subscribe = has_permission(db, user.id, "voice.join")
     return _media_token(db, user, channel_id, f"u{user.id}", sources, can_publish, can_subscribe)

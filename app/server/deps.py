@@ -69,7 +69,12 @@ def channel_participant_ids(db: Session, channel_id: int) -> set[int]:
     )
 
 
-def can_manage_space(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> bool:
+# What only the space's creator (or the server owner / a global administrator) may do. Everything else that
+# needs a manager is open to the space's moderators too.
+CREATOR_ONLY = {"channels.create", "channels.delete", "spaces.delete", "spaces.avatar", "spaces.moderators"}
+
+
+def is_space_admin(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> bool:
     """The server owner, a global administrator, or the person who created the space."""
     if user.is_owner or has_permission(db, user.id, permission):
         return True
@@ -77,6 +82,25 @@ def can_manage_space(db: Session, user: models.User, space_id: int, permission: 
     return bool(space and not space.is_deleted and space.created_by == user.id)
 
 
+def is_space_moderator(db: Session, user_id: int, space_id: int) -> bool:
+    return db.get(models.SpaceModerator, {"space_id": space_id, "user_id": user_id}) is not None
+
+
+def space_role(db: Session, user: models.User, space_id: int) -> str:
+    if is_space_admin(db, user, space_id):
+        return "admin"
+    return "moderator" if is_space_moderator(db, user.id, space_id) else "member"
+
+
+def can_manage_space(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> bool:
+    """Admins of the space always; its moderators for everything except the creator-only actions."""
+    if is_space_admin(db, user, space_id, permission):
+        return True
+    return permission not in CREATOR_ONLY and is_space_moderator(db, user.id, space_id)
+
+
 def require_space_manager(db: Session, user: models.User, space_id: int, permission: str = "spaces.update") -> None:
     if not can_manage_space(db, user, space_id, permission):
-        raise HTTPException(status_code=403, detail="Это может только создатель пространства")
+        detail = ("Это может только создатель пространства" if permission in CREATOR_ONLY
+                  else "Это могут создатель пространства и модераторы")
+        raise HTTPException(status_code=403, detail=detail)

@@ -18,8 +18,10 @@ Item {
             onLeaveSpace: confirm.ask("Выйти из «" + backend.spaceName + "»?", "Вернуться можно будет только по новому коду приглашения.", "Выйти", function() { backend.leaveSpace() })
             onDeleteSpace: confirm.ask("Удалить «" + backend.spaceName + "»?", "Все каналы и сообщения пропадут у всех участников. Это не отменить.", "Удалить", function() { backend.deleteSpace() })
             onOpenScreenShare: share.open()
+            onOpenCamera: camera.open()
+            onOpenSpaceSettings: spaceSettings.open()
             onCreateChannel: (type) => channelDialog.openCreate(type)
-            onRenameChannel: (id, name, limit) => channelDialog.openEdit(id, name, limit)
+            onRenameChannel: (id, name, limit, type) => channelDialog.openEdit(id, name, limit, type)
             onDeleteChannel: (id, name) => confirm.ask("Удалить канал «" + name + "»?", "Все, кто в нём сейчас, будут отключены. Сообщения канала пропадут.", "Удалить", function() { backend.deleteChannel(id) })
         }
         Item {
@@ -31,6 +33,7 @@ Item {
                 visible: backend.inCall && backend.textChannelId === 0
                 onOpenSettings: root.openSettings(0)
                 onOpenScreenShare: share.open()
+                onOpenCamera: camera.open()
                 onOpenSafety: safety.open()
                 onToggleFullscreen: root.toggleFullscreen()
             }
@@ -63,7 +66,9 @@ Item {
 
     InviteDialog { id: invite; objectName: "inviteDialog" }
     SpaceDialog { id: spaceDialog; objectName: "spaceDialog" }
-    ScreenShareDialog { id: share }
+    ScreenShareDialog { id: share; objectName: "shareDialog" }
+    CameraDialog { id: camera; objectName: "cameraDialog" }
+    SpaceSettingsDialog { id: spaceSettings; objectName: "spaceSettingsDialog"; onRenameChannel: (id, name, limit, type) => channelDialog.openEdit(id, name, limit, type) }
     SafetyDialog { id: safety }
     ChannelDialog { id: channelDialog }
     ConfirmDialog { id: confirm }

@@ -240,13 +240,24 @@ Rectangle {
                     Card {
                         RowLayout {
                             Layout.fillWidth: true; spacing: 14
-                            Avatar { size: 56; initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent }
+                            Avatar { size: 56; initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent; source: backend.myAvatar }
                             ColumnLayout {
                                 Layout.fillWidth: true; spacing: 2
                                 Text { text: backend.me.display_name || ""; color: Theme.text; font.family: Theme.font; font.pixelSize: 17; font.weight: Font.Bold }
                                 Text { text: "@" + (backend.me.username || ""); color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
                             }
                             PrimaryButton { secondary: true; text: "Коды безопасности"; onClicked: root.openSafety() }
+                        }
+                    }
+                    Text { text: "АВАТАРКА"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Card {
+                        PicturePicker {
+                            Layout.fillWidth: true
+                            source: backend.myAvatar
+                            initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent
+                            hint: "Её видят друзья в каналах, в чате и на сцене. Картинка обрежется до квадрата."
+                            onPicked: (url) => backend.setMyAvatar(url)
+                            onCleared: backend.setMyAvatar("")
                         }
                     }
                     Text { text: "УСТРОЙСТВА, ГДЕ ВЫ ВОШЛИ"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }

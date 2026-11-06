@@ -85,6 +85,7 @@ class MeOut(OrmModel):
     must_change_password: bool
     permissions: list[str]
     is_owner: bool = False
+    avatar_version: int = 0
 
 
 class PasswordChangeIn(OrmModel):
@@ -123,6 +124,31 @@ class SpaceOut(OrmModel):
     member_count: int = 0
     # Only for people who manage the space.
     invite_code: str | None = None
+    role: str = "member"  # admin (creator, owner), moderator or member
+    created_by: int = 0
+    avatar_version: int = 0
+    max_share_quality: str = "1440p60"
+    camera_allowed: bool = True
+
+
+SHARE_QUALITY_PATTERN = r"^(720p30|1080p30|1080p60|1440p60|2160p30)$"
+
+
+class SpaceUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120, pattern=SAFE_TEXT_PATTERN)
+    max_share_quality: str | None = Field(default=None, pattern=SHARE_QUALITY_PATTERN)
+    camera_allowed: bool | None = None
+
+
+class SpaceMemberOut(BaseModel):
+    id: int
+    display_name: str
+    role: str
+    avatar_version: int = 0
+
+
+class ModeratorIn(BaseModel):
+    moderator: bool
 
 
 class SpaceJoinIn(BaseModel):
@@ -235,6 +261,7 @@ class VoiceStateOut(OrmModel):
     speaking: bool
     server_muted: bool = False
     status: str
+    avatar_version: int = 0
 
 
 class MoveIn(BaseModel):

@@ -42,6 +42,9 @@ PRESETS_BY_KEY = {preset.key: preset for preset in PRESETS}
 
 
 def list_monitors() -> list[dict]:
+    if os.environ.get("VOICECHAT_TEST_CAPTURE") == "1":
+        return [{"index": 1, "title": "Экран 1 · 1920×1080", "width": 1920, "height": 1080, "left": 0, "top": 0},
+                {"index": 2, "title": "Экран 2 · 2560×1440", "width": 2560, "height": 1440, "left": 1920, "top": 0}]
     try:
         import mss
 
@@ -52,6 +55,197 @@ def list_monitors() -> list[dict]:
     except Exception:
         logger.exception("Monitor listing failed")
         return []
+
+
+# --- windows (Windows only) -----------------------------------------------------------------------
+
+def _user32():
+    import ctypes
+
+    return ctypes.windll.user32  # type: ignore[attr-defined]
+
+
+def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """Visible bounds of a window in physical screen pixels (left, top, right, bottom), without the invisible
+    resize border Windows 10/11 adds around it. None if it is gone or minimised."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = _user32()
+    if not user32.IsWindow(hwnd) or user32.IsIconic(hwnd):
+        return None
+    rect = wintypes.RECT()
+    try:
+        ok = ctypes.windll.dwmapi.DwmGetWindowAttribute(  # DWMWA_EXTENDED_FRAME_BOUNDS
+            wintypes.HWND(hwnd), 9, ctypes.byref(rect), ctypes.sizeof(rect)) == 0
+    except Exception:
+        ok = False
+    if not ok and not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        return None
+    if rect.right - rect.left < 2 or rect.bottom - rect.top < 2:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def list_windows() -> list[dict]:
+    """Windows you can show: visible, titled, top-level application windows (not this app's own)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = _user32()
+    dwm = ctypes.windll.dwmapi
+    kernel32 = ctypes.windll.kernel32
+    own_pid = os.getpid()
+    found: list[dict] = []
+
+    def app_name(pid: int) -> str:
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        try:
+            buffer = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                return os.path.splitext(os.path.basename(buffer.value))[0]
+        finally:
+            kernel32.CloseHandle(handle)
+        return ""
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        try:
+            if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, 4):  # GW_OWNER: skip owned popups
+                return True
+            if user32.GetWindowLongW(hwnd, -20) & 0x80:  # WS_EX_TOOLWINDOW
+                return True
+            cloaked = wintypes.DWORD(0)
+            dwm.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))  # DWMWA_CLOAKED
+            if cloaked.value:
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title, length + 1)
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == own_pid:
+                return True
+            minimized = bool(user32.IsIconic(hwnd))
+            rect = window_rect(int(hwnd)) if not minimized else None
+            if rect is None and not minimized:
+                return True
+            if rect and (rect[2] - rect[0] < 120 or rect[3] - rect[1] < 80):
+                return True
+            if title.value in ("Program Manager", "Windows Input Experience"):
+                return True
+            found.append({"hwnd": int(hwnd), "title": title.value, "app": app_name(pid.value),
+                          "minimized": minimized})
+        except Exception:
+            logger.debug("Window skipped", exc_info=True)
+        return True
+
+    try:
+        user32.EnumWindows(visit, 0)
+    except Exception:
+        logger.exception("Window listing failed")
+    return found
+
+
+def monitor_for_rect(rect: tuple[int, int, int, int], monitors: list[dict]) -> dict | None:
+    """The monitor that holds most of the rectangle."""
+    best, best_area = None, 0
+    for monitor in monitors:
+        left = max(rect[0], monitor["left"])
+        top = max(rect[1], monitor["top"])
+        right = min(rect[2], monitor["left"] + monitor["width"])
+        bottom = min(rect[3], monitor["top"] + monitor["height"])
+        area = max(0, right - left) * max(0, bottom - top)
+        if area > best_area:
+            best, best_area = monitor, area
+    return best
+
+
+def cursor_position() -> tuple[int, int] | None:
+    """Where the mouse pointer is (physical screen pixels), or None if it is hidden (e.g. in a game)."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hCursor", wintypes.HANDLE),
+                    ("ptScreenPos", wintypes.POINT)]
+
+    info = CURSORINFO()
+    info.cbSize = ctypes.sizeof(info)
+    try:
+        if not _user32().GetCursorInfo(ctypes.byref(info)) or not info.flags & 1:  # CURSOR_SHOWING
+            return None
+    except Exception:
+        return None
+    return info.ptScreenPos.x, info.ptScreenPos.y
+
+
+def draw_cursor(image: QImage, x: float, y: float, scale: float = 1.0) -> None:
+    """A classic arrow pointer with a dark outline, its tip at (x, y) in image pixels."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QColor, QPen, QPolygonF
+
+    if x < -40 or y < -40 or x > image.width() + 2 or y > image.height() + 2:
+        return
+    points = [(0, 0), (0, 17), (4.2, 13.2), (7, 19.5), (9.6, 18.4), (6.9, 12.2), (12.2, 12.2)]
+    polygon = QPolygonF([QPointF(x + px * scale, y + py * scale) for px, py in points])
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor(0, 0, 0, 230), max(1.0, 1.4 * scale)))
+    painter.setBrush(QColor(255, 255, 255))
+    painter.drawPolygon(polygon)
+    painter.end()
+
+
+def resolve_source(kind: str, ident: int) -> dict:
+    """What to capture: a whole monitor, or one window (with the monitor it is on)."""
+    monitors = list_monitors()
+    if not monitors:
+        raise RuntimeError("Не найден экран для демонстрации")
+    if kind == "window":
+        rect = window_rect(ident)
+        if rect is None:
+            raise RuntimeError("Окно свёрнуто или закрыто. Разверните его и попробуйте снова")
+        monitor = monitor_for_rect(rect, monitors) or monitors[0]
+        return {**monitor, "kind": "window", "hwnd": ident, "window_width": rect[2] - rect[0],
+                "window_height": rect[3] - rect[1]}
+    monitor = next((m for m in monitors if m["index"] == ident), monitors[0])
+    return {**monitor, "kind": "monitor"}
+
+
+def snapshot(kind: str, ident: int, width: int) -> QImage | None:
+    """One quick screenshot of a monitor or a window, scaled to `width` (for the preview in the dialog)."""
+    import mss
+
+    if os.environ.get("VOICECHAT_TEST_CAPTURE") == "1":
+        image = QImage(width, width * 9 // 16, QImage.Format_RGB32)
+        image.fill(0xFF203040)
+        return image
+    with mss.mss() as grabber:
+        if kind == "window":
+            rect = window_rect(ident)
+            if rect is None:
+                return None
+            region = {"left": rect[0], "top": rect[1], "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+        else:
+            if ident >= len(grabber.monitors):
+                return None
+            region = grabber.monitors[ident]
+        shot = grabber.grab(region)
+        image = QImage(shot.raw, shot.width, shot.height, shot.width * 4, QImage.Format_RGB32).copy()
+        position = cursor_position()
+        if position is not None:
+            draw_cursor(image, position[0] - region["left"], position[1] - region["top"], max(1.0, shot.height / 1080))
+    return image.scaledToWidth(max(16, width), Qt.SmoothTransformation)
 
 
 def _target_size(width: int, height: int, max_height: int) -> tuple[int, int]:
@@ -111,7 +305,40 @@ class _Rate:
 
 
 def _make_grabber(info: dict, monitor_count: int, fps: int):
-    """Returns (grab, close, paced, backend). grab() gives a QImage in BGRA memory order (RGB32) or None."""
+    """Returns (grab, close, paced, backend). grab() gives a QImage in BGRA memory order (RGB32) or None.
+
+    For a window, the monitor it is on is captured and cut to the window's current bounds; the mouse
+    pointer is painted in, because Desktop Duplication leaves it out."""
+    grab, close, paced, backend = _make_monitor_grabber(info, monitor_count, fps)
+    window = info.get("hwnd") if info.get("kind") == "window" else None
+    origin_x, origin_y = info.get("left", 0), info.get("top", 0)
+    cursor_scale = max(1.0, info.get("height", 1080) / 1080)
+    last: list = [None]
+
+    def grab_with_extras():
+        image = grab()
+        if image is None:
+            return None
+        left, top = origin_x, origin_y
+        if window is not None:
+            rect = window_rect(window)
+            if rect is None:
+                return last[0]  # minimised: keep showing the last picture
+            x0, y0 = max(0, rect[0] - origin_x), max(0, rect[1] - origin_y)
+            x1, y1 = min(image.width(), rect[2] - origin_x), min(image.height(), rect[3] - origin_y)
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                return last[0]  # moved to another screen
+            image = image.copy(x0, y0, x1 - x0, y1 - y0)
+            left, top = origin_x + x0, origin_y + y0
+        position = cursor_position()
+        if position is not None:
+            draw_cursor(image, position[0] - left, position[1] - top, cursor_scale)
+        last[0] = image
+        return image
+    return grab_with_extras, close, paced, backend
+
+
+def _make_monitor_grabber(info: dict, monitor_count: int, fps: int):
     if os.environ.get("VOICECHAT_TEST_CAPTURE") == "1":
         # Tests: a moving gradient instead of a real screen, so the whole capture path runs without a display.
         counter = [0]
@@ -162,7 +389,16 @@ def _make_grabber(info: dict, monitor_count: int, fps: int):
 
 def _fit(image: QImage, width: int, height: int) -> QImage:
     if image.width() != width or image.height() != height:
-        image = image.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        if abs(image.width() / max(1, image.height()) - width / height) < 0.01:
+            image = image.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        else:  # a window changed its shape: keep its proportions, black bars around it
+            scaled = image.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            canvas = QImage(width, height, QImage.Format_RGB32)
+            canvas.fill(0xFF000000)
+            painter = QPainter(canvas)
+            painter.drawImage((width - scaled.width()) // 2, (height - scaled.height()) // 2, scaled)
+            painter.end()
+            image = canvas
     if image.format() != QImage.Format_RGB32:
         image = image.convertToFormat(QImage.Format_RGB32)
     return image
@@ -176,6 +412,13 @@ def capture_process_main(info: dict, monitor_count: int, width: int, height: int
     Frames go through shared memory slots; only the slot number travels through the pipe."""
     from multiprocessing import shared_memory
 
+    if os.name == "nt":
+        try:  # same physical pixel coordinates as the app (windows, the mouse pointer)
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            pass
     frame_bytes = width * height * 4
     shm = shared_memory.SharedMemory(name=shm_name)
     try:
@@ -215,16 +458,17 @@ class ScreenCapturer:
     PREVIEW_FPS = 20  # your own preview: full size, sharp, but not so often that it costs the call anything
     SLOTS = 3
 
-    def __init__(self, monitor: int, preset: Preset, preview=None) -> None:
+    def __init__(self, monitor: int, preset: Preset, preview=None, kind: str = "monitor") -> None:
         self.preview = preview  # called with a QImage so you can see what you are sharing
-        monitors = list_monitors()
-        info = next((m for m in monitors if m["index"] == monitor), monitors[0] if monitors else None)
-        if info is None:
-            raise RuntimeError("Не найден экран для демонстрации")
+        info = resolve_source(kind, monitor)
         self._info = info
-        self._monitor_count = len(monitors)
+        self._monitor_count = len(list_monitors())
         self.monitor = info["index"]
-        self.width, self.height = _target_size(info["width"], info["height"], preset.height)
+        self.kind = info["kind"]
+        source_w = info.get("window_width", info["width"])
+        source_h = info.get("window_height", info["height"])
+        self._source_size = (source_w, source_h)
+        self.width, self.height = _target_size(source_w, source_h, preset.height)
         self.fps = preset.fps
         self.max_bitrate = preset.bitrate
         self._stop = threading.Event()
@@ -238,7 +482,7 @@ class ScreenCapturer:
     def stats(self) -> dict:
         """What really happens right now: captured and sent frames per second, the encoded size and rate."""
         return {"capture_fps": self._captured.value(), "sent_fps": self._sent.value(), "width": self.width,
-                "source_width": self._info["width"], "source_height": self._info["height"],
+                "source_width": self._source_size[0], "source_height": self._source_size[1],
                 "height": self.height, "grab_ms": round(self._grab_ms, 1), "backend": self.backend,
                 **self.encoder}
 

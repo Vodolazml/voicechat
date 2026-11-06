@@ -22,7 +22,7 @@ Modal {
     PrimaryButton { Layout.fillWidth: true; text: dlg.channelId ? "Сохранить" : "Создать"; enabled: nameField.text.trim().length >= 2; onClicked: dlg.save() }
 
     function openCreate(type) { channelId = 0; channelType = type; nameField.text = ""; limit = 0; priv.checked = false; open(); nameField.forceActiveFocus() }
-    function openEdit(id, currentName, currentLimit) { channelId = id; channelType = "voice"; nameField.text = currentName; limit = currentLimit; open() }
+    function openEdit(id, currentName, currentLimit, type) { channelId = id; channelType = type || "voice"; nameField.text = currentName; limit = currentLimit; open() }
     function save() {
         if (nameField.text.trim().length < 2) return
         if (channelId) backend.updateChannel(channelId, nameField.text, limit)

@@ -1,12 +1,14 @@
 import QtQuick
 
-// Round avatar with initials; a soft green halo pulses while the person is speaking.
+// Round avatar: their picture if they set one, otherwise initials; a soft green halo pulses while they speak.
 Item {
     id: root
     property string initials: "?"
+    property string source: ""
     property color color: Theme.accent
     property bool speaking: false
     property int size: 32
+    readonly property int pictureSize: Math.min(256, Math.ceil(size * 2))
     implicitWidth: size
     implicitHeight: size
 
@@ -46,8 +48,18 @@ Item {
             GradientStop { position: 0; color: Qt.lighter(root.color, 1.25) }
             GradientStop { position: 1; color: Qt.darker(root.color, 1.25) }
         }
+        Image {  // the picture comes already cut to a circle (see images.py)
+            id: picture
+            anchors.fill: parent
+            visible: root.source !== "" && status === Image.Ready
+            source: root.source
+            sourceSize: Qt.size(root.pictureSize, root.pictureSize)
+            smooth: true; mipmap: true
+            asynchronous: true
+        }
         Text {
             anchors.centerIn: parent
+            visible: !picture.visible
             text: root.initials
             color: "white"
             font.family: Theme.font

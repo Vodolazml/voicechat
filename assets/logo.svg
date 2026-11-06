@@ -1,23 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- VoiceChat mark: five voice bars that together draw a "V". -->
+  <!-- VoiceChat mark: a white voice wave on a coral-to-pink tile.  -->
   <defs>
-    <linearGradient id="g" x1="20" y1="10" x2="236" y2="246" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#7b6cff"/>
-      <stop offset="0.55" stop-color="#b44dff"/>
-      <stop offset="1" stop-color="#ff4f9a"/>
+    <linearGradient id="g" x1="0" y1="0" x2="256" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff7849"/>
+      <stop offset="1" stop-color="#ff3d9a"/>
     </linearGradient>
-    <radialGradient id="shine" cx="60" cy="30" r="200" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </radialGradient>
   </defs>
-  <rect width="256" height="256" rx="64" fill="url(#g)"/>
-  <rect width="256" height="256" rx="64" fill="url(#shine)"/>
+  <rect width="256" height="256" rx="85" fill="url(#g)"/>
   <g fill="#ffffff">
-    <rect x="47" y="62" width="26" height="48" rx="13"/>
-    <rect x="81" y="62" width="26" height="88" rx="13"/>
-    <rect x="115" y="62" width="26" height="134" rx="13"/>
-    <rect x="149" y="62" width="26" height="88" rx="13"/>
-    <rect x="183" y="62" width="26" height="48" rx="13"/>
+    <rect x="76.0" y="116.4" width="11.6" height="23.1" rx="5.8"/>
+    <rect x="99.1" y="93.3" width="11.6" height="69.3" rx="5.8"/>
+    <rect x="122.2" y="70.2" width="11.6" height="115.6" rx="5.8"/>
+    <rect x="145.3" y="93.3" width="11.6" height="69.3" rx="5.8"/>
+    <rect x="168.4" y="116.4" width="11.6" height="23.1" rx="5.8"/>
   </g>
 </svg>

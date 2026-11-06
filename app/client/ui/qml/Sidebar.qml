@@ -11,8 +11,10 @@ Rectangle {
     signal leaveSpace()
     signal deleteSpace()
     signal openScreenShare()
+    signal openCamera()
+    signal openSpaceSettings()
     signal createChannel(string type)
-    signal renameChannel(int channelId, string name, int limit)
+    signal renameChannel(int channelId, string name, int limit, string type)
     signal deleteChannel(int channelId, string name)
 
     ColumnLayout {
@@ -25,6 +27,11 @@ Rectangle {
             color: "transparent"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 10
+                Image {
+                    visible: backend.spaceAvatar !== "" && status === Image.Ready
+                    Layout.preferredWidth: 24; Layout.preferredHeight: 24; Layout.rightMargin: 4
+                    source: backend.spaceAvatar; sourceSize.width: 64; sourceSize.height: 64; smooth: true; mipmap: true; asynchronous: true
+                }
                 Text { Layout.fillWidth: true; text: backend.spaceName || "VoiceChat"; color: Theme.text; elide: Text.ElideRight; font.family: Theme.font; font.pixelSize: 15; font.weight: Font.Bold }
                 IconButton { visible: backend.canInvite; glyph: "person_add"; tip: "Пригласить друга"; size: 30; onClicked: root.openInvite() }
                 IconButton {
@@ -32,6 +39,8 @@ Rectangle {
                     onClicked: spaceMenu.popup()
                     StyledMenu {
                         id: spaceMenu
+                        MenuItem { visible: backend.canEditSpace; height: visible ? implicitHeight : 0; text: "Настройки пространства"; onTriggered: root.openSpaceSettings() }
+                        MenuItem { visible: !backend.canEditSpace; height: visible ? implicitHeight : 0; text: "Участники"; onTriggered: root.openSpaceSettings() }
                         MenuItem { visible: backend.canInvite; height: visible ? implicitHeight : 0; text: "Код приглашения"; onTriggered: root.openInvite() }
                         MenuItem { visible: !backend.spaceIsMine && !backend.isOwner; height: visible ? implicitHeight : 0; text: "Выйти из пространства"; onTriggered: root.leaveSpace() }
                         MenuItem { visible: backend.spaceIsMine || backend.isOwner; height: visible ? implicitHeight : 0; text: "Удалить пространство"; onTriggered: root.deleteSpace() }
@@ -44,7 +53,7 @@ Rectangle {
         ChannelList {
             Layout.fillWidth: true; Layout.fillHeight: true
             onCreateRequested: (type) => root.createChannel(type)
-            onRenameRequested: (id, name, limit) => root.renameChannel(id, name, limit)
+            onRenameRequested: (id, name, limit, type) => root.renameChannel(id, name, limit, type)
             onDeleteRequested: (id, name) => root.deleteChannel(id, name)
         }
 
@@ -89,6 +98,12 @@ Rectangle {
                         font.pixelSize: 12
                         onClicked: backend.sharing ? backend.stopScreen() : root.openScreenShare()
                     }
+                    IconButton {
+                        size: 32; visible: backend.canShare && (backend.cameraAllowed || backend.cameraOn)
+                        glyph: backend.cameraOn ? "videocam" : "videocam_off"; active: backend.cameraOn
+                        tip: backend.cameraOn ? "Выключить камеру" : "Включить камеру"
+                        onClicked: backend.cameraOn ? backend.stopCamera() : root.openCamera()
+                    }
                     PrimaryButton {
                         Layout.fillWidth: true; implicitHeight: 32; secondary: true
                         text: "Чат и участники"; font.pixelSize: 12
@@ -108,7 +123,7 @@ Rectangle {
                 Item {
                     Layout.rightMargin: 6
                     width: 36; height: 36
-                    Avatar { anchors.fill: parent; size: 36; initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent; speaking: backend.inCall && backend.transmitting }
+                    Avatar { anchors.fill: parent; size: 36; initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent; source: backend.myAvatar; speaking: backend.inCall && backend.transmitting }
                     Rectangle {
                         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -2
                         width: 14; height: 14; radius: 7; border.width: 3; border.color: "#0f1017"

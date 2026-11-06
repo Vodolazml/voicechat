@@ -66,12 +66,13 @@ class ApiClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
-    def request(self, method: str, path: str, **kwargs: Any) -> Any:
+    def request(self, method: str, path: str, *, raw: bool = False, **kwargs: Any) -> Any:
+        extra_headers = kwargs.pop("headers", None) or {}
         try:
             response = self._client.request(
                 method,
                 f"{self.base_url.rstrip('/')}{path}",
-                headers=self._headers(),
+                headers={**self._headers(), **extra_headers},
                 **kwargs,
             )
         except httpx.HTTPError as exc:
@@ -84,7 +85,7 @@ class ApiClient:
                     self.refresh_session(self.refresh_token)
             try:
                 response = self._client.request(method, f"{self.base_url.rstrip('/')}{path}",
-                                                headers=self._headers(), **kwargs)
+                                                headers={**self._headers(), **extra_headers}, **kwargs)
             except httpx.HTTPError as exc:
                 raise ApiError("Сервер недоступен") from exc
         if response.status_code >= 400:
@@ -93,6 +94,8 @@ class ApiClient:
             except ValueError:
                 detail = response.text or "Ошибка запроса"
             raise ApiError(str(detail), response.status_code)
+        if raw:
+            return response.content
         if not response.content:
             return None
         return response.json()
@@ -254,6 +257,29 @@ class ApiClient:
 
     def delete_space(self, space_id: int) -> None:
         self.request("DELETE", f"/spaces/{space_id}")
+
+    def update_space(self, space_id: int, **changes: Any) -> dict[str, Any]:
+        return self.request("PATCH", f"/spaces/{space_id}", json=changes)
+
+    def space_members(self, space_id: int) -> list[dict[str, Any]]:
+        return self.request("GET", f"/spaces/{space_id}/members")
+
+    def set_moderator(self, space_id: int, user_id: int, moderator: bool) -> list[dict[str, Any]]:
+        return self.request("PUT", f"/spaces/{space_id}/moderators/{user_id}", json={"moderator": moderator})
+
+    def set_my_avatar(self, picture: bytes) -> dict[str, Any]:
+        return self.request("PUT", "/me/avatar", content=picture,
+                            headers={"Content-Type": "application/octet-stream"})
+
+    def set_space_avatar(self, space_id: int, picture: bytes) -> dict[str, Any]:
+        return self.request("PUT", f"/spaces/{space_id}/avatar", content=picture,
+                            headers={"Content-Type": "application/octet-stream"})
+
+    def avatar(self, kind: str, item_id: int) -> bytes:
+        return self.request("GET", f"/avatars/{kind}/{item_id}", raw=True)
+
+    def wake_user(self, user_id: int) -> dict[str, Any]:
+        return self.request("POST", f"/voice/{user_id}/wake")
 
     def channels(self, space_id: int) -> list[dict[str, Any]]:
         return self.request("GET", f"/spaces/{space_id}/channels")

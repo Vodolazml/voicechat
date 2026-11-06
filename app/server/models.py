@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -19,6 +19,9 @@ class User(Base):
     # The owner cannot be disabled or have the password reset by other administrators.
     is_owner: Mapped[bool] = mapped_column(Boolean, default=False)
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Small PNG/JPEG picture set in the profile; the version changes with every new picture (cache key).
+    avatar: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    avatar_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     roles: Mapped[list["UserRole"]] = relationship(cascade="all, delete-orphan")
@@ -100,6 +103,21 @@ class Space(Base):
     # Reusable code people type to join; the creator can replace it at any time.
     invite_code: Mapped[str | None] = mapped_column(String(16), unique=True, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Only the creator sets the picture.
+    avatar: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
+    avatar_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Space settings: the best screen share quality members may pick, and whether cameras are allowed.
+    max_share_quality: Mapped[str] = mapped_column(String(16), default="1440p60", server_default="1440p60")
+    camera_allowed: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+
+
+class SpaceModerator(Base):
+    """A moderator does everything the space's creator does, except creating and deleting channels,
+    deleting the space, changing its picture and appointing moderators."""
+
+    __tablename__ = "space_moderators"
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
 
 
 class SpaceMember(Base):

@@ -32,6 +32,7 @@ class CallListener:
     on_quality: Callable[[int, int], None] = lambda user_id, quality: None
     on_streams: Callable[[set[int]], None] = lambda users: None
     on_video_frame: Callable[[int, Any], None] = lambda user_id, frame: None
+    on_cameras: Callable[[set[int]], None] = lambda users: None
     on_notice: Callable[[str, str], None] = lambda level, text: None   # in-app toast, never a popup
     on_identity_changed: Callable[[int], None] = lambda user_id: None
     on_local: Callable[[dict], None] = lambda flags: None              # muted/deafened/transmitting
@@ -108,6 +109,14 @@ class CallController:
     def stop_screen(self) -> None:
         if self.media:
             self.media.stop_screen()
+
+    def start_camera(self, capturer) -> None:
+        if self.media:
+            self.media.start_camera(capturer)
+
+    def stop_camera(self) -> None:
+        if self.media:
+            self.media.stop_camera()
 
     def handle_event(self, event: dict) -> None:
         """Server events relevant to the call (from the event stream thread)."""
@@ -187,6 +196,7 @@ class CallController:
             on_quality=self.listener.on_quality,
             on_streams=self.listener.on_streams,
             on_video_frame=self.listener.on_video_frame,
+            on_cameras=self.listener.on_cameras,
             on_participants=lambda users: None,
         )
         media = self.media_factory(
@@ -215,6 +225,7 @@ class CallController:
         self.speakers = set()
         self.listener.on_speakers(set())
         self.listener.on_streams(set())
+        self.listener.on_cameras(set())
         if channel_id is not None:
             self.keys.forget(channel_id)
             if notify_server:

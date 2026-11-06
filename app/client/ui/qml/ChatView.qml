@@ -101,7 +101,7 @@ Rectangle {
                     Avatar {
                         visible: !msg.model.grouped
                         x: 16; y: 8; size: 38
-                        initials: msg.model.initials; color: msg.model.color
+                        initials: msg.model.initials; color: msg.model.color; source: msg.model.avatar || ""
                     }
                     Text {
                         visible: msg.model.grouped && hover.hovered

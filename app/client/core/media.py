@@ -20,6 +20,12 @@ from .dsp import FRAME_SAMPLES, SAMPLE_RATE
 logger = logging.getLogger("voicechat.media")
 
 MAX_MIC_BACKLOG = 4  # 40 ms: older frames are dropped instead of adding delay
+# Video frames are handed out by key: the user id for a screen share, this offset plus the user id for a camera.
+CAMERA_KEY_OFFSET = 1_000_000_000
+
+
+def camera_key(user_id: int) -> int:
+    return CAMERA_KEY_OFFSET + user_id
 
 
 def key_index(key_id: str) -> int:
@@ -43,6 +49,7 @@ class MediaCallbacks:
     on_streams: Callable[[set[int]], None] = lambda users: None            # who is sharing a screen now
     on_video_frame: Callable[[int, Any], None] = lambda user_id, frame: None
     on_participants: Callable[[set[int]], None] = lambda users: None
+    on_cameras: Callable[[set[int]], None] = lambda users: None             # who has a camera on now
 
 
 class MediaSession:
@@ -68,6 +75,8 @@ class MediaSession:
         self._watching: set[int] = set()
         self._streams: set[int] = set()
         self._screen = None
+        self._camera = None
+        self._cameras: set[int] = set()
         self.muted = False
         self.connected = False
 
@@ -134,6 +143,17 @@ class MediaSession:
         loop = self._loop
         if loop:
             asyncio.run_coroutine_threadsafe(self._stop_screen(), loop)
+
+    def start_camera(self, capturer) -> None:
+        """capturer: object with width, height, fps, max_bitrate and async `run(source)`."""
+        loop = self._loop
+        if loop:
+            asyncio.run_coroutine_threadsafe(self._start_camera(capturer), loop)
+
+    def stop_camera(self) -> None:
+        loop = self._loop
+        if loop:
+            asyncio.run_coroutine_threadsafe(self._stop_camera(), loop)
 
     # --- event loop side ------------------------------------------------------------------------
 
@@ -219,6 +239,8 @@ class MediaSession:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         if self._screen is not None:
             await self._stop_screen()
+        if self._camera is not None:
+            await self._stop_camera()
         self._mic_track = None
         try:
             await room.disconnect()
@@ -227,7 +249,9 @@ class MediaSession:
         self._room = None
         self.mixer.clear()
         self._streams.clear()
+        self._cameras.clear()
         self.cb.on_streams(set())
+        self.cb.on_cameras(set())
         self.cb.on_speakers(set())
 
     async def _publish_mic(self, room) -> None:
@@ -306,6 +330,8 @@ class MediaSession:
             for publication in participant.track_publications.values():
                 if publication.kind == rtc.TrackKind.KIND_AUDIO:
                     wanted = publication.source == rtc.TrackSource.SOURCE_MICROPHONE or user_id in self._watching
+                elif publication.source == rtc.TrackSource.SOURCE_CAMERA:
+                    wanted = True  # cameras are small and part of the call, like voices
                 else:
                     wanted = user_id in self._watching
                 if publication.subscribed != wanted:
@@ -316,18 +342,27 @@ class MediaSession:
 
         room = self._room
         streams = set()
+        cameras = set()
         if room is not None:
             for participant in room.remote_participants.values():
                 user_id = user_id_from_identity(participant.identity)
                 if user_id is None:
                     continue
-                if any(p.source == rtc.TrackSource.SOURCE_SCREENSHARE for p in participant.track_publications.values()):
+                sources = {p.source for p in participant.track_publications.values()}
+                if rtc.TrackSource.SOURCE_SCREENSHARE in sources:
                     streams.add(user_id)
+                if rtc.TrackSource.SOURCE_CAMERA in sources:
+                    cameras.add(user_id)
         if self._screen is not None:
             streams.add(self.my_id)
+        if self._camera is not None:
+            cameras.add(self.my_id)
         if streams != self._streams:
             self._streams = streams
             self.cb.on_streams(set(streams))
+        if cameras != self._cameras:
+            self._cameras = cameras
+            self.cb.on_cameras(set(cameras))
 
     def _report_participants(self) -> None:
         room = self._room
@@ -371,7 +406,8 @@ class MediaSession:
             if track.kind == rtc.TrackKind.KIND_AUDIO and publication.source == rtc.TrackSource.SOURCE_MICROPHONE:
                 self._spawn(self._receive_audio(track, user_id))
             elif track.kind == rtc.TrackKind.KIND_VIDEO:
-                self._spawn(self._receive_video(track, user_id))
+                camera = publication.source == rtc.TrackSource.SOURCE_CAMERA
+                self._spawn(self._receive_video(track, camera_key(user_id) if camera else user_id))
 
         @room.on("active_speakers_changed")
         def _speakers(speakers):
@@ -494,6 +530,41 @@ class MediaSession:
                 raise
             except Exception:
                 logger.debug("Screen share stats unavailable", exc_info=True)
+
+    async def _start_camera(self, capturer) -> None:
+        from livekit import rtc
+
+        room = self._room
+        if room is None or not room.isconnected():
+            raise RuntimeError("not connected")
+        if self._camera is not None:
+            await self._stop_camera()
+        source = rtc.VideoSource(capturer.width, capturer.height)
+        track = rtc.LocalVideoTrack.create_video_track("camera", source)
+        options = rtc.TrackPublishOptions(
+            source=rtc.TrackSource.SOURCE_CAMERA,
+            video_encoding=rtc.VideoEncoding(max_bitrate=capturer.max_bitrate, max_framerate=capturer.fps),
+            simulcast=False)
+        publication = await room.local_participant.publish_track(track, options)
+        self._use_local_key_index(key_index(self.outgoing_key()[0]))
+        task = asyncio.create_task(capturer.run(source))
+        self._camera = (publication, task, capturer)
+        self._report_streams()
+
+    async def _stop_camera(self) -> None:
+        if self._camera is None:
+            return
+        publication, task, capturer = self._camera
+        self._camera = None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        room = self._room
+        if room is not None and room.isconnected():
+            try:
+                await room.local_participant.unpublish_track(publication.sid)
+            except Exception:
+                pass
+        self._report_streams()
 
     async def _stop_screen(self) -> None:
         if self._screen is None:

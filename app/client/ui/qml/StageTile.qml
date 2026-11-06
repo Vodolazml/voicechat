@@ -22,6 +22,15 @@ Rectangle {
         GradientStop { position: 1; color: Theme.card }
     }
 
+    // Their camera fills the tile while they are not showing a screen you watch.
+    VideoView {
+        id: cam
+        anchors.fill: parent
+        anchors.margins: 3
+        userId: tile.person.camera ? tile.person.cameraKey : 0
+        visible: tile.person.camera && !tile.person.watching && hasFrame
+    }
+
     VideoView {
         id: video
         anchors.fill: parent
@@ -32,10 +41,11 @@ Rectangle {
 
     Avatar {
         anchors.centerIn: parent
-        visible: !tile.person.watching || !video.hasFrame
+        visible: tile.person.watching ? !video.hasFrame : !cam.visible
         size: Math.min(tile.width, tile.height) * (tile.small ? 0.42 : 0.36)
         initials: tile.person.initials
         color: tile.person.color
+        source: tile.person.avatar || ""
         speaking: tile.person.speaking
     }
     Spinner { anchors.centerIn: parent; visible: tile.person.watching && !video.hasFrame; size: 28 }
@@ -106,6 +116,14 @@ Rectangle {
 
     StyledMenu {
         id: personMenu
+        property int wakeWait: 0
+        onAboutToShow: wakeWait = backend.wakeWait(tile.person.id)
+        MenuItem {
+            visible: tile.person.canWake; height: visible ? implicitHeight : 0
+            enabled: personMenu.wakeWait === 0
+            text: personMenu.wakeWait > 0 ? "Разбудить (через " + personMenu.wakeWait + " с)" : "Разбудить"
+            onTriggered: backend.wakeUser(tile.person.id)
+        }
         MenuItem {
             contentItem: SliderRow {
                 title: "Громкость"; from: 0; to: 3; value: tile.person.volume

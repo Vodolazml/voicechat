@@ -87,3 +87,83 @@ def test_manager_reorders_channels_and_members_cannot(client):
                       json={"channel_ids": wanted}).status_code == 200
     seen = [c["id"] for c in client.get(f"/spaces/{space['id']}/channels", headers=bob).json() if c["type"] == "voice"]
     assert seen == wanted
+
+
+def _png() -> bytes:
+    import struct
+    import zlib
+
+    raw = b"\x00\xff\x00\x00"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+def test_moderator_does_all_but_create_and_delete_channels(client):
+    alice = signup(client, "alice")
+    bob = signup(client, "bob")
+    carol = signup(client, "carol")
+    space = client.post("/spaces", headers=alice, json={"name": "Модерация"}).json()
+    sid = space["id"]
+    for who in (bob, carol):
+        client.post("/spaces/join", headers=who, json={"code": space["invite_code"]})
+    bob_id = client.get("/me", headers=bob).json()["id"]
+    alice_id = client.get("/me", headers=alice).json()["id"]
+
+    # Only the creator appoints moderators.
+    assert client.put(f"/spaces/{sid}/moderators/{bob_id}", headers=carol, json={"moderator": True}).status_code == 403
+    members = client.put(f"/spaces/{sid}/moderators/{bob_id}", headers=alice, json={"moderator": True}).json()
+    assert {m["id"]: m["role"] for m in members}[bob_id] == "moderator"
+    assert {m["id"]: m["role"] for m in members}[alice_id] == "admin"
+    me_as_bob = next(s for s in client.get("/spaces", headers=bob).json() if s["id"] == sid)
+    assert me_as_bob["role"] == "moderator" and me_as_bob["can_manage"]
+
+    channel = next(c for c in client.get(f"/spaces/{sid}/channels", headers=bob).json() if c["type"] == "voice")
+    # A moderator renames channels and the space, changes settings, rotates the code...
+    assert client.patch(f"/channels/{channel['id']}", headers=bob, json={"name": "Болталка"}).status_code == 200
+    updated = client.patch(f"/spaces/{sid}", headers=bob, json={"name": "Новое имя", "max_share_quality": "1080p30",
+                                                               "camera_allowed": False})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["max_share_quality"] == "1080p30" and not updated.json()["camera_allowed"]
+    assert client.post(f"/spaces/{sid}/invite-code", headers=bob).status_code == 200
+    # ...but cannot create or delete channels, delete the space, set its picture or appoint moderators.
+    assert client.post("/channels", headers=bob, json={"space_id": sid, "name": "Ещё", "type": "voice"}).status_code == 403
+    assert client.delete(f"/channels/{channel['id']}", headers=bob).status_code == 403
+    assert client.delete(f"/spaces/{sid}", headers=bob).status_code == 403
+    assert client.put(f"/spaces/{sid}/avatar", headers={**bob, "Content-Type": "image/png"},
+                      content=_png()).status_code == 403
+    assert client.put(f"/spaces/{sid}/moderators/{bob_id}", headers=bob, json={"moderator": False}).status_code == 403
+    # Plain members change nothing.
+    assert client.patch(f"/spaces/{sid}", headers=carol, json={"name": "Взлом"}).status_code == 403
+    assert client.patch(f"/spaces/{sid}", headers=alice, json={"max_share_quality": "8k"}).status_code == 422
+
+
+def test_avatars_for_people_and_spaces(client):
+    alice = signup(client, "alice")
+    bob = signup(client, "bob")
+    space = client.post("/spaces", headers=alice, json={"name": "Картинки"}).json()
+    client.post("/spaces/join", headers=bob, json={"code": space["invite_code"]})
+    picture = _png()
+
+    assert client.put("/me/avatar", headers=alice, content=b"not a picture").status_code == 415
+    assert client.put("/me/avatar", headers=alice, content=b"\x89PNG\r\n\x1a\n" + b"0" * 70_000).status_code == 413
+    version = client.put("/me/avatar", headers=alice, content=picture).json()["avatar_version"]
+    assert version >= 1
+    alice_id = client.get("/me", headers=alice).json()["id"]
+    assert client.get("/me", headers=alice).json()["avatar_version"] == version
+    got = client.get(f"/avatars/user/{alice_id}", headers=bob)
+    assert got.status_code == 200 and got.content == picture and got.headers["content-type"] == "image/png"
+    members = client.get(f"/spaces/{space['id']}/members", headers=bob).json()
+    assert {m["id"]: m["avatar_version"] for m in members}[alice_id] == version
+
+    assert client.put(f"/spaces/{space['id']}/avatar", headers=alice, content=picture).status_code == 200
+    seen = next(s for s in client.get("/spaces", headers=bob).json() if s["id"] == space["id"])
+    assert seen["avatar_version"] >= 1
+    assert client.get(f"/avatars/space/{space['id']}", headers=bob).content == picture
+    outsider = signup(client, "carol")
+    assert client.get(f"/avatars/space/{space['id']}", headers=outsider).status_code == 404
+    # An empty body removes the picture.
+    assert client.put("/me/avatar", headers=alice, content=b"").json()["avatar_version"] == 0
+    assert client.get(f"/avatars/user/{alice_id}", headers=bob).status_code == 404

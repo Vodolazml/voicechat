@@ -40,7 +40,8 @@ from app.version import APP_VERSION
 
 from . import platform as native
 from .models import ListModel
-from .screen import PRESETS, PRESETS_BY_KEY, ScreenCapturer, list_monitors, video_hub
+from .screen import PRESETS, ScreenCapturer, list_monitors, list_windows, video_hub
+from app.client.core.media import camera_key
 
 logger = logging.getLogger("voicechat.ui")
 
@@ -56,7 +57,7 @@ UI_DEFAULTS: dict[str, Any] = {
     "sound_join_leave": True, "sound_messages": True, "notify_mentions": True, "voice_prompts": True,
     "overlay_x": 0.02, "overlay_y": 0.03,
     "accent": "#7c5cff", "compact": False, "close_to_tray": True, "autostart": False,
-    "screen_preset": "1080p60", "screen_monitor": 1,
+    "screen_preset": "1080p60", "screen_monitor": 1, "camera_id": "",
 }
 
 
@@ -163,6 +164,27 @@ SOUNDS = {
 }
 
 
+def wake_tune() -> bytes:
+    """About seven seconds of a bright, bouncy tune that is hard to sleep through (our own melody)."""
+    notes = [784, 988, 1175, 988, 784, 988, 1319, 0, 1175, 988, 1175, 1568, 1319, 0, 1175, 988,
+             784, 988, 1175, 1319, 1568, 1319, 1175, 0, 988, 1175, 988, 784, 988, 784, 1568, 0]
+    beat = 0.21
+    rate = SAMPLE_RATE
+    parts = []
+    for index, freq in enumerate(notes):
+        t = np.arange(int(rate * beat)) / rate
+        if not freq:
+            parts.append(np.zeros_like(t))
+            continue
+        envelope = np.minimum(1.0, t * 300) * np.exp(-t * 7)
+        tone = (np.sin(2 * np.pi * freq * t) + 0.35 * np.sin(4 * np.pi * freq * t)
+                + 0.15 * np.sin(6 * np.pi * freq * t))
+        bass = 0.4 * np.sin(2 * np.pi * (freq / 4) * t) * np.exp(-t * 5) if index % 2 == 0 else 0
+        parts.append((tone + bass) * envelope)
+    pcm = (np.concatenate(parts) * 0.26 * 32767).clip(-32767, 32767).astype(np.int16).tobytes()
+    return pcm + bytes((-len(pcm)) % FRAME_BYTES)
+
+
 VOICE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[3])) / "assets" / "voice"
 # Spoken prompts for the mic and headphone buttons ("Микрофон выключен" ...); the chimes are the fallback.
 PROMPTS = {"mic_on": "unmute", "mic_off": "mute", "sound_on": "unmute", "sound_off": "mute"}
@@ -194,6 +216,7 @@ def _load_prompts() -> None:
 
 
 _load_prompts()
+SOUNDS["wake"] = wake_tune()
 
 
 def _newer(latest: str, current: str) -> bool:
@@ -223,6 +246,7 @@ class Backend(QObject):
     videoInfoChanged = Signal()
     showWindowRequested = Signal()
     inviteCreated = Signal(str)
+    membersChanged = Signal()
     _post = Signal(object)
 
     def __init__(self, parent=None) -> None:
@@ -278,14 +302,15 @@ class Backend(QObject):
         self._inputs, self._outputs = [], []
         self._toast_seq = 0
 
-        self.spaces = ListModel(["id", "name", "initials", "unread", "mine", "color"])
+        self.spaces = ListModel(["id", "name", "initials", "unread", "mine", "color", "avatar"])
         self.channels = ListModel(["id", "name", "type", "user_limit", "is_private", "unread", "members",
                                    "memberCount", "active", "selected"])
         self.stage = ListModel(["id", "name", "initials", "color", "speaking", "muted", "deafened",
                                 "serverMuted", "streaming", "watching", "volume", "localMuted", "quality",
-                                "isMe", "keyChanged", "videoInfo", "videoDetail"])
+                                "isMe", "keyChanged", "videoInfo", "videoDetail", "avatar", "camera",
+                                "cameraKey", "canWake"])
         self.messages = ListModel(["id", "authorId", "author", "initials", "color", "html", "raw", "time",
-                                   "day", "showDay", "edited", "deleted", "mine", "mention", "grouped"])
+                                   "day", "showDay", "edited", "deleted", "mine", "mention", "grouped", "avatar"])
         self.toasts = ListModel(["id", "level", "text"])
 
         self._keys_poller = native.KeyPoller()
@@ -296,6 +321,11 @@ class Backend(QObject):
         # Real (measured) resolution and frame rate of streams, refreshed once a second.
         self._video_timer = QTimer(self, interval=1000, timeout=self._update_video_info)
         self._capturer: ScreenCapturer | None = None
+        self._camera = None                        # CameraCapturer while our camera is on
+        self._cameras: set[int] = set()            # who has a camera on in our call
+        self._avatars: dict[int, int] = {}         # user id -> picture version (0: none)
+        self._members: list[dict] = []             # people in the current space
+        self._wake_until: dict[int, float] = {}    # user id -> when they can be woken again
         self._video_info: dict[int, tuple[str, str]] = {}
         QTimer.singleShot(0, self._startup)
 
@@ -390,7 +420,18 @@ class Backend(QObject):
     me = Property("QVariantMap", lambda self: self._me, notify=meChanged)
     # The creator of a space manages it; the server owner manages everything.
     canModerate = Property(bool, lambda self: self._manages_space("voice.moderate"), notify=spaceChanged)
-    canManageChannels = Property(bool, lambda self: self._manages_space("channels.create"), notify=spaceChanged)
+    # Moderators manage the space too, but only its creator (or the server owner) creates and deletes channels.
+    canManageChannels = Property(bool, lambda self: self._space_admin(), notify=spaceChanged)
+    canEditSpace = Property(bool, lambda self: self._manages_space("spaces.update"), notify=spaceChanged)
+    spaceRole = Property(str, lambda self: self._current_space().get("role", "member"), notify=spaceChanged)
+    spaceAvatar = Property(str, lambda self: self._space_avatar(self._current_space()), notify=spaceChanged)
+    spaceShareQuality = Property(str, lambda self: self._current_space().get("max_share_quality") or "1440p60",
+                                 notify=spaceChanged)
+    cameraAllowed = Property(bool, lambda self: bool(self._current_space().get("camera_allowed", True)),
+                             notify=spaceChanged)
+    spaceMembers = Property("QVariantList", lambda self: self._members, notify=membersChanged)
+    myAvatar = Property(str, lambda self: self._avatar_url(self._me.get("id", 0)), notify=meChanged)
+    cameraOn = Property(bool, lambda self: self._camera is not None, notify=callChanged)
     canInvite = Property(bool, lambda self: bool(self._current_space().get("invite_code")), notify=spaceChanged)
     spaceInviteCode = Property(str, lambda self: self._current_space().get("invite_code") or "", notify=spaceChanged)
     spaceIsMine = Property(bool, lambda self: bool(self._current_space().get("is_mine")), notify=spaceChanged)
@@ -568,6 +609,7 @@ class Backend(QObject):
         me, spaces = result
         me["initials"] = initials(me["display_name"])
         me["color"] = avatar_color(me["id"])
+        self._avatars[me["id"]] = me.get("avatar_version", 0)
         self._me = me
         self.meChanged.emit()
         self._set_busy(False)
@@ -582,6 +624,19 @@ class Backend(QObject):
     def _current_space(self) -> dict:
         return next((s for s in self._spaces_list if s["id"] == self._space_id), {})
 
+    def _space_admin(self) -> bool:
+        return (self._current_space().get("role") == "admin" or bool(self._me.get("is_owner"))
+                or "channels.create" in self._me.get("permissions", []))
+
+    def _avatar_url(self, user_id: int) -> str:
+        version = self._avatars.get(user_id, 0)
+        return f"image://avatar/user/{user_id}/{version}" if version else ""
+
+    @staticmethod
+    def _space_avatar(space: dict) -> str:
+        version = space.get("avatar_version", 0)
+        return f"image://avatar/space/{space['id']}/{version}" if version and space.get("id") else ""
+
     def _manages_space(self, permission: str) -> bool:
         return (bool(self._current_space().get("can_manage")) or bool(self._me.get("is_owner"))
                 or permission in self._me.get("permissions", []))
@@ -589,7 +644,7 @@ class Backend(QObject):
     def _set_spaces(self, spaces: list[dict], select: int = 0) -> None:
         self._spaces_list = spaces
         self.spaces.set_items([{"id": s["id"], "name": s["name"], "initials": initials(s["name"]),
-                                "color": avatar_color(s["id"] + 3),
+                                "color": avatar_color(s["id"] + 3), "avatar": self._space_avatar(s),
                                 "unread": 0, "mine": bool(s.get("is_mine"))} for s in spaces])
         ids = {s["id"] for s in spaces}
         wanted = select or self._space_id or self.client_settings.get("last_space_id")
@@ -658,6 +713,7 @@ class Backend(QObject):
             on_quality=lambda uid, q: self._ui(lambda: self._on_quality(uid, q)),
             on_streams=lambda users: self._ui(lambda: self._on_streams(users)),
             on_video_frame=video_hub().push,
+            on_cameras=lambda users: self._ui(lambda: self._on_cameras(users)),
             on_notice=lambda level, text: self._ui(lambda: self.toast(level, text)),
             on_local=lambda flags: None,
         )
@@ -733,7 +789,12 @@ class Backend(QObject):
         generation = self._voice_generation
 
         def load():
-            return self.api.channels(space_id), self.api.space_voice(space_id), self.api.unread(space_id)
+            try:
+                members = self.api.space_members(space_id)
+            except ApiError:
+                members = None  # an older server: no member list, no pictures
+            return (self.api.channels(space_id), self.api.space_voice(space_id), self.api.unread(space_id),
+                    members)
 
         def done(result):
             if space_id != self._space_id:
@@ -742,7 +803,11 @@ class Backend(QObject):
                 # A live event arrived while this snapshot was in flight; it may be older than the event.
                 self._refresh_space()
                 return
-            channels, voice, unread = result
+            channels, voice, unread, members = result
+            if members is not None:
+                self._set_members(members)
+            for state in voice:
+                self._avatars[state["user_id"]] = state.get("avatar_version", 0)
             my_id = self._me.get("id", 0)
             if my_id in {v["user_id"] for v in voice} and not self._call_channel:
                 # Left over from a crash or a killed process: we are not in a call, so leave at once.
@@ -774,6 +839,7 @@ class Backend(QObject):
                 members.append({
                     "id": uid, "name": state["display_name"], "initials": initials(state["display_name"]),
                     "color": avatar_color(uid), "muted": state["muted"] or state.get("server_muted", False),
+                    "avatar": self._avatar_url(uid),
                     "deafened": state["deafened"], "speaking": in_my_call and uid in self._speakers,
                     "streaming": in_my_call and uid in self._streams,
                     "reconnecting": state.get("status") == "reconnecting", "isMe": uid == my_id,
@@ -818,6 +884,8 @@ class Backend(QObject):
                 "isMe": is_me, "keyChanged": uid in self._key_changed,
                 "videoInfo": self._video_info.get(uid, ("", ""))[0],
                 "videoDetail": self._video_info.get(uid, ("", ""))[1],
+                "avatar": self._avatar_url(uid), "camera": uid in self._cameras, "cameraKey": camera_key(uid),
+                "canWake": not is_me and bool(state["muted"] or state["deafened"] or state.get("server_muted")),
             })
         self.stage.set_items(rows)
         if self._focus_user and self._focus_user not in self._streams:
@@ -834,6 +902,7 @@ class Backend(QObject):
         elif kind == "voice.state":
             state = event["state"]
             uid = state["user_id"]
+            self._avatars[uid] = state.get("avatar_version", self._avatars.get(uid, 0))
             previous = self._voice.get(uid)
             self._voice[uid] = state
             if (self._call_channel and state["channel_id"] == self._call_channel and uid != self._me.get("id")
@@ -866,6 +935,26 @@ class Backend(QObject):
             self._reload_spaces()
         elif kind == "space.members":
             self._reload_spaces()
+            if event.get("space_id") == self._space_id:
+                self.loadMembers()
+        elif kind == "space.updated":
+            self._reload_spaces()
+            if event.get("space_id") == self._space_id:
+                self.loadMembers()
+        elif kind == "user.avatar":
+            uid = event.get("user_id", 0)
+            self._avatars[uid] = event.get("avatar_version", 0)
+            if uid == self._me.get("id"):
+                self._me = {**self._me, "avatar_version": self._avatars[uid]}
+                self.meChanged.emit()
+            self._members = [{**m, "avatar": self._avatar_url(m["id"])} for m in self._members]
+            self.membersChanged.emit()
+            for row in self.messages.rows:
+                if row["authorId"] == uid:
+                    self.messages.update(row["id"], avatar=self._avatar_url(uid))
+            self._rebuild()
+        elif kind == "voice.wake":
+            self._on_wake(event)
         elif kind == "channel.deleted":
             channel_id = event.get("channel_id")
             self._channels = [c for c in self._channels if c["id"] != channel_id]
@@ -934,6 +1023,8 @@ class Backend(QObject):
             self._watching.clear()
             self._sharing = False
             self._capturer = None
+            self._stop_camera_device()
+            self._cameras.clear()
             self._set("_focus_user", 0, self.focusChanged)
             self._ping_timer.stop()
             native.set_call_active(False)
@@ -980,6 +1071,12 @@ class Backend(QObject):
         self._watching &= self._streams
         self.callChanged.emit()
         self._rebuild()
+
+    def _on_cameras(self, users: set[int]) -> None:
+        for uid in self._cameras - users:
+            video_hub().drop(camera_key(uid))
+        self._cameras = set(users)
+        self._rebuild_stage()
 
     def _measure_ping(self) -> None:
         self._bg(self.api.ping_ms, lambda ms: self._set("_ping", ms, self.callChanged), lambda exc: None)
@@ -1081,16 +1178,45 @@ class Backend(QObject):
     def monitors(self) -> list[dict]:
         return list_monitors()
 
+    @Slot(result="QVariantList")
+    def windows(self) -> list[dict]:
+        return list_windows()
+
+    def _allowed_presets(self) -> list:
+        limit = self._current_space().get("max_share_quality") or "1440p60"
+        keys = [p.key for p in PRESETS]
+        cap = keys.index(limit) if limit in keys else len(keys) - 1
+        return PRESETS[:cap + 1]
+
+    @Slot(result="QVariantList")
+    def sharePresets(self) -> list[dict]:
+        """Qualities this space allows (its settings set the best one)."""
+        return [{"key": p.key, "title": p.title} for p in self._allowed_presets()]
+
     @Slot(int, str)
     def startScreen(self, monitor: int, preset_key: str) -> None:
+        self.startShare("monitor", str(monitor), preset_key)
+
+    @Slot(str, str, str)
+    def startShare(self, kind: str, ident_text: str, preset_key: str) -> None:
+        """Share a whole monitor (kind "monitor", its number) or one window (kind "window", its handle).
+        The id comes as text: a window handle can be larger than a QML int."""
         if self.call is None or not self._call_channel:
             return
-        preset = PRESETS_BY_KEY.get(preset_key, PRESETS_BY_KEY["1080p60"])
-        self.ui["screen_preset"], self.ui["screen_monitor"] = preset.key, monitor
+        try:
+            ident = int(float(ident_text))
+        except ValueError:
+            return
+        allowed = self._allowed_presets()
+        preset = next((p for p in allowed if p.key == preset_key), allowed[-1])
+        self.ui["screen_preset"] = preset.key
+        if kind == "monitor":
+            self.ui["screen_monitor"] = ident
         self._save()
         try:
             my_id = self._me.get("id", 0)
-            capturer = ScreenCapturer(monitor, preset, preview=lambda image: video_hub().push_image(my_id, image))
+            capturer = ScreenCapturer(ident, preset, preview=lambda image: video_hub().push_image(my_id, image),
+                                      kind=kind)
         except Exception as exc:  # noqa: BLE001
             self.toast("error", str(exc))
             return
@@ -1098,7 +1224,7 @@ class Backend(QObject):
         self._capturer = capturer
         if not self._video_timer.isActive():
             self._video_timer.start()
-        self.toast("success", f"Демонстрация экрана: {preset.title}")
+        self.toast("success", f"Демонстрация {'окна' if kind == 'window' else 'экрана'}: {preset.title}")
 
     @Slot()
     def stopScreen(self) -> None:
@@ -1106,6 +1232,161 @@ class Backend(QObject):
             self.call.stop_screen()
         self._capturer = None
         video_hub().drop(self._me.get("id", 0))
+
+    # --- camera -------------------------------------------------------------------------------
+
+    @Slot(result="QVariantList")
+    def cameras(self) -> list[dict]:
+        from .camera import list_cameras
+
+        return list_cameras()
+
+    @Slot(str)
+    def startCamera(self, camera_id: str) -> None:
+        if self.call is None or not self._call_channel:
+            return
+        if self._call_in_current_space() and not self._current_space().get("camera_allowed", True):
+            self.toast("warning", "В этом пространстве камеры выключены в настройках")
+            return
+        from .camera import CameraCapturer
+
+        self._stop_camera_device()
+        my_id = self._me.get("id", 0)
+        try:
+            capturer = CameraCapturer(
+                camera_id, preview=lambda image: video_hub().push_image(camera_key(my_id), image),
+                on_error=lambda text: self._ui(lambda: (self.toast("error", f"Камера: {text}"), self.stopCamera())))
+            capturer.start()
+        except Exception as exc:  # noqa: BLE001
+            self.toast("error", str(exc))
+            return
+        self._camera = capturer
+        self.ui["camera_id"] = camera_id
+        self._save()
+        self.call.start_camera(capturer)
+        self.callChanged.emit()
+
+    def _call_in_current_space(self) -> bool:
+        return any(c["id"] == self._call_channel for c in self._channels)
+
+    @Slot()
+    def stopCamera(self) -> None:
+        if self.call is not None:
+            self.call.stop_camera()
+        self._stop_camera_device()
+        self.callChanged.emit()
+
+    def _stop_camera_device(self) -> None:
+        camera, self._camera = self._camera, None
+        if camera is not None:
+            camera.stop()
+            camera.deleteLater()
+            video_hub().drop(camera_key(self._me.get("id", 0)))
+
+    # --- waking someone up -------------------------------------------------------------------
+
+    @Slot(int)
+    def wakeUser(self, user_id: int) -> None:
+        name = self._voice.get(user_id, {}).get("display_name", "")
+
+        def done(result):
+            self._wake_until[user_id] = float(result.get("until", time.time() + 60))
+            self.toast("success", f"Будим {name}…" if name else "Будим…")
+        self._bg(lambda: self.api.wake_user(user_id), done)
+
+    @Slot(int, result=int)
+    def wakeWait(self, user_id: int) -> int:
+        """Seconds until anyone may wake this person again (0: now)."""
+        return max(0, int(self._wake_until.get(user_id, 0) - time.time() + 0.99))
+
+    def _on_wake(self, event: dict) -> None:
+        uid = event.get("user_id", 0)
+        self._wake_until[uid] = float(event.get("until", time.time() + 60))
+        if uid != self._me.get("id"):
+            return
+        self.toast("warning", f"{event.get('by', 'Кто-то')} будит вас! Включите микрофон или звук")
+        if self.call is not None and getattr(self.call.audio, "_running", False):
+            # Played even with the sound off: that is the whole point.
+            self.call.audio.mixer.play_effect(SOUNDS["wake"], always=True)
+        else:
+            self._play_direct(SOUNDS["wake"])
+
+    # --- space settings, members, pictures ----------------------------------------------------
+
+    def _set_members(self, members: list[dict]) -> None:
+        for member in members:
+            self._avatars[member["id"]] = member.get("avatar_version", 0)
+        self._members = [{**m, "initials": initials(m["display_name"]), "color": avatar_color(m["id"]),
+                          "avatar": self._avatar_url(m["id"]), "isMe": m["id"] == self._me.get("id")}
+                         for m in members]
+        self.membersChanged.emit()
+
+    @Slot()
+    def loadMembers(self) -> None:
+        space_id = self._space_id
+        if not space_id:
+            return
+
+        def done(members):
+            if space_id == self._space_id:
+                self._set_members(members)
+                self._rebuild()
+        self._bg(lambda: self.api.space_members(space_id), done, lambda exc: None)
+
+    @Slot(str, str, bool)
+    def updateSpace(self, name: str, share_quality: str, camera_allowed: bool) -> None:
+        space_id = self._space_id
+        changes: dict[str, Any] = {"max_share_quality": share_quality, "camera_allowed": camera_allowed}
+        if name.strip() and name.strip() != self._space_name:
+            changes["name"] = name.strip()
+
+        def done(_):
+            self.toast("success", "Настройки пространства сохранены")
+            self._reload_spaces(space_id)
+        self._bg(lambda: self.api.update_space(space_id, **changes), done)
+
+    @Slot(int, bool)
+    def setModerator(self, user_id: int, moderator: bool) -> None:
+        space_id = self._space_id
+
+        def done(members):
+            if space_id == self._space_id:
+                self._set_members(members)
+        self._bg(lambda: self.api.set_moderator(space_id, user_id, moderator), done)
+
+    @staticmethod
+    def _local_path(url: str) -> str:
+        return QUrl(url).toLocalFile() if url.startswith("file:") else url
+
+    @Slot(str)
+    def setMyAvatar(self, url: str) -> None:
+        from .images import prepare_avatar
+
+        path = self._local_path(url)
+
+        def work():
+            return self.api.set_my_avatar(prepare_avatar(path) if path else b"")
+
+        def done(result):
+            uid = self._me.get("id", 0)
+            self._avatars[uid] = result.get("avatar_version", 0)
+            self._me = {**self._me, "avatar_version": self._avatars[uid]}
+            self.meChanged.emit()
+            self.toast("success", "Аватарка обновлена" if path else "Аватарка убрана")
+            self._rebuild()
+        self._bg(work, done)
+
+    @Slot(str)
+    def setSpaceAvatar(self, url: str) -> None:
+        from .images import prepare_avatar
+
+        path = self._local_path(url)
+        space_id = self._space_id
+
+        def done(_):
+            self.toast("success", "Картинка пространства обновлена" if path else "Картинка пространства убрана")
+            self._reload_spaces(space_id)
+        self._bg(lambda: self.api.set_space_avatar(space_id, prepare_avatar(path) if path else b""), done)
 
     # --- moderation ---------------------------------------------------------------------------
 
@@ -1218,6 +1499,7 @@ class Backend(QObject):
                 "showDay": not previous or previous["day"] != day, "edited": bool(message.get("edited_at")),
                 "deleted": bool(message.get("deleted")), "mine": message["author_id"] == my_id,
                 "mention": mentioned or my_id in message.get("mentions", []), "grouped": grouped,
+                "avatar": self._avatar_url(message["author_id"]),
                 "_ts": moment.timestamp(),
             }
             rows.append(row)

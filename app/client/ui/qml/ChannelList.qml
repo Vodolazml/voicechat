@@ -10,7 +10,7 @@ ListView {
     boundsBehavior: Flickable.StopAtBounds
     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 6 }
     signal createRequested(string type)
-    signal renameRequested(int channelId, string name, int limit)
+    signal renameRequested(int channelId, string name, int limit, string type)
     signal deleteRequested(int channelId, string name)
 
     section.property: "type"
@@ -77,15 +77,15 @@ ListView {
             }
             TapHandler {
                 acceptedButtons: Qt.RightButton
-                enabled: backend.canManageChannels
+                enabled: backend.canEditSpace
                 onTapped: channelMenu.popup()
             }
             StyledMenu {
                 id: channelMenu
                 MenuItem { text: "Переместить выше"; onTriggered: backend.moveChannel(channelItem.model.id, -1) }
                 MenuItem { text: "Переместить ниже"; onTriggered: backend.moveChannel(channelItem.model.id, 1) }
-                MenuItem { text: "Изменить"; onTriggered: list.renameRequested(channelItem.model.id, channelItem.model.name, channelItem.model.user_limit) }
-                MenuItem { text: "Удалить канал"; onTriggered: list.deleteRequested(channelItem.model.id, channelItem.model.name) }
+                MenuItem { text: "Изменить"; onTriggered: list.renameRequested(channelItem.model.id, channelItem.model.name, channelItem.model.user_limit, channelItem.model.type) }
+                MenuItem { visible: backend.canManageChannels; height: visible ? implicitHeight : 0; text: "Удалить канал"; onTriggered: list.deleteRequested(channelItem.model.id, channelItem.model.name) }
             }
         }
 
@@ -99,7 +99,7 @@ ListView {
                 color: memberHover.hovered ? Theme.card : "transparent"
                 RowLayout {
                     anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 8
-                    Avatar { size: 22; initials: member.modelData.initials; color: member.modelData.color; speaking: member.modelData.speaking }
+                    Avatar { size: 22; initials: member.modelData.initials; color: member.modelData.color; source: member.modelData.avatar || ""; speaking: member.modelData.speaking }
                     Text {
                         Layout.fillWidth: true
                         text: member.modelData.name
@@ -119,10 +119,10 @@ ListView {
                 HoverHandler { id: memberHover }
                 TapHandler {
                     acceptedButtons: Qt.RightButton
-                    enabled: backend.canModerate && !member.modelData.isMe
+                    enabled: !member.modelData.isMe && (backend.canModerate || member.modelData.muted || member.modelData.deafened)
                     onTapped: modMenu.popup()
                 }
-                ModerationMenu { id: modMenu; userId: member.modelData.id; name: member.modelData.name; muted: member.modelData.muted }
+                ModerationMenu { id: modMenu; userId: member.modelData.id; name: member.modelData.name; muted: member.modelData.muted; deafened: member.modelData.deafened }
             }
         }
         Item { width: 1; height: channelItem.voice && channelItem.model.memberCount > 0 ? 4 : 0 }

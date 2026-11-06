@@ -20,7 +20,9 @@ logger = logging.getLogger("voicechat.call")
 
 HEARTBEAT_SECONDS = 15
 AUDIO_LOG_EVERY = 4  # heartbeats: one line about the microphone and speakers per minute
-KEY_REFRESH_SECONDS = 300
+# Fallback only (keys normally arrive with the e2ee.updated event at once): a missed event used to leave
+# someone silent for up to five minutes.
+KEY_REFRESH_SECONDS = 60
 
 IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "reconnecting"
 UNAVAILABLE = "unavailable"  # we are in the channel, but the server's media server is not reachable
@@ -203,6 +205,7 @@ class CallController:
             on_video_frame=self.listener.on_video_frame,
             on_cameras=self.listener.on_cameras,
             on_participants=lambda users: None,
+            on_key_problem=lambda user_id: self._on_key_problem(channel_id, user_id),
         )
         media = self.media_factory(
             credentials=lambda: self.api.media_token(channel_id),
@@ -287,6 +290,11 @@ class CallController:
 
         self._heartbeat = threading.Thread(target=beat, name="call-heartbeat", daemon=True)
         self._heartbeat.start()
+
+    def _on_key_problem(self, channel_id: int, user_id: int) -> None:
+        """We can't decrypt someone: their key was missed or changed. Fetch keys now, not in a minute."""
+        logger.info("Fetching keys again: cannot decrypt user %s in channel %s", user_id, channel_id)
+        self._submit(lambda: self._sync_keys(channel_id), "keys")
 
     def _rejoin_after_drop(self, channel_id: int) -> None:
         if self.channel_id != channel_id:

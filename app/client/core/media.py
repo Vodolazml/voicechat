@@ -50,6 +50,7 @@ class MediaCallbacks:
     on_video_frame: Callable[[int, Any], None] = lambda user_id, frame: None
     on_participants: Callable[[set[int]], None] = lambda users: None
     on_cameras: Callable[[set[int]], None] = lambda users: None             # who has a camera on now
+    on_key_problem: Callable[[int], None] = lambda user_id: None            # can't decrypt this person
 
 
 class MediaSession:
@@ -77,6 +78,8 @@ class MediaSession:
         self._screen = None
         self._camera = None
         self._cameras: set[int] = set()
+        self._audio_streams: dict[int, object] = {}  # user id -> the stream that currently feeds the mixer
+        self._key_problem_at: dict[int, float] = {}
         self.muted = False
         self.connected = False
 
@@ -425,6 +428,25 @@ class MediaSession:
                     ids.add(user_id)
             self.cb.on_speakers(ids)
 
+        @room.on("e2ee_state_changed")
+        def _e2ee(participant, state):
+            name = rtc.EncryptionState.Name(state) if hasattr(rtc, "EncryptionState") else str(state)
+            identity = getattr(participant, "identity", "?")
+            if identity == room.local_participant.identity:
+                if name != "OK":
+                    logger.warning("Our own encryption: %s", name)
+                return
+            user_id = user_id_from_identity(identity) if identity != "?" else None
+            if name in ("DECRYPTION_FAILED", "MISSING_KEY"):
+                logger.warning("Cannot decrypt %s: %s (applied key %s)", identity, name,
+                               self._applied_keys.get(identity, "none"))
+                now = time.monotonic()
+                if user_id is not None and now - self._key_problem_at.get(user_id, 0.0) > 3.0:
+                    self._key_problem_at[user_id] = now
+                    self.cb.on_key_problem(user_id)
+            elif name != "NEW":
+                logger.info("Encryption with %s: %s", identity, name)
+
         @room.on("connection_quality_changed")
         def _quality(participant, quality):
             user_id = user_id_from_identity(participant.identity)
@@ -443,12 +465,20 @@ class MediaSession:
         from livekit import rtc
 
         stream = rtc.AudioStream(track, sample_rate=SAMPLE_RATE, num_channels=1, frame_size_ms=10, capacity=8)
+        # After someone leaves and comes back (or restarts the app), their old stream can still be
+        # open, or end only after the new one has started. Only the newest stream feeds the mixer:
+        # two feeding one buffer garbled the voice, and the old one ending wiped the new one's sound.
+        self._audio_streams[user_id] = stream
         try:
             async for event in stream:
+                if self._audio_streams.get(user_id) is not stream:
+                    break
                 self.mixer.put(user_id, bytes(event.frame.data.cast("B")))
         finally:
             await stream.aclose()
-            self.mixer.remove(user_id)
+            if self._audio_streams.get(user_id) is stream:
+                del self._audio_streams[user_id]
+                self.mixer.remove(user_id)
 
     async def _receive_video(self, track, user_id: int) -> None:
         from livekit import rtc

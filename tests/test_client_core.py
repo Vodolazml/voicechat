@@ -284,3 +284,12 @@ def test_audio_stats_count_and_reset():
     stats = engine.stats()
     assert stats["mic_frames"] == 6 and stats["overflows"] == 1 and stats["sent_frames"] == 0
     assert engine.stats()["mic_frames"] == 0
+
+
+def test_undecryptable_friend_fetches_keys_at_once():
+    call, api, states, _ = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED)
+    api.calls.clear()
+    FakeMedia.instances[-1].kwargs["callbacks"].on_key_problem(2)
+    assert wait_for(lambda: ("e2ee_state", (10,)) in api.calls)

@@ -212,6 +212,7 @@ Rectangle {
                         Layout.fillWidth: true; spacing: 28
                         SliderRow { title: "Размер"; from: 0.7; to: 1.6; value: root.s.overlay_scale; onMoved: (v) => backend.setSetting("overlay_scale", v) }
                         SliderRow { title: "Видимость фона"; from: 0; to: 1; value: root.s.overlay_opacity; onMoved: (v) => backend.setSetting("overlay_opacity", v) }
+                        SliderRow { title: "Видимость текста"; from: 0.15; to: 1; value: root.s.overlay_text_opacity === undefined ? 1 : root.s.overlay_text_opacity; onMoved: (v) => backend.setSetting("overlay_text_opacity", v) }
                     }
                     Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12
                         text: "Оверлей виден в играх в режиме «Оконный без рамки» / «Borderless». В эксклюзивном полноэкранном режиме Windows не позволяет рисовать поверх игры." }

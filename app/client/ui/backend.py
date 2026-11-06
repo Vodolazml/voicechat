@@ -53,6 +53,7 @@ TOKEN_RE = re.compile(r"(https?://[^\s<>\"']+)|@([A-Za-z0-9_.-]{3,64})")
 UI_DEFAULTS: dict[str, Any] = {
     "key_ptt": "", "key_mute": "Ctrl+Shift+M", "key_deafen": "Ctrl+Shift+D", "key_overlay": "Ctrl+Shift+O",
     "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.5,
+    "overlay_text_opacity": 1.0,
     "overlay_speakers_only": False,
     "sound_join_leave": True, "sound_messages": True, "notify_mentions": True, "voice_prompts": True,
     "overlay_x": 0.02, "overlay_y": 0.03,

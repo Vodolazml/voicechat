@@ -611,10 +611,11 @@ def capture_process_main(info: dict, monitor_count: int, width: int, height: int
 
 
 class ScreenCapturer:
-    # Your own preview: small and not too often. A full-size 1440p picture 20 times a second kept the
-    # app's window busy redrawing it, and everything else (the status line, menus) lagged behind.
-    PREVIEW_FPS = 10
-    PREVIEW_WIDTH = 960
+    # Your own preview: up to Full HD at 30 fps, so it looks like what friends get. Bigger screens (2K, 4K)
+    # are shrunk with the fast filter first: copying and repainting a 4K picture kept the app's window
+    # busy and everything else (the status line, menus) lagged behind.
+    PREVIEW_FPS = 30
+    PREVIEW_WIDTH = 1920
     SLOTS = 3
 
     def __init__(self, monitor: int, preset: Preset, preview=None, kind: str = "monitor") -> None:
@@ -668,7 +669,7 @@ class ScreenCapturer:
             last_preview[0] = now
             image = QImage(data, self.width, self.height, self.width * 4, QImage.Format_RGB32)
             if self.width > self.PREVIEW_WIDTH:
-                image = image.scaledToWidth(self.PREVIEW_WIDTH, Qt.SmoothTransformation)
+                image = image.scaledToWidth(self.PREVIEW_WIDTH, Qt.FastTransformation)
             else:
                 image = image.copy()
             self.preview(image)

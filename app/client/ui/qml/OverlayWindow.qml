@@ -41,6 +41,8 @@ Window {
                 border.color: Theme.speaking
                 RowLayout {
                     id: row
+                    // Names, avatars and icons fade separately from the background.
+                    opacity: win.s.overlay_text_opacity === undefined ? 1 : Math.max(0.15, win.s.overlay_text_opacity)
                     anchors.verticalCenter: parent.verticalCenter
                     x: 4 * win.k
                     spacing: 6 * win.k

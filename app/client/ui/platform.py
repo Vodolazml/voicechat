@@ -149,6 +149,36 @@ def make_click_through(win_id: int) -> None:
         logger.debug("Overlay style not applied", exc_info=True)
 
 
+def _colorref(hex_color: str) -> int:
+    value = hex_color.lstrip("#")
+    r, g, b = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    return r | (g << 8) | (b << 16)
+
+
+def style_title_bar(win_id: int, caption: str, text: str, border: str) -> None:
+    """Dark window caption in the app's own colours instead of the light system one.
+
+    Windows 10 (20H1+) gets the dark caption; Windows 11 also takes the exact caption, text and border
+    colours. The system buttons, snapping and resizing stay native."""
+    if not IS_WINDOWS or not win_id:
+        return
+    try:
+        dwm = ctypes.windll.dwmapi
+        hwnd = ctypes.c_void_p(win_id)
+
+        def put(attribute: int, value: int) -> None:
+            data = ctypes.c_int(value)
+            dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(data), ctypes.sizeof(data))
+
+        for dark_mode in (20, 19):  # DWMWA_USE_IMMERSIVE_DARK_MODE (19 on builds before 20H1)
+            put(dark_mode, 1)
+        put(35, _colorref(caption))   # DWMWA_CAPTION_COLOR
+        put(36, _colorref(text))      # DWMWA_TEXT_COLOR
+        put(34, _colorref(border))    # DWMWA_BORDER_COLOR
+    except Exception:
+        logger.debug("Title bar colours not applied", exc_info=True)
+
+
 def set_autostart(enabled: bool, command: str) -> None:
     if not IS_WINDOWS:
         return

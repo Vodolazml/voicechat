@@ -53,13 +53,24 @@ Rectangle {
             Connections { target: backend; function onChatChanged() { messages.stick = true; Qt.callLater(messages.positionViewAtEnd) } }
 
             header: Item {
-                width: messages.width; height: backend.hasMoreMessages ? 40 : 120
+                width: messages.width; height: backend.hasMoreMessages ? 40 : (root.compactHeader ? 110 : 168)
                 ColumnLayout {
                     visible: !backend.hasMoreMessages
-                    anchors.left: parent.left; anchors.leftMargin: 18; anchors.bottom: parent.bottom; anchors.bottomMargin: 12
-                    Rectangle { width: 52; height: 52; radius: 26; color: Theme.card
-                        Icon { anchors.centerIn: parent; name: "hash"; color: Theme.text; width: 28; height: 28 } }
-                    Text { text: "Начало канала #" + backend.chatChannelName; color: Theme.text; font.family: Theme.font; font.pixelSize: 18; font.weight: Font.Bold }
+                    anchors.left: parent.left; anchors.leftMargin: 18; anchors.right: parent.right; anchors.rightMargin: 18
+                    anchors.bottom: parent.bottom; anchors.bottomMargin: 14
+                    spacing: 6
+                    Rectangle {
+                        visible: !root.compactHeader
+                        width: 60; height: 60; radius: 20
+                        gradient: Gradient {
+                            GradientStop { position: 0; color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.35) }
+                            GradientStop { position: 1; color: Qt.rgba(1, 0.31, 0.6, 0.22) }
+                        }
+                        border.width: 1; border.color: Qt.rgba(1, 1, 1, 0.08)
+                        Icon { anchors.centerIn: parent; name: "hash"; color: "white"; width: 30; height: 30 }
+                    }
+                    Text { Layout.topMargin: 4; text: "Добро пожаловать в #" + backend.chatChannelName; color: Theme.text; font.family: Theme.font; font.pixelSize: root.compactHeader ? 16 : 22; font.weight: Font.Bold; elide: Text.ElideRight; Layout.fillWidth: true }
+                    Text { text: "Это начало канала. Сообщения видят все, у кого есть к нему доступ."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 }
                 Spinner { visible: backend.hasMoreMessages; anchors.centerIn: parent; color: Theme.muted; size: 18 }
             }
@@ -72,11 +83,12 @@ Rectangle {
 
                 Item {
                     visible: msg.model.showDay
-                    width: parent.width; height: 36
+                    width: parent.width; height: 40
                     Rectangle { anchors.verticalCenter: parent.verticalCenter; x: 16; width: parent.width - 32; height: 1; color: Theme.line }
                     Rectangle {
-                        anchors.centerIn: parent; color: Theme.bg; width: dayText.implicitWidth + 16; height: 18
-                        Text { id: dayText; anchors.centerIn: parent; text: msg.model.day; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold }
+                        anchors.centerIn: parent; color: root.color; width: dayText.implicitWidth + 24; height: 22; radius: 11
+                        border.width: 1; border.color: Theme.line
+                        Text { id: dayText; anchors.centerIn: parent; text: msg.model.day; color: Theme.muted; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.DemiBold }
                     }
                 }
 
@@ -105,7 +117,7 @@ Rectangle {
                         Row {
                             visible: !msg.model.grouped
                             spacing: 8
-                            Text { text: msg.model.author; color: msg.model.color; font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold }
+                            Text { text: msg.model.author; color: msg.model.color; font.family: Theme.font; font.pixelSize: 15; font.weight: Font.DemiBold }
                             Text { text: msg.model.time; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11; anchors.baseline: parent.children[0].baseline }
                         }
                         Text {
@@ -116,8 +128,8 @@ Rectangle {
                             wrapMode: Text.Wrap
                             color: msg.model.deleted ? Theme.faint : Theme.text
                             linkColor: "#6db3ff"
-                            font.family: Theme.font; font.pixelSize: 14
-                            lineHeight: 1.15
+                            font.family: Theme.font; font.pixelSize: 15
+                            lineHeight: 1.2
                             onLinkActivated: (link) => backend.openLink(link)
                             HoverHandler { cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
                         }

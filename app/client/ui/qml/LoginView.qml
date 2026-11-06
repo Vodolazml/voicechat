@@ -31,13 +31,7 @@ Item {
 
             RowLayout {
                 spacing: 12
-                Rectangle {
-                    width: 44; height: 44; radius: 14
-                    gradient: Gradient { orientation: Gradient.Horizontal
-                        GradientStop { position: 0; color: Theme.accent }
-                        GradientStop { position: 1; color: "#ff3d9a" } }
-                    Icon { anchors.centerIn: parent; name: "wave"; color: "white"; width: 24; height: 24 }
-                }
+                Logo { size: 48 }
                 ColumnLayout {
                     spacing: 0
                     Text { text: "VoiceChat"; color: Theme.text; font.family: Theme.font; font.pixelSize: 22; font.weight: Font.Bold }

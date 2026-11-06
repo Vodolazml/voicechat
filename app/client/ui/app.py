@@ -95,6 +95,7 @@ def main() -> int:
     if not engine.rootObjects():
         return 1
     window = engine.rootObjects()[0]
+    native.style_title_bar(int(window.winId()), caption="#0d0e14", text="#c9cbe0", border="#1d1e2a")
     if "--tray" in sys.argv and tray is not None:
         window.hide()
     guard.show_requested.connect(backend.requestShow)

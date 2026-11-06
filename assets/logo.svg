@@ -1,34 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- VoiceChat mark: five voice bars that together draw a "V". -->
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0c1020"/>
-      <stop offset="1" stop-color="#05070f"/>
+    <linearGradient id="g" x1="20" y1="10" x2="236" y2="246" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7b6cff"/>
+      <stop offset="0.55" stop-color="#b44dff"/>
+      <stop offset="1" stop-color="#ff4f9a"/>
     </linearGradient>
-    <linearGradient id="strokeL" x1="30" y1="30" x2="130" y2="200" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#5b7cfa"/>
-      <stop offset="1" stop-color="#7d63f4"/>
-    </linearGradient>
-    <linearGradient id="strokeR" x1="126" y1="30" x2="226" y2="200" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#8a5ef2"/>
-      <stop offset="1" stop-color="#c15aec"/>
-    </linearGradient>
+    <radialGradient id="shine" cx="60" cy="30" r="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <rect x="0" y="0" width="256" height="256" rx="52" fill="url(#bg)"/>
-  <path d="M 60 120 V 102 A 68 68 0 0 1 196 102 V 120" fill="none" stroke="url(#strokeL)" stroke-width="13" stroke-linecap="round"/>
-  <circle cx="94" cy="146" r="42" fill="#0c1020" stroke="url(#strokeL)" stroke-width="9"/>
-  <path d="M56 158 q-14 4 -14 20 q0 16 16 16 h10 v-38 z" fill="#0c1020" stroke="url(#strokeL)" stroke-width="9" stroke-linejoin="round"/>
-  <circle cx="162" cy="146" r="42" fill="#0c1020" stroke="url(#strokeR)" stroke-width="9"/>
-  <path d="M200 158 q14 4 14 20 q0 16 -16 16 h-10 v-38 z" fill="#0c1020" stroke="url(#strokeR)" stroke-width="9" stroke-linejoin="round"/>
-  <g stroke="#eef1ff" stroke-width="7" stroke-linecap="round">
-    <line x1="72" y1="136" x2="72" y2="156"/>
-    <line x1="85" y1="126" x2="85" y2="166"/>
-    <line x1="98" y1="134" x2="98" y2="158"/>
-    <line x1="111" y1="142" x2="111" y2="150"/>
-  </g>
-  <g stroke="#f6ecff" stroke-width="7" stroke-linecap="round">
-    <line x1="145" y1="142" x2="145" y2="150"/>
-    <line x1="158" y1="134" x2="158" y2="158"/>
-    <line x1="171" y1="126" x2="171" y2="166"/>
-    <line x1="184" y1="136" x2="184" y2="156"/>
+  <rect width="256" height="256" rx="64" fill="url(#g)"/>
+  <rect width="256" height="256" rx="64" fill="url(#shine)"/>
+  <g fill="#ffffff">
+    <rect x="47" y="62" width="26" height="48" rx="13"/>
+    <rect x="81" y="62" width="26" height="88" rx="13"/>
+    <rect x="115" y="62" width="26" height="134" rx="13"/>
+    <rect x="149" y="62" width="26" height="88" rx="13"/>
+    <rect x="183" y="62" width="26" height="48" rx="13"/>
   </g>
 </svg>

@@ -278,7 +278,7 @@ class Backend(QObject):
         self._inputs, self._outputs = [], []
         self._toast_seq = 0
 
-        self.spaces = ListModel(["id", "name", "initials", "unread", "mine"])
+        self.spaces = ListModel(["id", "name", "initials", "unread", "mine", "color"])
         self.channels = ListModel(["id", "name", "type", "user_limit", "is_private", "unread", "members",
                                    "memberCount", "active", "selected"])
         self.stage = ListModel(["id", "name", "initials", "color", "speaking", "muted", "deafened",
@@ -589,6 +589,7 @@ class Backend(QObject):
     def _set_spaces(self, spaces: list[dict], select: int = 0) -> None:
         self._spaces_list = spaces
         self.spaces.set_items([{"id": s["id"], "name": s["name"], "initials": initials(s["name"]),
+                                "color": avatar_color(s["id"] + 3),
                                 "unread": 0, "mine": bool(s.get("is_mine"))} for s in spaces])
         ids = {s["id"] for s in spaces}
         wanted = select or self._space_id or self.client_settings.get("last_space_id")

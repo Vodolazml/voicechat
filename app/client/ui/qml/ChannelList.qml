@@ -19,7 +19,7 @@ ListView {
         Text {
             anchors.left: parent.left; anchors.leftMargin: 14; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
             text: section === "text" ? "ТЕКСТОВЫЕ КАНАЛЫ" : "ГОЛОСОВЫЕ КАНАЛЫ"
-            color: Theme.faint; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 0.6
+            color: Theme.muted; opacity: 0.8; font.family: Theme.font; font.pixelSize: 11; font.weight: Font.Bold; font.letterSpacing: 0.8
         }
         IconButton {
             visible: backend.canManageChannels

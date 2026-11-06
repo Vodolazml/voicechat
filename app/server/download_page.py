@@ -31,8 +31,7 @@ PAGE = """<!doctype html>
                      radial-gradient(60vw 60vw at 60% 100%, #5c1f4a44, transparent 60%), #0d0e13; }
   .card { width: 100%; max-width: 460px; padding: 36px 32px; border-radius: 22px; text-align: center;
           background: rgba(20, 21, 30, .86); border: 1px solid rgba(255, 255, 255, .07); }
-  .logo { width: 72px; height: 72px; margin: 0 auto 18px; border-radius: 22px; display: grid; place-items: center;
-          background: linear-gradient(90deg, var(--accent), var(--pink)); }
+  .logo { width: 80px; height: 80px; margin: 0 auto 18px; filter: drop-shadow(0 12px 32px rgba(160, 80, 255, .35)); }
   h1 { margin: 0 0 6px; font-size: 28px; }
   p { margin: 0; color: var(--muted); line-height: 1.5; }
   .button { display: inline-flex; align-items: center; gap: 10px; margin: 26px 0 10px; padding: 14px 26px;
@@ -47,10 +46,14 @@ PAGE = """<!doctype html>
 </head>
 <body>
 <main class="card">
-  <div class="logo"><svg width="38" height="38" viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
-    <rect x="3" y="10" width="2" height="4" rx="1"/><rect x="7" y="6" width="2" height="12" rx="1"/>
-    <rect x="11" y="3" width="2" height="18" rx="1"/><rect x="15" y="7" width="2" height="10" rx="1"/>
-    <rect x="19" y="10" width="2" height="4" rx="1"/></svg></div>
+  <div class="logo"><svg width="80" height="80" viewBox="0 0 256 256" aria-hidden="true">
+    <defs><linearGradient id="g" x1="20" y1="10" x2="236" y2="246" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7b6cff"/><stop offset=".55" stop-color="#b44dff"/><stop offset="1" stop-color="#ff4f9a"/>
+    </linearGradient></defs>
+    <rect width="256" height="256" rx="64" fill="url(#g)"/>
+    <g fill="#fff"><rect x="47" y="62" width="26" height="48" rx="13"/><rect x="81" y="62" width="26" height="88" rx="13"/>
+    <rect x="115" y="62" width="26" height="134" rx="13"/><rect x="149" y="62" width="26" height="88" rx="13"/>
+    <rect x="183" y="62" width="26" height="48" rx="13"/></g></svg></div>
   <h1>VoiceChat</h1>
   <p>Голос, демонстрация экрана и чат для своих. Голос и экран зашифрованы от устройства до устройства.</p>
   {button}

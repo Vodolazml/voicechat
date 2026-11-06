@@ -7,7 +7,7 @@ ApplicationWindow {
     width: 1280; height: 800
     minimumWidth: 940; minimumHeight: 600
     visible: true
-    title: (backend.inCall ? backend.callChannelName + " · VoiceChat " : "VoiceChat ") + backend.version
+    title: backend.inCall ? backend.callChannelName + " — VoiceChat" : "VoiceChat"
     color: Theme.bg
     font.family: Theme.font
 
@@ -27,14 +27,7 @@ ApplicationWindow {
             Aurora { anchors.fill: parent }
             Column {
                 anchors.centerIn: parent; spacing: 18; width: 360
-                Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: 72; height: 72; radius: 22
-                    gradient: Gradient { orientation: Gradient.Horizontal
-                        GradientStop { position: 0; color: Theme.accent }
-                        GradientStop { position: 1; color: "#ff3d9a" } }
-                    Icon { anchors.centerIn: parent; name: "wave"; color: "white"; width: 38; height: 38 }
-                }
+                Logo { anchors.horizontalCenter: parent.horizontalCenter; size: 80; glow: true }
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: backend.updateInfo.version ? "Обновляю VoiceChat до " + backend.updateInfo.version : "Проверяю обновления…"

@@ -101,15 +101,17 @@ Rectangle {
         // User panel
         Rectangle {
             Layout.fillWidth: true; Layout.preferredHeight: 58
-            color: "#0e0f15"
+            color: "#0f1017"
+            Rectangle { width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.04) }
             RowLayout {
-                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8; spacing: 8
+                anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 6; spacing: 2
                 Item {
+                    Layout.rightMargin: 6
                     width: 36; height: 36
                     Avatar { anchors.fill: parent; size: 36; initials: backend.me.initials || "?"; color: backend.me.color || Theme.accent; speaking: backend.inCall && backend.transmitting }
                     Rectangle {
                         anchors.right: parent.right; anchors.bottom: parent.bottom; anchors.margins: -2
-                        width: 14; height: 14; radius: 7; border.width: 3; border.color: "#0e0f15"
+                        width: 14; height: 14; radius: 7; border.width: 3; border.color: "#0f1017"
                         color: backend.online ? Theme.good : Theme.faint
                     }
                 }
@@ -119,18 +121,20 @@ Rectangle {
                     Text { Layout.fillWidth: true; text: backend.online ? "в сети" : "нет связи с сервером"; elide: Text.ElideRight; color: backend.online ? Theme.muted : Theme.warn; font.family: Theme.font; font.pixelSize: 11 }
                 }
                 IconButton {
+                    size: 32
                     glyph: backend.muted || backend.serverMuted ? "mic_off" : "mic"
                     danger: backend.muted || backend.serverMuted
                     tip: backend.serverMuted ? "Микрофон выключен модератором" : (backend.muted ? "Включить микрофон" : "Выключить микрофон")
                     onClicked: backend.toggleMute()
                 }
                 IconButton {
+                    size: 32
                     glyph: backend.deafened ? "headset_off" : "headset"
                     danger: backend.deafened
                     tip: backend.deafened ? "Включить звук" : "Выключить звук"
                     onClicked: backend.toggleDeafen()
                 }
-                IconButton { glyph: "settings"; tip: "Настройки"; onClicked: root.openSettings() }
+                IconButton { size: 32; glyph: "settings"; tip: "Настройки"; onClicked: root.openSettings() }
             }
         }
     }

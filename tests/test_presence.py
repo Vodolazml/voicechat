@@ -121,6 +121,24 @@ def test_webhook_for_old_room_does_not_end_new_call(client):
     assert [(s["user_id"], s["channel_id"]) for s in states] == [(2, voice[1])]
 
 
+def test_webhook_for_older_connection_does_not_end_rejoined_call(client):
+    import time
+
+    admin, friend, space, voice = setup_admin_and_friend(client)
+    client.post(f"/channels/{voice[0]}/connect", headers=friend, json={})
+    # The app was killed a minute ago and is back in the same channel; LiveKit reports the old one leaving.
+    body, headers = signed_webhook({"event": "participant_left", "room": {"name": f"channel-{voice[0]}"},
+                                    "participant": {"identity": "u2", "joined_at": int(time.time()) - 60}})
+    client.post("/livekit/webhook", content=body, headers=headers)
+    states = client.get(f"/spaces/{space}/voice", headers=admin).json()
+    assert [(s["user_id"], s["channel_id"]) for s in states] == [(2, voice[0])]
+    # The current connection leaving still ends the call.
+    body, headers = signed_webhook({"event": "participant_left", "room": {"name": f"channel-{voice[0]}"},
+                                    "participant": {"identity": "u2", "joined_at": int(time.time())}})
+    client.post("/livekit/webhook", content=body, headers=headers)
+    assert client.get(f"/spaces/{space}/voice", headers=admin).json() == []
+
+
 def test_forged_webhook_is_rejected(client):
     admin, friend, space, voice = setup_admin_and_friend(client)
     client.post(f"/channels/{voice[0]}/connect", headers=friend, json={})

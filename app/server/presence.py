@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
@@ -254,8 +254,10 @@ async def connect_channel(channel_id: int, payload: schemas.VoiceJoinIn, request
     if existing:
         if previous_channel_id is not None:
             publish_left(db, previous_channel_id, user.id)
-            existing.joined_at = now
             existing.server_muted = False
+        # A fresh connection (also a restarted app rejoining the same channel): leaves reported for
+        # connections older than this must not end it (see _drop_state_if_in).
+        existing.joined_at = now
         existing.channel_id = channel_id
         existing.muted = payload.muted
         existing.deafened = payload.deafened
@@ -516,17 +518,34 @@ async def livekit_webhook(request: Request) -> dict[str, str]:
     if user_id is None or not media_sessions.presence_identity(identity) or not room.startswith("channel-"):
         return {"status": "ignored"}
     channel_id = int(room.removeprefix("channel-"))
-    await asyncio.to_thread(_drop_state_if_in, channel_id, user_id)
+    connection_joined = int(getattr(event.participant, "joined_at", 0) or 0)
+    await asyncio.to_thread(_drop_state_if_in, channel_id, user_id, connection_joined)
     return {"status": "ok"}
 
 
-def _drop_state_if_in(channel_id: int, user_id: int) -> None:
+# LiveKit and the API run on the same machine, but its join time has one-second resolution.
+STALE_CONNECTION_SLACK_SECONDS = 2
+
+
+def _drop_state_if_in(channel_id: int, user_id: int, connection_joined: int = 0) -> None:
     with SessionLocal() as db:
         state = db.get(models.VoiceState, user_id)
         # A participant_left for the old room after a channel switch must not end the new call.
-        if state and state.channel_id == channel_id:
-            leave_voice(db, state)
-            db.commit()
+        if not state or state.channel_id != channel_id:
+            return
+        # Nor may the end of an older connection to the same room: after the app was killed, or a quick
+        # leave and rejoin, LiveKit reports the old connection leaving after the person is already back.
+        # Dropping them then made friends see them leave, rotate keys and lose their voice for a while.
+        joined = state.joined_at
+        if connection_joined and joined is not None:
+            if joined.tzinfo is None:
+                joined = joined.replace(tzinfo=timezone.utc)
+            if connection_joined < joined.timestamp() - STALE_CONNECTION_SLACK_SECONDS:
+                logger.info("Ignoring LiveKit leave of an older connection: user %s, channel %s",
+                            user_id, channel_id)
+                return
+        leave_voice(db, state)
+        db.commit()
 
 
 # --- stale state janitor -------------------------------------------------------------------------

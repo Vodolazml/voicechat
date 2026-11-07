@@ -68,6 +68,8 @@ class CallController:
         self._heartbeat_stop = threading.Event()
         self._heartbeat: threading.Thread | None = None
         self._last_key_refresh = 0.0
+        self._last_audio_notice = 0.0
+        self._recovering = False
 
     # --- public API (UI thread) -----------------------------------------------------------------
 
@@ -337,11 +339,28 @@ class CallController:
             media.push_mic_frame(frame)
 
     def _on_audio_problem(self, problem: str) -> None:
-        if problem == "device_lost" and self.channel_id is not None:
-            self.listener.on_notice("warning", "Аудиоустройство отключилось, переключаюсь на другое")
+        if problem == "fallback":
+            self.listener.on_notice("warning", "Выбранное устройство недоступно, звук идёт через стандартное. "
+                                               "Переключусь обратно, когда оно появится")
+            return
+        # Also outside a call: the settings screen's mic test uses the same devices.
+        now = time.monotonic()
+        if now - self._last_audio_notice > 30 and self.channel_id is not None:
+            self._last_audio_notice = now
+            text = ("Аудиоустройства изменились, переключаю звук" if problem == "devices_changed"
+                    else "Аудиоустройство отключилось, переключаюсь на другое")
+            self.listener.on_notice("info" if problem == "devices_changed" else "warning", text)
+        if not self._recovering:
+            self._recovering = True
             self._submit(self._recover_audio, "audio")
 
     def _recover_audio(self) -> None:
+        try:
+            self._recover_audio_attempts()
+        finally:
+            self._recovering = False
+
+    def _recover_audio_attempts(self) -> None:
         for attempt in range(5):
             try:
                 self.audio.restart()

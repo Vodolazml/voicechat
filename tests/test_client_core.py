@@ -333,3 +333,29 @@ def test_named_device_prefers_wasapi(monkeypatch):
     assert audio._device_index("Микрофон (Razer Barracuda X 2.4)", "input") == 2
     assert audio._device_index("", "input") == 2
     assert audio._device_index("", "output") is None
+
+
+def test_choosing_another_device_in_settings_reopens_audio(monkeypatch):
+    from app.client.core.audio import AudioEngine
+
+    settings = AudioSettings(noise="off", echo_cancellation=False, auto_gain=False)
+    engine = AudioEngine(settings, on_frame=lambda f: None)
+    engine._running = True
+    engine._opened_names = ("", "")
+    restarts = []
+    monkeypatch.setattr(engine, "restart", lambda: restarts.append(True))
+    engine.apply_settings(settings)
+    assert restarts == [], "nothing changed"
+    settings.output_device = "Динамики (Razer Barracuda X 2.4)"  # the app changes the shared object in place
+    engine.apply_settings(settings)
+    assert restarts == [True]
+
+
+def test_device_changes_reopen_audio_once_and_fallback_only_warns():
+    call, api, states, notices = make_call()
+    reopened = []
+    call.audio.restart = lambda: reopened.append(True)
+    call._on_audio_problem("fallback")
+    assert reopened == [] and any("стандартное" in n for n in notices)
+    call._on_audio_problem("devices_changed")
+    assert wait_for(lambda: reopened == [True])

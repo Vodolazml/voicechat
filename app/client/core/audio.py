@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -111,6 +112,48 @@ def _extra_settings(device: int | None):
         return None
 
 
+def _system_signature():
+    """What Windows has plugged in right now, and which devices are the defaults, read through winmm.
+
+    PortAudio only sees the devices that existed when it started, and a stream opened on the
+    default device stays on that device. This cheap check (no PortAudio involved) lets the engine notice a
+    headset being plugged back in, or a new default device, and reopen. None where unsupported.
+    """
+    import sys
+
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _InCaps(ctypes.Structure):
+        _fields_ = [("wMid", wintypes.WORD), ("wPid", wintypes.WORD), ("vDriverVersion", wintypes.UINT),
+                    ("szPname", wintypes.WCHAR * 32), ("dwFormats", wintypes.DWORD),
+                    ("wChannels", wintypes.WORD), ("wReserved1", wintypes.WORD)]
+
+    class _OutCaps(ctypes.Structure):
+        _fields_ = _InCaps._fields_ + [("dwSupport", wintypes.DWORD)]
+
+    try:
+        winmm = ctypes.WinDLL("winmm")
+        signature = []
+        for prefix, caps_type in (("waveIn", _InCaps), ("waveOut", _OutCaps)):
+            count = getattr(winmm, prefix + "GetNumDevs")()
+            names = []
+            for index in range(count):
+                caps = caps_type()
+                if getattr(winmm, prefix + "GetDevCapsW")(index, ctypes.byref(caps), ctypes.sizeof(caps)) == 0:
+                    names.append(caps.szPname)
+            preferred, status = wintypes.DWORD(0xFFFFFFFF), wintypes.DWORD(0)
+            # DRVM_MAPPER_PREFERRED_GET on WAVE_MAPPER: the current default device.
+            getattr(winmm, prefix + "Message")(wintypes.HANDLE(0xFFFFFFFF), 0x2015, ctypes.byref(preferred),
+                                               ctypes.byref(status))
+            signature.append((tuple(names), preferred.value))
+        return tuple(signature)
+    except Exception:
+        return None
+
+
 class _Rechunker:
     """Turns pieces of any size into exact 10 ms frames. Some drivers (DirectSound, Bluetooth) deliver
     uneven blocks; dropping those lost up to a third of the sound."""
@@ -155,6 +198,10 @@ class AudioEngine:
         self._delay_ms = 40
         self._in_chunks = _Rechunker(FRAME_BYTES)
         self._out_pending = bytearray()
+        self._opened_names: tuple[str, str] | None = None  # device settings the open streams were made for
+        self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
+        self._monitor_stop = threading.Event()
+        self._monitor: threading.Thread | None = None
         self._reset_counters()
         self.apply_settings(settings)
 
@@ -187,9 +234,10 @@ class AudioEngine:
 
     def apply_settings(self, settings: AudioSettings) -> None:
         with self._lock:
-            restart = self._running and (
-                settings.input_device != self.settings.input_device
-                or settings.output_device != self.settings.output_device)
+            # The settings object is shared with (and changed in place by) the app, so compare with what
+            # the streams were opened for. Comparing with self.settings meant a newly chosen microphone or
+            # headset only took effect after leaving and rejoining the call.
+            restart = self._running and self._opened_names != (settings.input_device, settings.output_device)
             self.settings = settings
             self.mixer.master_volume = settings.output_volume
             self.mixer.user_volume = dict(settings.user_volumes)
@@ -231,17 +279,27 @@ class AudioEngine:
             if self._running:
                 return
             try:
+                self._refresh_device_list_if_missing()
                 self._in_chunks.clear()
                 self._out_pending.clear()
-                self._input = self._open(sd.RawInputStream, _device_index(self.settings.input_device, "input"),
-                                         self._capture)
-                self._output = self._open(sd.RawOutputStream,
-                                          _device_index(self.settings.output_device, "output"), self._playback)
+                mic = _device_index(self.settings.input_device, "input")
+                speakers = _device_index(self.settings.output_device, "output")
+                missing = [name for name, index in ((self.settings.input_device, mic),
+                                                    (self.settings.output_device, speakers)) if name and index is None]
+                if missing:
+                    # Unplugged: run on the default device for now. The device watcher reopens the chosen one
+                    # as soon as Windows reports it back.
+                    logger.warning("Chosen device not found (%s): using the default for now", ", ".join(missing))
+                    self.on_problem("fallback")
+                self._input = self._open(sd.RawInputStream, mic, self._capture)
+                self._output = self._open(sd.RawOutputStream, speakers, self._playback)
                 self._input.start()
                 self._output.start()
                 self._delay_ms = min(500, int((self._input.latency + self._output.latency) * 1000))
                 self._running = True
+                self._opened_names = (self.settings.input_device, self.settings.output_device)
                 self._reset_counters()
+                self._start_monitor()
                 logger.info("Audio opened: mic %s, speakers %s, delay %d ms, noise %s, echo %s, agc %s",
                             _describe(self._input.device), _describe(self._output.device), self._delay_ms,
                             self.settings.noise, self.settings.echo_cancellation, self.settings.auto_gain)
@@ -263,11 +321,70 @@ class AudioEngine:
                 raise
             # A device that refuses WASAPI (rare drivers): let PortAudio pick its default way.
             logger.warning("Opening device %s failed (%s); using the system default", device, exc)
+            self.on_problem("fallback")
             return make(None, None)
+
+    def _refresh_device_list_if_missing(self) -> None:
+        """A device chosen by name but plugged in after PortAudio started is not in its list yet."""
+        import sounddevice as sd
+
+        try:
+            known = {d["name"] for d in sd.query_devices()}
+        except Exception:
+            return
+        wanted = {name for name in (self.settings.input_device, self.settings.output_device) if name}
+        if wanted - known:
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                logger.debug("PortAudio re-init failed", exc_info=True)
+
+    def _start_monitor(self) -> None:
+        if self._monitor is not None and self._monitor.is_alive():
+            return
+        self._monitor_stop = threading.Event()
+        stop = self._monitor_stop
+
+        def watch() -> None:
+            signature = _system_signature()
+            pending = None  # a change must look the same on two checks in a row (Windows settles first)
+            last_calls, quiet_since = self._callbacks, None
+            while not stop.wait(1.5):
+                if not self._running:
+                    continue
+                now_signature = _system_signature()
+                if signature is None:
+                    signature = now_signature
+                elif now_signature is not None and now_signature != signature:
+                    if pending != now_signature:
+                        pending = now_signature
+                        continue
+                    signature, pending = now_signature, None
+                    logger.info("Audio devices changed in Windows: reopening")
+                    self.on_problem("devices_changed")
+                    last_calls, quiet_since = self._callbacks, None
+                    continue
+                else:
+                    pending = None
+                # A stream on an unplugged device can simply stop calling back, with no error at all.
+                if self._callbacks != last_calls:
+                    last_calls, quiet_since = self._callbacks, None
+                elif quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since > 3.0:
+                    logger.warning("The microphone stopped delivering sound: reopening")
+                    quiet_since = None
+                    self.on_problem("device_lost")
+
+        self._monitor = threading.Thread(target=watch, name="audio-devices", daemon=True)
+        self._monitor.start()
 
     def stop(self) -> None:
         with self._lock:
             self._running = False
+            self._monitor_stop.set()
+            self._monitor = None
             self._close_streams()
             self.mixer.clear()
 
@@ -308,6 +425,7 @@ class AudioEngine:
     def _capture(self, indata, frames, time_info, status) -> None:
         if status and status.input_overflow:
             self._overflows += 1
+        self._callbacks += 1
         if frames != FRAME_SAMPLES:
             self._odd_blocks += 1
         for frame in self._in_chunks.push(bytes(indata)):

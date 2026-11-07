@@ -89,12 +89,22 @@ def _device_index(name: str, kind: str) -> int | None:
                 return default
         return None
     matches = [i for i, d in enumerate(devices) if d["name"] == name and d[channels_key] > 0]
+    if not matches:
+        # Windows renames a re-plugged USB headset: "Микрофон (Razer …)" becomes "Микрофон (2- Razer …)".
+        wanted = _plain_name(name)
+        matches = [i for i, d in enumerate(devices) if _plain_name(d["name"]) == wanted and d[channels_key] > 0]
     preferred = [i for i in matches if wasapi is not None and devices[i]["hostapi"] == wasapi]
     if preferred:
         return preferred[0]
     if matches:
         return matches[0]
     return None  # unplugged: fall back to the default device
+
+
+def _plain_name(name: str) -> str:
+    import re
+
+    return re.sub(r"\(\d+- ", "(", name).strip().lower()
 
 
 def _extra_settings(device: int | None):

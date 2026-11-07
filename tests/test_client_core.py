@@ -359,3 +359,17 @@ def test_device_changes_reopen_audio_once_and_fallback_only_warns():
     assert reopened == [] and any("стандартное" in n for n in notices)
     call._on_audio_problem("devices_changed")
     assert wait_for(lambda: reopened == [True])
+
+
+def test_replugged_headset_with_windows_number_prefix_is_found(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from app.client.core import audio
+
+    devices = [{"name": "Микрофон (2- Razer Barracuda X 2.4)", "hostapi": 0, "max_input_channels": 1,
+                "max_output_channels": 0}]
+    fake = SimpleNamespace(query_devices=lambda *a: devices,
+                           query_hostapis=lambda *a: [{"name": "Windows WASAPI", "default_input_device": -1}])
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    assert audio._device_index("Микрофон (Razer Barracuda X 2.4)", "input") == 0

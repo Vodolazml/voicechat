@@ -1153,6 +1153,7 @@ class Backend(QObject):
         if state == IDLE:
             self._call_channel = 0
             self._announced_channel = 0
+            self.sounds.keep_open = False  # closes itself once the last sound has played
             self._speakers.clear()
             self._streams.clear()
             self._watching.clear()
@@ -1177,6 +1178,9 @@ class Backend(QObject):
             if channel_id:
                 self._call_channel = channel_id
             if state == CONNECTED and was != 0:
+                if not self.sounds.keep_open:
+                    self.sounds.keep_open = True
+                    self._sound_worker.submit(self.sounds.warm)
                 if self._announced_channel != self._call_channel:
                     # Moved by a moderator or rejoined on our own: no click announced this channel.
                     self._announced_channel = self._call_channel

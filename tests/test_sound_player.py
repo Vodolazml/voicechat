@@ -135,3 +135,15 @@ def test_stop_closes_the_stream():
     player.play(sound(1))
     player.stop()
     assert opened[0].closed and not player.is_playing()
+
+
+def test_stream_stays_open_during_a_call_and_closes_after():
+    player, opened, _ = make_player()
+    player.keep_open = True
+    player.warm()
+    player._close_if_idle()                                      # the idle timer firing mid-call
+    assert not opened[0].closed
+    player.keep_open = False
+    player._close_if_idle()
+    assert opened[0].closed
+    player.stop()

@@ -49,6 +49,7 @@ class SoundPlayer:
         self._device_name: str | None = None
         self._reverse = bytearray()
         self._idle_timer: threading.Timer | None = None
+        self.keep_open = False  # during a call: no open delay before a friend's join or a button prompt
 
     # --- public -----------------------------------------------------------------------------------
 
@@ -125,7 +126,7 @@ class SoundPlayer:
         timer.start()
 
     def _close_if_idle(self) -> None:
-        if self.is_playing():
+        if self.keep_open or self.is_playing():
             self._arm_idle_close()
             return
         with self._lock:

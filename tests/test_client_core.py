@@ -373,3 +373,68 @@ def test_replugged_headset_with_windows_number_prefix_is_found(monkeypatch):
                            query_hostapis=lambda *a: [{"name": "Windows WASAPI", "default_input_device": -1}])
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     assert audio._device_index("Микрофон (Razer Barracuda X 2.4)", "input") == 0
+
+
+def _engine_with_gate(sent):
+    from app.client.core.audio import AudioEngine
+
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False, mode="ptt"),
+                         on_frame=sent.append)
+    return engine
+
+
+def test_mic_stream_carries_silence_between_words_and_fades_at_the_gate():
+    sent = []
+    engine = _engine_with_gate(sent)
+    # 1 kHz: whole cycles per frame, and the processing may remove a constant offset.
+    loud = (8000 * np.sin(2 * np.pi * 1000 * np.arange(FRAME_SAMPLES) / 48000)).astype(np.int16).tobytes()
+    engine._process_frame(loud)                 # gate closed: silence still goes out
+    engine.ptt_pressed = True
+    engine._process_frame(loud)                 # opens: faded in
+    engine._process_frame(loud)                 # open: as is
+    engine.ptt_pressed = False
+    engine._process_frame(loud)                 # closes: faded out
+    engine._process_frame(loud)                 # closed: silence
+    assert len(sent) == 5, "a frame every 10 ms, speech or not"
+    frames = [np.frombuffer(f, dtype=np.int16) for f in sent]
+    assert not frames[0].any() and not frames[4].any()
+    def peak(samples):
+        return int(np.abs(samples.astype(np.int32)).max())
+
+    full = peak(frames[2])
+    assert full > 6000
+    assert peak(frames[1][:48]) < full * 0.15 and peak(frames[1][-48:]) > full * 0.8
+    assert peak(frames[3][:48]) > full * 0.8 and peak(frames[3][-48:]) < full * 0.15
+    assert engine.stats()["sent_frames"] == 2
+
+
+def test_muted_mic_sends_nothing():
+    sent = []
+    engine = _engine_with_gate(sent)
+    engine.muted = True
+    engine.ptt_pressed = True
+    engine._process_frame(bytes(FRAME_BYTES))
+    assert sent == []
+
+
+def test_limiter_gain_glides_instead_of_stepping():
+    limiter = Limiter()
+    quiet = np.full(FRAME_SAMPLES, 10000.0, dtype=np.float32)
+    loud = np.full(FRAME_SAMPLES, 60000.0, dtype=np.float32)
+    limiter.process(loud)
+    out = limiter.process(quiet)                # gain recovers: no jump at the frame start
+    assert abs(out[0] - out[1]) < 50
+    assert out[-1] > out[0]
+
+
+def test_late_frame_fades_out_instead_of_cutting():
+    mixer = Mixer()
+    mixer.normalize = False
+    tone = (np.full(FRAME_SAMPLES, 5000, dtype=np.int16)).tobytes()
+    for _ in range(Mixer.START_FRAMES):
+        mixer.put(1, tone)
+    first = np.frombuffer(mixer.mix(), dtype=np.int16)
+    assert first[0] == 0 and first[-1] > 4900, "fades in after a gap"
+    mixer.mix()
+    tail = np.frombuffer(mixer.mix(), dtype=np.int16)   # nothing arrived in time
+    assert tail[0] > 4900 and tail[-1] == 0

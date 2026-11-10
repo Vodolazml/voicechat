@@ -16,7 +16,8 @@ from typing import Callable
 
 import numpy as np
 
-from .dsp import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, Mixer, RNNoise, VoiceGate, apply_gain, to_bytes, to_float
+from .dsp import (FADE_IN, FADE_OUT, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, SILENCE, Mixer, RNNoise, VoiceGate,
+                  apply_gain, to_bytes, to_float)
 
 logger = logging.getLogger("voicechat.audio")
 
@@ -478,10 +479,24 @@ class AudioEngine:
         else:
             send = is_voice
         send = send and not self.muted
+        was = self.transmitting
         self.transmitting = send
+        if self.muted:
+            return
+        # The stream to the call never stops while the mic is on: between words it carries silence.
+        # Opus (with DTX) turns that silence into almost no traffic, and friends' jitter buffers see
+        # a pause instead of lost packets. Stopping the stream made them conceal "losses" and then
+        # catch up when speech came back, which crackled at the start of every phrase. The gate
+        # opens and closes with a 10 ms fade, so it never cuts the waveform mid-swing either.
         if send:
             self._frames_sent += 1
+            if not was:
+                frame = to_bytes(to_float(frame) * FADE_IN)
             self.on_frame(frame)
+        elif was:
+            self.on_frame(to_bytes(to_float(frame) * FADE_OUT))
+        else:
+            self.on_frame(SILENCE)
 
     def _playback(self, outdata, frames, time_info, status) -> None:
         if status and status.output_underflow:

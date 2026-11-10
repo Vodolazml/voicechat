@@ -21,6 +21,8 @@ FRAME_SAMPLES = 480
 FRAME_BYTES = FRAME_SAMPLES * 2
 INT16_MAX = 32767.0
 SILENCE = bytes(FRAME_BYTES)
+FADE_IN = np.linspace(0.0, 1.0, FRAME_SAMPLES, dtype=np.float32)
+FADE_OUT = FADE_IN[::-1].copy()
 
 
 def to_float(frame: bytes) -> np.ndarray:
@@ -47,8 +49,9 @@ def apply_gain(frame: bytes, gain: float) -> bytes:
 class Limiter:
     """Brick-wall peak limiter with a soft knee: loud is allowed, distortion is not.
 
-    Gain drops instantly when a peak would clip and recovers over ~80 ms, so raising a quiet
-    friend to 300% never crackles.
+    Gain drops when a peak would clip and recovers over ~80 ms, so raising a quiet friend to 300%
+    never crackles. The gain glides across each 10 ms frame instead of jumping at frame edges: a
+    jump is a step in the waveform, heard as a click when someone starts talking loudly.
     """
 
     def __init__(self, ceiling: float = 0.89, release_ms: float = 80.0) -> None:
@@ -59,11 +62,15 @@ class Limiter:
     def process(self, samples: np.ndarray) -> np.ndarray:
         peak = float(np.max(np.abs(samples))) if samples.size else 0.0
         target = min(1.0, self.ceiling / peak) if peak > 0 else 1.0
+        start = self.gain
         if target < self.gain:
             self.gain = target
         else:
             self.gain = target + (self.gain - target) * self.release
-        out = samples * self.gain
+        if samples.size == FRAME_SAMPLES and abs(start - self.gain) > 1e-4:
+            out = samples * (start + (self.gain - start) * FADE_IN)
+        else:
+            out = samples * self.gain
         # Soft clip whatever is left above the ceiling (between frames the envelope can lag).
         knee = self.ceiling
         over = np.abs(out) > knee
@@ -131,12 +138,13 @@ class VoiceGate:
 
 
 class _SpeakerBuffer:
-    __slots__ = ("frames", "leveler", "started")
+    __slots__ = ("frames", "leveler", "started", "last")
 
     def __init__(self) -> None:
         self.frames: deque[bytes] = deque()
         self.leveler = Leveler()
         self.started = False
+        self.last: np.ndarray | None = None  # the frame just played, faded out if the next one is late
 
 
 class Mixer:
@@ -201,19 +209,32 @@ class Mixer:
             total = np.zeros(FRAME_SAMPLES, dtype=np.float32)
             active = False
             for user_id, buffer in self._speakers.items():
+                fade = None
                 if not buffer.started:
                     if len(buffer.frames) < self.START_FRAMES:
                         continue
                     buffer.started = True
+                    fade = FADE_IN  # resuming after a gap: glide in rather than start mid-wave
                 if not buffer.frames:
-                    buffer.started = False  # underrun: rebuffer quietly instead of crackling
+                    # Underrun: rebuffer, but fade the last frame out instead of dropping straight to
+                    # zero, which is a step in the waveform and crackles.
+                    buffer.started = False
+                    samples, buffer.last = buffer.last, None
+                    if samples is None or self.deafened or user_id in self.muted_users:
+                        continue
+                    total += samples * FADE_OUT * self.user_volume.get(user_id, 1.0)
+                    active = True
                     continue
                 frame = buffer.frames.popleft()
                 if self.deafened or user_id in self.muted_users:
+                    buffer.last = None
                     continue
                 samples = to_float(frame)
+                if fade is not None:
+                    samples = samples * fade
                 if self.normalize:
                     samples = buffer.leveler.process(samples)
+                buffer.last = samples
                 total += samples * self.user_volume.get(user_id, 1.0)
                 active = True
             if self._effects:

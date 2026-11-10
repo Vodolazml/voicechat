@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -208,6 +209,7 @@ class AudioEngine:
         self._delay_ms = 40
         self._in_chunks = _Rechunker(FRAME_BYTES)
         self._out_pending = bytearray()
+        self._reverse_extra: deque[bytes] = deque(maxlen=20)  # UI sounds played by the separate player
         self._opened_names: tuple[str, str] | None = None  # device settings the open streams were made for
         self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
         self._monitor_stop = threading.Event()
@@ -390,6 +392,12 @@ class AudioEngine:
         self._monitor = threading.Thread(target=watch, name="audio-devices", daemon=True)
         self._monitor.start()
 
+    def add_reverse(self, frame: bytes) -> None:
+        """A 10 ms frame another stream plays on the same speakers (UI sounds): the echo canceller has to
+        hear it too, or a "Микрофон включен" from the speakers would go out through the microphone."""
+        if self._running and len(frame) == FRAME_BYTES:
+            self._reverse_extra.append(frame)
+
     def stop(self) -> None:
         with self._lock:
             self._running = False
@@ -492,7 +500,10 @@ class AudioEngine:
                 try:
                     from livekit import rtc
 
-                    apm.process_reverse_stream(rtc.AudioFrame(mixed, SAMPLE_RATE, 1, FRAME_SAMPLES))
+                    reverse = mixed
+                    if self._reverse_extra:
+                        reverse = to_bytes(to_float(mixed) + to_float(self._reverse_extra.popleft()))
+                    apm.process_reverse_stream(rtc.AudioFrame(reverse, SAMPLE_RATE, 1, FRAME_SAMPLES))
                 except Exception:
                     pass
         outdata[:] = bytes(self._out_pending[:needed])

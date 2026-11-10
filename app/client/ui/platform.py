@@ -148,6 +148,25 @@ def make_click_through(win_id: int) -> None:
         put(win_id, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
     except Exception:
         logger.debug("Overlay style not applied", exc_info=True)
+    keep_on_top(win_id)
+
+
+def keep_on_top(win_id: int) -> None:
+    """Moves the overlay to the top of the topmost windows again. Setting WS_EX_TOPMOST as a style does
+    not change the Z order; only SetWindowPos(HWND_TOPMOST) does, and a game or another overlay that
+    turns topmost after us ends up above until we do it again. Never activates or moves the window."""
+    if not IS_WINDOWS or not win_id:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        HWND_TOPMOST = ctypes.c_void_p(-1)
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
+        user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user32.SetWindowPos(ctypes.c_void_p(win_id), HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
+    except Exception:
+        logger.debug("Overlay not put back on top", exc_info=True)
 
 
 def _colorref(hex_color: str) -> int:

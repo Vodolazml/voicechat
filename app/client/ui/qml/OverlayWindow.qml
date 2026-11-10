@@ -7,6 +7,9 @@ Window {
     id: win
     readonly property var s: backend.settings
     readonly property real k: s.overlay_scale || 1
+    // A window of its own, not owned by the main one: Windows hides owned windows together with their
+    // owner, so minimising VoiceChat used to take the overlay away as well.
+    transientParent: null
     visible: backend.inCall && !!s.overlay_enabled
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint
     color: "transparent"
@@ -23,6 +26,15 @@ Window {
     y: custom ? Math.round((Screen.height - height) * Math.max(0, Math.min(1, s.overlay_y || 0)))
               : (bottom ? Screen.height - height - 60 : 16)
     onVisibleChanged: if (visible) overlayHelper.clickThrough(win)
+
+    // "Always on top" is only set once when the window appears; a game or another overlay that makes
+    // itself topmost later lands above it. Put it back on top every second while it is shown.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: win.visible
+        onTriggered: overlayHelper.keepOnTop(win)
+    }
 
     Column {
         id: column

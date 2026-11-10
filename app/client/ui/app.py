@@ -31,6 +31,10 @@ class OverlayHelper(QObject):
     def clickThrough(self, window) -> None:
         native.make_click_through(int(window.winId()))
 
+    @Slot(QObject)
+    def keepOnTop(self, window) -> None:
+        native.keep_on_top(int(window.winId()))
+
 
 def _tray(app: QApplication, backend: Backend, icon: QIcon) -> QSystemTrayIcon | None:
     if not QSystemTrayIcon.isSystemTrayAvailable():

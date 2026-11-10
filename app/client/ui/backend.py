@@ -32,6 +32,7 @@ from app.client.client_config import load_client_config
 from app.client.core.audio import AudioSettings, list_devices
 from app.client.core.call import CONNECTED, IDLE, CallController, CallListener
 from app.client.core.dsp import FRAME_BYTES, SAMPLE_RATE, RNNoise
+from app.client.core.effects import SoundPlayer
 from app.client.core.events import EventStream
 from app.client.core.keys import KeyManager
 from app.client.e2ee import E2EEIdentity
@@ -211,9 +212,22 @@ def load_prompt(path: Path) -> bytes | None:
     return pcm + bytes((-len(pcm)) % FRAME_BYTES)
 
 
+# Recorded announcements that replace the join/leave chimes when the files are there.
+ANNOUNCEMENTS = ("join", "leave")
+SPOKEN: set[str] = set()  # sounds loaded from recordings (played louder than the synthetic chimes)
+
+
 def _load_prompts() -> None:
     for name, fallback in PROMPTS.items():
-        SOUNDS[name] = load_prompt(VOICE_DIR / f"{name}.wav") or SOUNDS[fallback]
+        pcm = load_prompt(VOICE_DIR / f"{name}.wav")
+        SOUNDS[name] = pcm or SOUNDS[fallback]
+        if pcm:
+            SPOKEN.add(name)
+    for name in ANNOUNCEMENTS:
+        pcm = load_prompt(VOICE_DIR / f"{name}.wav")
+        if pcm:
+            SOUNDS[name] = pcm
+            SPOKEN.add(name)
 
 
 _load_prompts()
@@ -265,6 +279,12 @@ class Backend(QObject):
         self.keys: KeyManager | None = None
         self.call: CallController | None = None
         self.events: EventStream | None = None
+        # UI sounds on a stream of their own: the call reopening its devices no longer cuts them off.
+        # One worker, so sounds keep their order and opening the device never blocks the window.
+        self.sounds = SoundPlayer(lambda: self.audio_settings.output_device,
+                                  lambda: self.audio_settings.output_volume, self._echo_reference)
+        self._sound_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sounds")
+        self._announced_channel = 0  # the call whose "joined" announcement already played
 
         self._view = "loading"
         self._busy = False
@@ -862,6 +882,8 @@ class Backend(QObject):
         native.set_call_active(False)
         self._end_session()
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self._sound_worker.shutdown(wait=False, cancel_futures=True)
+        self.sounds.stop()
 
     # =========================================================================================
     # spaces, channels, presence
@@ -1109,6 +1131,9 @@ class Backend(QObject):
             return
         self._call_channel = channel_id
         self._call_state = "connecting"
+        # Our own "joined" plays on the click, not a second later when the media server answers.
+        self._announced_channel = channel_id
+        self._sound("join", "sound_join_leave")
         self._text_channel = 0
         self._set_chat(channel_id)
         self.callChanged.emit()
@@ -1118,9 +1143,8 @@ class Backend(QObject):
     @Slot()
     def leaveCall(self) -> None:
         if self.call is not None:
-            # The call closes its audio right away, so our own "left" chime goes to the device directly.
-            if not self._deafened and self.ui.get("sound_join_leave", True):
-                self._play_direct(SOUNDS["leave"])
+            # The sound player has its own stream, so the call closing its audio does not cut this off.
+            self._sound("leave", "sound_join_leave")
             self.call.leave()
 
     def _on_call_state(self, state: str, channel_id: int | None) -> None:
@@ -1128,6 +1152,7 @@ class Backend(QObject):
         self._call_state = state
         if state == IDLE:
             self._call_channel = 0
+            self._announced_channel = 0
             self._speakers.clear()
             self._streams.clear()
             self._watching.clear()
@@ -1152,8 +1177,11 @@ class Backend(QObject):
             if channel_id:
                 self._call_channel = channel_id
             if state == CONNECTED and was != 0:
+                if self._announced_channel != self._call_channel:
+                    # Moved by a moderator or rejoined on our own: no click announced this channel.
+                    self._announced_channel = self._call_channel
+                    self._sound("join", "sound_join_leave")
                 if not self._ping_timer.isActive():
-                    self._sound("join", "sound_join_leave", force=True)
                     self._ping_timer.start()
                     self._measure_ping()
                 native.set_call_active(True)
@@ -1215,39 +1243,38 @@ class Backend(QObject):
         self.localChanged.emit()
         self._rebuild_stage()
 
-    def _sound(self, name: str, setting: str = "", force: bool = False) -> None:
-        """Short UI chimes, mixed into the call's own output (no extra audio device is opened)."""
+    def _sound(self, name: str, setting: str = "") -> None:
+        """Joins, leaves and message chimes. Joins and leaves queue up and repeat neither each other nor
+        themselves: five friends joining at once, or one joining during the announcement, is one sound."""
         if self.call is None or self._deafened or (setting and not self.ui.get(setting, True)):
             return
-        if getattr(self.call.audio, "_running", False):
-            self.call.audio.mixer.play_effect(SOUNDS[name])
-        else:
-            self._play_direct(SOUNDS[name])
+        lane = "announce" if name in ANNOUNCEMENTS else "ui"
+        self._play(SOUNDS[name], lane=lane, key=name, gain=0.9 if name in SPOKEN else 0.6)
 
     def _prompt(self, name: str) -> None:
-        """Mic/headphone button feedback. Spoken even right after deafening, so you hear "Звук выключен"."""
+        """Mic/headphone button feedback. Spoken even right after deafening, so you hear "Звук выключен".
+        A new click cuts the previous prompt short instead of waiting for it."""
         if self.call is None:
             return
-        pcm = SOUNDS[name] if self.ui.get("voice_prompts", True) else SOUNDS[PROMPTS[name]]
-        if getattr(self.call.audio, "_running", False):
-            self.call.audio.mixer.play_effect(pcm, always=True)
-        else:
-            self._play_direct(pcm)
+        spoken = self.ui.get("voice_prompts", True)
+        pcm = SOUNDS[name] if spoken else SOUNDS[PROMPTS[name]]
+        self._play(pcm, lane="prompt", replace=True, gain=0.9 if spoken and name in SPOKEN else 0.6)
 
-    def _play_direct(self, pcm: bytes) -> None:
-        """A chime outside a call (or while the call's audio is shutting down), on the chosen output."""
+    def _play(self, pcm: bytes, **options) -> None:
         def play() -> None:
             try:
-                import sounddevice as sd
-
-                from app.client.core.audio import _device_index, _extra_settings
-
-                samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-                device = _device_index(self.audio_settings.output_device, "output")
-                sd.play(samples, SAMPLE_RATE, device=device, extra_settings=_extra_settings(device), blocking=True)
+                self.sounds.play(pcm, **options)
             except Exception:
                 logger.debug("UI sound not played", exc_info=True)
-        self._pool.submit(play)
+        try:
+            self._sound_worker.submit(play)
+        except RuntimeError:  # shutting down
+            pass
+
+    def _echo_reference(self, frame: bytes) -> None:
+        call = self.call
+        if call is not None:
+            call.audio.add_reverse(frame)
 
     @Slot(int, float)
     def setUserVolume(self, user_id: int, volume: float) -> None:
@@ -1415,11 +1442,8 @@ class Backend(QObject):
         if uid != self._me.get("id"):
             return
         self.toast("warning", f"{event.get('by', 'Кто-то')} будит вас! Включите микрофон или звук")
-        if self.call is not None and getattr(self.call.audio, "_running", False):
-            # Played even with the sound off: that is the whole point.
-            self.call.audio.mixer.play_effect(SOUNDS["wake"], always=True)
-        else:
-            self._play_direct(SOUNDS["wake"])
+        # Played even with the sound off: that is the whole point.
+        self._play(SOUNDS["wake"], lane="wake", replace=True, gain=1.0)
 
     # --- space settings, members, pictures ----------------------------------------------------
 
@@ -1684,7 +1708,7 @@ class Backend(QObject):
             _, mentioned = render_message(message["body"], self._me.get("username", ""))
             if mentioned and self.ui.get("notify_mentions", True):
                 self.toast("mention", f"{self._name(message['author_id'], message['author_name'])} упомянул вас: {message['body'][:80]}")
-                self._sound("message", "sound_messages", force=True)
+                self._sound("message", "sound_messages")
             elif channel_id == self._call_channel:
                 self._sound("message", "sound_messages")
 

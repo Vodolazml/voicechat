@@ -21,6 +21,9 @@ FRAME_SAMPLES = 480
 FRAME_BYTES = FRAME_SAMPLES * 2
 INT16_MAX = 32767.0
 SILENCE = bytes(FRAME_BYTES)
+# 10 ms ramps: sound that starts or stops in the middle of a waveform is a click ("хруст").
+FADE_IN = np.linspace(0.0, 1.0, FRAME_SAMPLES, dtype=np.float32)
+FADE_OUT = FADE_IN[::-1].copy()
 
 
 def to_float(frame: bytes) -> np.ndarray:
@@ -36,6 +39,10 @@ def rms_dbfs(samples: np.ndarray) -> float:
         return -96.0
     rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
     return 20 * math.log10(max(rms, 1.0) / INT16_MAX)
+
+
+def fade(frame: bytes, ramp: np.ndarray) -> bytes:
+    return to_bytes(to_float(frame) * ramp)
 
 
 def apply_gain(frame: bytes, gain: float) -> bytes:
@@ -59,11 +66,17 @@ class Limiter:
     def process(self, samples: np.ndarray) -> np.ndarray:
         peak = float(np.max(np.abs(samples))) if samples.size else 0.0
         target = min(1.0, self.ceiling / peak) if peak > 0 else 1.0
+        previous = self.gain
         if target < self.gain:
             self.gain = target
         else:
             self.gain = target + (self.gain - target) * self.release
-        out = samples * self.gain
+        # Glide from the last frame's gain to the new one across the frame: a gain that jumps at the
+        # frame boundary is a step in the waveform, heard as a crackle on loud word onsets.
+        if samples.size and abs(previous - self.gain) > 1e-4:
+            out = samples * np.linspace(previous, self.gain, samples.size, dtype=np.float32)
+        else:
+            out = samples * self.gain
         # Soft clip whatever is left above the ceiling (between frames the envelope can lag).
         knee = self.ceiling
         over = np.abs(out) > knee
@@ -131,12 +144,13 @@ class VoiceGate:
 
 
 class _SpeakerBuffer:
-    __slots__ = ("frames", "leveler", "started")
+    __slots__ = ("frames", "leveler", "started", "last")
 
     def __init__(self) -> None:
         self.frames: deque[bytes] = deque()
         self.leveler = Leveler()
         self.started = False
+        self.last: np.ndarray | None = None  # the last frame played, to fade out on an underrun
 
 
 class Mixer:
@@ -162,11 +176,17 @@ class Mixer:
         self.limiter = Limiter()
         self.output_level_db = -96.0
         self._received: dict[int, int] = {}  # frames per person since the last stats(), for the log
+        self._underruns: dict[int, int] = {}  # times a person's buffer ran dry since the last stats()
 
     def stats(self) -> dict[int, int]:
         with self._lock:
             received, self._received = self._received, {}
         return received
+
+    def underrun_stats(self) -> dict[int, int]:
+        with self._lock:
+            underruns, self._underruns = self._underruns, {}
+        return underruns
 
     def put(self, user_id: int, frame: bytes) -> None:
         if len(frame) != FRAME_BYTES:
@@ -201,20 +221,34 @@ class Mixer:
             total = np.zeros(FRAME_SAMPLES, dtype=np.float32)
             active = False
             for user_id, buffer in self._speakers.items():
+                starting = False
                 if not buffer.started:
                     if len(buffer.frames) < self.START_FRAMES:
                         continue
-                    buffer.started = True
+                    buffer.started = starting = True
                 if not buffer.frames:
-                    buffer.started = False  # underrun: rebuffer quietly instead of crackling
+                    # Underrun: rebuffer, but fade the last frame out instead of cutting the voice off
+                    # mid-waveform (a cut is a click).
+                    buffer.started = False
+                    self._underruns[user_id] = self._underruns.get(user_id, 0) + 1
+                    last, buffer.last = buffer.last, None
+                    if last is not None and not (self.deafened or user_id in self.muted_users):
+                        # Mirrored, it starts exactly where the voice stopped, then fades to silence.
+                        total += last[::-1] * FADE_OUT
+                        active = True
                     continue
                 frame = buffer.frames.popleft()
                 if self.deafened or user_id in self.muted_users:
+                    buffer.last = None
                     continue
                 samples = to_float(frame)
                 if self.normalize:
                     samples = buffer.leveler.process(samples)
-                total += samples * self.user_volume.get(user_id, 1.0)
+                samples = samples * self.user_volume.get(user_id, 1.0)
+                if starting and buffer.last is None:
+                    samples = samples * FADE_IN
+                buffer.last = samples
+                total += samples
                 active = True
             if self._effects:
                 effect, always = self._effects.popleft()

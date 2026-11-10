@@ -315,6 +315,8 @@ class CallController:
             stats["state"] = self.state
             # Frames received from each person (100 a second while they talk; 0 = we hear nothing).
             stats["heard"] = self.audio.mixer.stats()
+            # Times each person's sound ran dry and had to rebuffer (a short dropout each).
+            stats["underruns"] = self.audio.mixer.underrun_stats()
             muted = self.muted or self.deafened
             if stats["running"] and stats["mic_frames"] == 0:
                 logger.warning("Channel %s: the microphone delivers no sound at all: %s", channel_id, stats)

@@ -16,7 +16,8 @@ from typing import Callable
 
 import numpy as np
 
-from .dsp import FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, Mixer, RNNoise, VoiceGate, apply_gain, to_bytes, to_float
+from .dsp import (FADE_IN, FADE_OUT, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, SILENCE, Mixer, RNNoise, VoiceGate,
+                  apply_gain, fade, to_bytes, to_float)
 
 logger = logging.getLogger("voicechat.audio")
 
@@ -199,6 +200,7 @@ class AudioEngine:
         self.ptt_pressed = False
         self.transmitting = False
         self.input_level_db = -96.0
+        self._was_sending = False
         self._lock = threading.RLock()
         self._apm = None
         self._apm_config: tuple | None = None
@@ -479,9 +481,20 @@ class AudioEngine:
             send = is_voice
         send = send and not self.muted
         self.transmitting = send
+        was_sending, self._was_sending = self._was_sending, send
+        if self.muted:
+            return  # the track itself is muted; nothing goes out
+        # The stream never stops while unmuted: between words it carries silence (Opus DTX makes that
+        # almost free). It used to stop dead and start again on the next word, and friends' jitter
+        # buffers heard every restart as a crackle. The voice fades in and out over 10 ms, so the gate
+        # opening or closing in the middle of a waveform is no click either.
         if send:
             self._frames_sent += 1
-            self.on_frame(frame)
+            self.on_frame(frame if was_sending else fade(frame, FADE_IN))
+        elif was_sending:
+            self.on_frame(fade(frame, FADE_OUT))
+        else:
+            self.on_frame(SILENCE)
 
     def _playback(self, outdata, frames, time_info, status) -> None:
         if status and status.output_underflow:

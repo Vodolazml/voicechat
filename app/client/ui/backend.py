@@ -698,13 +698,17 @@ class Backend(QObject):
         self._bg(lambda: self.api.login(username.strip(), password), lambda _: self._signed_in(),
                  lambda exc: self._show_login(str(exc)))
 
-    @Slot(str, str, str, str, str, bool)
+    @Slot(str, str, str, str, str, bool, bool)
     def register(self, server: str, code: str, username: str, display_name: str, password: str,
-                 remember: bool) -> None:
+                 remember: bool, accept_terms: bool = False) -> None:
+        if not accept_terms:
+            self._set("_error", "Чтобы создать аккаунт, примите соглашение и политику конфиденциальности",
+                      self.errorChanged)
+            return
         if not self._prepare(server):
             return
         self._remember(remember, username.strip())
-        self._bg(lambda: self.api.register(code.strip(), username.strip(), display_name.strip(), password),
+        self._bg(lambda: self.api.register(code.strip(), username.strip(), display_name.strip(), password, True),
                  lambda _: self._signed_in(), lambda exc: self._show_login(str(exc)))
 
     def _signed_in(self) -> None:
@@ -850,6 +854,42 @@ class Backend(QObject):
             self._show_login("")
         self._bg(lambda: self.api.change_password(old, new), done,
                  lambda exc: (self._set_busy(False), self._set("_error", str(exc), self.errorChanged)))
+
+    @Slot()
+    def acceptConsent(self) -> None:
+        version = int(self._me.get("consent_required") or 1)
+
+        def done(_):
+            self._me = {**self._me, "consent_version": version}
+            self.meChanged.emit()
+        self._bg(lambda: self.api.accept_consent(version), done,
+                 lambda exc: self.toast("error", f"Не удалось сохранить согласие: {exc}"))
+
+    @Slot(str)
+    def deleteAccount(self, password: str) -> None:
+        self._set_busy(True)
+
+        def done(_):
+            self._set_busy(False)
+            self.client_settings.pop("remembered_refresh_dpapi", None)
+            self._save()
+            self._end_session()
+            self._show_login("")
+            self.toast("success", "Аккаунт удалён")
+        self._bg(lambda: self.api.delete_account(password), done,
+                 lambda exc: (self._set_busy(False), self.toast("error", str(exc))))
+
+    @Slot(str, str, result=str)
+    def legalUrl(self, server: str, page: str) -> str:
+        """Address of /privacy, /terms, /consent or /licenses on `server` (the login screen's field) or,
+        when it is empty, on the server we are signed in to."""
+        from app.client.api import normalize_base_url
+
+        try:
+            base = normalize_base_url(server, self.api.base_url) if server.strip() else self.api.base_url
+        except Exception:
+            base = self.api.base_url
+        return base.rstrip("/") + "/" + page
 
     @Slot()
     def logout(self) -> None:

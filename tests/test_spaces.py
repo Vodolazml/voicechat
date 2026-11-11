@@ -3,7 +3,7 @@ from tests.test_presence import bearer, client, setup_admin_and_friend  # noqa: 
 
 
 def signup(client, username):
-    response = client.post("/auth/register", json={"username": username, "display_name": username.title(),
+    response = client.post("/auth/register", json={"accept_terms": True, "username": username, "display_name": username.title(),
                                                    "password": "Strong" + username + "123!"})
     assert response.status_code == 200, response.text
     return bearer(response.json()["access_token"])
@@ -57,7 +57,7 @@ def test_sign_up_with_a_space_code_joins_that_space(client):
     dave = bearer(client.post("/auth/login", json={"username": "dave", "password": "Strongdave123!"}).json()[
         "access_token"])
     space = client.post("/spaces", headers=dave, json={"name": "Дэйв"}).json()
-    response = client.post("/auth/register", json={"code": space["invite_code"], "username": "erin",
+    response = client.post("/auth/register", json={"accept_terms": True, "code": space["invite_code"], "username": "erin",
                                                    "display_name": "Erin", "password": "StrongErin123!"})
     erin = bearer(response.json()["access_token"])
     assert [s["id"] for s in client.get("/spaces", headers=erin).json()] == [space["id"]]
@@ -67,7 +67,7 @@ def test_closed_registration(client, monkeypatch):
     from app.server import main
 
     monkeypatch.setattr(main.settings, "open_registration", False)
-    response = client.post("/auth/register", json={"username": "frank", "display_name": "F",
+    response = client.post("/auth/register", json={"accept_terms": True, "username": "frank", "display_name": "F",
                                                    "password": "StrongFrank123!"})
     assert response.status_code == 403
 

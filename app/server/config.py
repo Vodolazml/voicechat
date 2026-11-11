@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
     voice_state_timeout_seconds: int = Field(default=45, ge=10, le=600)
+    # Shown in the privacy policy, the terms and the consent (/privacy, /terms, /consent).
+    operator_name: str = "администратор сервера"
+    operator_contact: str = "через владельца вашего пространства в программе VoiceChat"
+    hosting_provider: str = "арендованный виртуальный сервер (VPS)"
 
     model_config = SettingsConfigDict(env_prefix="VOICECHAT_", env_file=".env")
 

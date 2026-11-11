@@ -66,6 +66,17 @@ class RegisterIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=120, pattern=SAFE_TEXT_PATTERN)
     password: str = Field(min_length=8, max_length=256)
     device_name: str = Field(default="", max_length=120, pattern=DEVICE_NAME_PATTERN)
+    # The person ticked "I accept the terms, the privacy policy and give consent"; edition they saw.
+    accept_terms: bool = False
+    terms_version: int = Field(default=0, ge=0, le=1000)
+
+
+class ConsentIn(BaseModel):
+    version: int = Field(ge=1, le=1000)
+
+
+class AccountDeleteIn(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
 
 
 class ClientUpdateOut(BaseModel):
@@ -86,6 +97,8 @@ class MeOut(OrmModel):
     permissions: list[str]
     is_owner: bool = False
     avatar_version: int = 0
+    consent_version: int = 0
+    consent_required: int = 0
 
 
 class ProfileIn(OrmModel):

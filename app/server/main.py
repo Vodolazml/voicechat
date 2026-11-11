@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import avatars, chat, download_page, presence, spaces
+from . import avatars, chat, download_page, legal, presence, spaces
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -50,10 +50,12 @@ _docs_enabled = settings.enable_api_docs or not settings.is_production
 async def lifespan(_app: FastAPI):
     seed_database()
     janitor = asyncio.create_task(presence.presence_janitor())
+    retention = asyncio.create_task(legal.retention_janitor(SessionLocal))
     try:
         yield
     finally:
         janitor.cancel()
+        retention.cancel()
 
 
 app = FastAPI(
@@ -82,6 +84,7 @@ app.include_router(chat.router)
 app.include_router(spaces.router)
 app.include_router(avatars.router)
 app.include_router(download_page.router)
+app.include_router(legal.router)
 
 
 @app.middleware("http")
@@ -407,7 +410,45 @@ def me(user: models.User = Depends(current_user), db: Session = Depends(get_db))
         is_owner=user.is_owner,
         avatar_version=user.avatar_version if db.scalar(
             select(models.User.avatar.isnot(None)).where(models.User.id == user.id)) else 0,
+        consent_version=user.consent_version or 0,
+        consent_required=legal.LEGAL_VERSION,
     )
+
+
+@app.post("/me/consent", tags=["auth"])
+def accept_consent(payload: schemas.ConsentIn, request: Request, user: models.User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict[str, str]:
+    """The person accepted this edition of the terms, the privacy policy and the consent."""
+    user.consent_version = min(payload.version, legal.LEGAL_VERSION)
+    user.consent_at = models.utcnow()
+    write_audit(db, actor_id=user.id, action="auth.consent", target_type="user", target_id=user.id,
+                request=request, details={"version": user.consent_version})
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/me/delete", tags=["auth"])
+async def delete_account(payload: schemas.AccountDeleteIn, request: Request, user: models.User = Depends(current_user),
+                   db: Session = Depends(get_db)) -> dict[str, str]:
+    """Deletes the account: name, picture, password, sign-ins and message texts (withdraws the consent)."""
+    rate_limit(f"delete-account:{user.id}", 5, 300)
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Пароль указан неверно")
+    if user.is_owner:
+        raise HTTPException(status_code=400, detail="Владельца сервера удалить нельзя")
+    owned = legal.owned_spaces(db, user.id)
+    if owned:
+        raise HTTPException(status_code=400, detail="Сначала удалите свои пространства: " + ", ".join(owned))
+    state = db.get(models.VoiceState, user.id)
+    channel_id = leave_voice(db, state)[0] if state else 0
+    user_id = user.id
+    write_audit(db, actor_id=None, action="auth.account_deleted", target_type="user", target_id=user_id)
+    legal.wipe_account(db, user)
+    db.commit()
+    hub.disconnect_user(user_id)
+    if channel_id:
+        await remove_media_participant(channel_id, user_id)
+    return {"status": "ok"}
 
 
 @app.post("/me/password", tags=["auth"])
@@ -621,12 +662,17 @@ def register(payload: schemas.RegisterIn, request: Request, db: Session = Depend
             raise HTTPException(status_code=400, detail="Приглашение недействительно или уже использовано")
     elif not settings.open_registration:
         raise HTTPException(status_code=403, detail="Регистрация на этом сервере только по приглашению")
+    if not payload.accept_terms:
+        raise HTTPException(status_code=400, detail="Чтобы создать аккаунт, примите соглашение и политику "
+                                                    "конфиденциальности (обновите программу, если галочки нет)")
     validate_password_strength(payload.password)
     user = models.User(
         username=payload.username,
         display_name=payload.display_name,
         password_hash=hash_password(payload.password),
         must_change_password=False,
+        consent_version=payload.terms_version or legal.LEGAL_VERSION,
+        consent_at=models.utcnow(),
     )
     db.add(user)
     try:

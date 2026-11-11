@@ -106,10 +106,11 @@ class ApiClient:
         self._accept_tokens(data)
         return data
 
-    def register(self, code: str, username: str, display_name: str, password: str) -> dict[str, Any]:
+    def register(self, code: str, username: str, display_name: str, password: str,
+                 accept_terms: bool = False) -> dict[str, Any]:
         data = self.request("POST", "/auth/register", json={
             "code": code, "username": username, "display_name": display_name, "password": password,
-            "device_name": default_device_name()})
+            "device_name": default_device_name(), "accept_terms": accept_terms})
         self._accept_tokens(data)
         return data
 
@@ -221,6 +222,12 @@ class ApiClient:
 
     def me(self) -> dict[str, Any]:
         return self.request("GET", "/me")
+
+    def accept_consent(self, version: int) -> None:
+        self.request("POST", "/me/consent", json={"version": version})
+
+    def delete_account(self, password: str) -> None:
+        self.request("POST", "/me/delete", json={"password": password})
 
     def change_password(self, old_password: str, new_password: str) -> None:
         self.request("POST", "/me/password", json={"old_password": old_password, "new_password": new_password})

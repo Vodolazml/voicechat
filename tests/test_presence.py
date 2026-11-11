@@ -62,7 +62,7 @@ def setup_admin_and_friend(client):
                 json={"old_password": main.settings.bootstrap_password, "new_password": STRONG})
     admin = client.post("/auth/login", json={"username": "admin", "password": STRONG}).json()["access_token"]
     code = client.post("/invites", headers=bearer(admin), json={}).json()["code"]
-    friend = client.post("/auth/register", json={"code": code, "username": "friend", "display_name": "Друг",
+    friend = client.post("/auth/register", json={"accept_terms": True, "code": code, "username": "friend", "display_name": "Друг",
                                                  "password": "FriendStrong123!"}).json()["access_token"]
     space = client.get("/spaces", headers=bearer(admin)).json()[0]["id"]
     voice = [c["id"] for c in client.get(f"/spaces/{space}/channels", headers=bearer(admin)).json()

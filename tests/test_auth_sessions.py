@@ -106,7 +106,7 @@ def test_invite_registration_flow(client):
     headers = bearer(admin_login(client)["access_token"])
     invite = client.post("/invites", headers=headers, json={"note": "Вася"}).json()
     assert len(invite["code"]) >= 20
-    body = {"code": invite["code"], "username": "vasya", "display_name": "Вася",
+    body = {"accept_terms": True, "code": invite["code"], "username": "vasya", "display_name": "Вася",
             "password": "VasyaStrong123!", "device_name": "Vasya PC"}
     created = client.post("/auth/register", json=body)
     assert created.status_code == 200
@@ -126,7 +126,7 @@ def test_revoked_invite_cannot_be_used(client):
     headers = bearer(admin_login(client)["access_token"])
     invite = client.post("/invites", headers=headers, json={}).json()
     assert client.delete(f"/invites/{invite['id']}", headers=headers).status_code == 200
-    response = client.post("/auth/register", json={"code": invite["code"], "username": "late", "display_name": "L",
+    response = client.post("/auth/register", json={"accept_terms": True, "code": invite["code"], "username": "late", "display_name": "L",
                                                    "password": "LateStrong123!"})
     assert response.status_code == 400
 
@@ -134,7 +134,7 @@ def test_revoked_invite_cannot_be_used(client):
 def test_owner_cannot_be_disabled_or_reset_by_other_admin(client):
     owner = bearer(admin_login(client)["access_token"])
     invite = client.post("/invites", headers=owner, json={"is_admin": True}).json()
-    second = client.post("/auth/register", json={"code": invite["code"], "username": "admin2", "display_name": "A2",
+    second = client.post("/auth/register", json={"accept_terms": True, "code": invite["code"], "username": "admin2", "display_name": "A2",
                                                  "password": "SecondAdmin123!"}).json()
     other = bearer(second["access_token"])
     assert client.post("/users/1/disable", headers=other).status_code == 403

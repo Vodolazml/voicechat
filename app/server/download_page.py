@@ -42,6 +42,8 @@ PAGE = """<!doctype html>
   .small { font-size: 13px; }
   ol { text-align: left; color: var(--muted); margin: 22px 0 0; padding-left: 20px; line-height: 1.7; font-size: 14px; }
   ol b { color: var(--text); font-weight: 600; }
+  .legal { margin-top: 22px; }
+  .legal a { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -63,6 +65,8 @@ PAGE = """<!doctype html>
     <li><b>Зарегистрируйтесь</b> в программе и введите код приглашения от друга.</li>
     <li><b>Всё.</b> Обновления программа ставит сама при запуске.</li>
   </ol>
+  <p class="small legal"><a href="/privacy">Конфиденциальность</a> · <a href="/terms">Соглашение</a> ·
+    <a href="/consent">Согласие на обработку данных</a> · <a href="/licenses">Лицензии</a></p>
 </main>
 </body>
 </html>

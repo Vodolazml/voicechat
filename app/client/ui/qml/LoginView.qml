@@ -86,6 +86,32 @@ Item {
                 }
             }
 
+            CheckBox {
+                id: agree
+                visible: root.inviteMode
+                Layout.fillWidth: true
+                font.family: Theme.font
+                font.pixelSize: 13
+                contentItem: Text {
+                    leftPadding: 30
+                    text: "Принимаю <a href='terms' style='color:#b4a5ff; text-decoration:none'>соглашение</a>, "
+                          + "<a href='privacy' style='color:#b4a5ff; text-decoration:none'>политику конфиденциальности</a> и даю "
+                          + "<a href='consent' style='color:#b4a5ff; text-decoration:none'>согласие на обработку данных</a>"
+                    textFormat: Text.RichText
+                    wrapMode: Text.WordWrap
+                    font: agree.font; color: Theme.muted; verticalAlignment: Text.AlignVCenter
+                    onLinkActivated: (link) => Qt.openUrlExternally(backend.legalUrl(server.text, link))
+                    HoverHandler { cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                }
+                indicator: Rectangle {
+                    x: 0; y: (agree.height - height) / 2
+                    width: 20; height: 20; radius: 6
+                    color: agree.checked ? Theme.accent : "transparent"
+                    border.color: agree.checked ? Theme.accent : Theme.line; border.width: 2
+                    Icon { anchors.centerIn: parent; name: "check"; color: "white"; width: 14; height: 14; visible: agree.checked }
+                }
+            }
+
             Text {
                 Layout.fillWidth: true
                 visible: backend.error !== ""
@@ -99,7 +125,7 @@ Item {
                 Layout.fillWidth: true
                 text: root.inviteMode ? "Создать аккаунт" : "Войти"
                 loading: backend.busy
-                enabled: !backend.busy
+                enabled: !backend.busy && (!root.inviteMode || agree.checked)
                 onClicked: submit()
             }
 
@@ -124,7 +150,7 @@ Item {
 
     function submit() {
         if (root.inviteMode)
-            backend.register(server.text, "", username.text, displayName.text, password.text, remember.checked)
+            backend.register(server.text, "", username.text, displayName.text, password.text, remember.checked, agree.checked)
         else
             backend.login(server.text, username.text, password.text, remember.checked)
     }

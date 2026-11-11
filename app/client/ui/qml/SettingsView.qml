@@ -296,6 +296,20 @@ Rectangle {
                         PrimaryButton { text: "Сменить"; enabled: oldPwd.text && newPwd.text.length >= 8; onClicked: backend.changePassword(oldPwd.text, newPwd.text) }
                     }
                     PasswordMeter { Layout.fillWidth: true; value: newPwd.text }
+                    Text { text: "УДАЛЕНИЕ АККАУНТА"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold; Layout.topMargin: 10 }
+                    Card {
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Удаляются имя, аватарка, пароль, входы и тексты ваших сообщений. Это отзывает согласие на обработку данных. Вернуть аккаунт будет нельзя."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 10
+                            Field { id: deletePwd; Layout.fillWidth: true; placeholderText: "Пароль для подтверждения"; echoMode: TextInput.Password }
+                            PrimaryButton {
+                                danger: true; text: "Удалить аккаунт"; enabled: deletePwd.text.length > 0 && !backend.busy
+                                onClicked: confirmDelete.ask("Удалить аккаунт навсегда?", "Восстановить его будет нельзя.", "Удалить",
+                                                             function() { backend.deleteAccount(deletePwd.text) })
+                            }
+                        }
+                    }
+                    ConfirmDialog { id: confirmDelete }
                                     }
                 }
 
@@ -349,6 +363,20 @@ Rectangle {
                                 Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Сохраните отчёт и отправьте администратору. В нём журнал и настройки звука, без паролей и ключей."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12 }
                             }
                             PrimaryButton { secondary: true; text: "Сохранить отчёт"; onClicked: backend.saveReport() }
+                        }
+                    }
+                    Card {
+                        Text { text: "Документы"; color: Theme.text; font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold }
+                        Text {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            text: "<a href='privacy' style='color:#b4a5ff; text-decoration:none'>Политика конфиденциальности</a> · "
+                                  + "<a href='terms' style='color:#b4a5ff; text-decoration:none'>Пользовательское соглашение</a> · "
+                                  + "<a href='consent' style='color:#b4a5ff; text-decoration:none'>Согласие на обработку данных</a> · "
+                                  + "<a href='licenses' style='color:#b4a5ff; text-decoration:none'>Лицензии компонентов</a>"
+                            textFormat: Text.RichText; lineHeight: 1.3
+                            color: Theme.muted; font.family: Theme.font; font.pixelSize: 13
+                            onLinkActivated: (link) => Qt.openUrlExternally(backend.legalUrl("", link))
+                            HoverHandler { cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
                         }
                     }
                                     }

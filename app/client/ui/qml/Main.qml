@@ -40,6 +40,7 @@ ApplicationWindow {
             videoFull.showFor(backend.focusUserId, window.screen)
     }
     VideoFullscreen { id: videoFull }
+    ConsentDialog {}
     Component {
         id: loading
         Rectangle {

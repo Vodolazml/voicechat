@@ -23,6 +23,9 @@ class User(Base):
     avatar: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)
     avatar_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Which edition of the privacy policy, terms and data processing consent the person accepted, and when.
+    consent_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     roles: Mapped[list["UserRole"]] = relationship(cascade="all, delete-orphan")
 

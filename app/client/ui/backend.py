@@ -1847,6 +1847,8 @@ class Backend(QObject):
     def _apply_hotkeys(self) -> None:
         self._keys_poller.set_combos({name: self.ui.get(f"key_{name}", "")
                                       for name in ("ptt", "mute", "deafen", "overlay")})
+        if hasattr(self, "_level_timer"):  # not while __init__ is still creating the timers
+            self._update_timers()
 
     @Slot(int, str, result=str)
     def keyName(self, key: int, text: str) -> str:
@@ -1872,10 +1874,13 @@ class Backend(QObject):
 
     def _update_timers(self) -> None:
         active = bool(self._call_channel) or self._mic_test
-        for timer in (self._level_timer, self._key_timer):
-            if active and not timer.isActive():
+        # The keyboard is read only during a call and only for the shortcuts that are set (antivirus
+        # heuristics rightly dislike programs that watch the keyboard all the time).
+        keys = bool(self._call_channel) and self._keys_poller.has_combos
+        for timer, wanted in ((self._level_timer, active), (self._key_timer, keys)):
+            if wanted and not timer.isActive():
                 timer.start()
-            elif not active and timer.isActive():
+            elif not wanted and timer.isActive():
                 timer.stop()
         if not active and self.call is not None:
             self.call.set_push_to_talk(False)

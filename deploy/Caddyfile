@@ -17,8 +17,16 @@
 
 chat.{$VOICECHAT_DOMAIN} {
     import security_headers
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:8765
+    # Installers straight from disk (sendfile, ranges for resumed and parallel downloads): big downloads
+    # no longer pass through the API's single Python process that also carries the live chat events.
+    handle_path /downloads/* {
+        root * /srv/downloads
+        file_server
+    }
+    handle {
+        encode zstd gzip
+        reverse_proxy 127.0.0.1:8765
+    }
 }
 
 rtc.{$VOICECHAT_DOMAIN} {

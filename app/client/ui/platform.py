@@ -86,6 +86,10 @@ class KeyPoller:
     def is_down(self, name: str) -> bool:
         return self._down.get(name, False)
 
+    @property
+    def has_combos(self) -> bool:
+        return bool(self._combos)
+
     def poll(self) -> list[tuple[str, bool]]:
         if self._user32 is None:
             return []

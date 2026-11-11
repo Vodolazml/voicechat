@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import shutil
+import threading
 import time
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -28,6 +32,11 @@ from .auto_updater import (
 
 
 UPDATE_DIR = Path.home() / ".private_voicechat" / "updates"
+PARTS = 4                               # parallel ranges for an update download
+PARALLEL_MIN_BYTES = 8 * 1024 * 1024    # smaller files come in one stream
+MAX_UPDATE_BYTES = 1024 * 1024 * 1024
+
+logger = logging.getLogger("voicechat.update")
 
 
 @dataclass(frozen=True)
@@ -100,6 +109,8 @@ def remove_old_installers(keep: Path | None = None, keep_partial: Path | None = 
     for path in UPDATE_DIR.iterdir():
         if not path.is_file() or path in (keep, keep_partial):
             continue
+        if keep_partial is not None and path.name.startswith(keep_partial.stem + ".part"):
+            continue  # a piece of this version's parallel download
         if path.suffix.lower() == ".partial" and keep_partial is None and time.time() - path.stat().st_mtime < 86400:
             continue  # a recent half-finished download: the next start continues it
         if path.suffix.lower() in {".exe", ".partial", ".zip"}:
@@ -127,9 +138,98 @@ def download_update(info: UpdateInfo, progress: Callable[[int, int], None] | Non
             size = target.stat().st_size
             progress(size, size)
         return target  # already downloaded last time
+    started = time.monotonic()
+    parts = 0
+    if not (partial.exists() and partial.stat().st_size):  # an old single-stream partial: finish it as it was
+        parts = _download_parallel(info.download_url, partial, progress)
+    if not parts:
+        _download_single(info.download_url, partial, progress)
+    elapsed = max(0.001, time.monotonic() - started)
+    size = partial.stat().st_size
+    logger.info("Update downloaded: %.1f MB in %.1f s (%.1f MB/s, %s)", size / 1e6, elapsed, size / 1e6 / elapsed,
+                f"{parts} parallel parts" if parts else "one stream")
+    if sha256_file(partial).lower() != info.sha256.lower():
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("Хэш обновления не совпал. Файл удалён.")
+    os.replace(partial, target)
+    return target
+
+
+def _part_path(partial: Path, index: int) -> Path:
+    return partial.with_name(f"{partial.stem}.part{index}.partial")
+
+
+def _download_parallel(url: str, partial: Path, progress: Callable[[int, int], None] | None) -> int:
+    """Fetches the installer in PARTS ranges at once and joins them into `partial`. One TCP stream to a
+    far-away server tops out at ~30–60 Mbit/s however fast the line is; four of them fill it. Each piece
+    is a file of its own, so a break (or closing the app) resumes every piece where it stopped.
+    Returns the number of parts, or 0 when the server does not take ranges (then: one stream)."""
+    with httpx.Client(follow_redirects=True, timeout=60) as client:
+        try:
+            head = client.head(url)
+            head.raise_for_status()
+        except httpx.HTTPError:
+            return 0
+        total = int(head.headers.get("content-length") or 0)
+        if head.headers.get("accept-ranges", "").lower() != "bytes" or total < PARALLEL_MIN_BYTES:
+            return 0
+        if total > MAX_UPDATE_BYTES:
+            raise RuntimeError("Превышен максимальный размер обновления")
+        bounds = [(i * total // PARTS, (i + 1) * total // PARTS) for i in range(PARTS)]
+        paths = [_part_path(partial, i) for i in range(PARTS)]
+        lock = threading.Lock()
+        done = [min(p.stat().st_size, end - start) if p.exists() else 0 for p, (start, end) in zip(paths, bounds)]
+        no_ranges = threading.Event()
+
+        def report() -> None:
+            if progress:
+                progress(sum(done), total)
+
+        def fetch(index: int) -> None:
+            start, end = bounds[index]
+            for attempt in range(4):
+                if done[index] >= end - start or no_ranges.is_set():
+                    return
+                headers = {"Range": f"bytes={start + done[index]}-{end - 1}"}
+                try:
+                    with client.stream("GET", url, headers=headers) as response:
+                        if response.status_code != 206:
+                            no_ranges.set()  # ignored the range: the whole file would come in every piece
+                            return
+                        with paths[index].open("ab") as file:
+                            for chunk in response.iter_bytes():
+                                chunk = chunk[:end - start - done[index]]
+                                file.write(chunk)
+                                with lock:
+                                    done[index] += len(chunk)
+                                    report()
+                    if done[index] >= end - start:
+                        return
+                except httpx.HTTPError:
+                    logger.info("Update piece %d broke off (attempt %d), resuming", index, attempt + 1)
+                    time.sleep(1 + attempt)
+            raise RuntimeError("Не удалось скачать обновление: соединение обрывается")
+
+        with ThreadPoolExecutor(max_workers=PARTS, thread_name_prefix="update") as pool:
+            for future in [pool.submit(fetch, i) for i in range(PARTS)]:
+                future.result()
+        if no_ranges.is_set():
+            for path in paths:
+                path.unlink(missing_ok=True)
+            return 0
+        with partial.open("wb") as joined:
+            for path in paths:
+                with path.open("rb") as piece:
+                    shutil.copyfileobj(piece, joined, 1024 * 1024)
+        for path in paths:
+            path.unlink(missing_ok=True)
+        return PARTS
+
+
+def _download_single(url: str, partial: Path, progress: Callable[[int, int], None] | None) -> None:
     downloaded = partial.stat().st_size if partial.exists() else 0
     headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
-    with httpx.stream("GET", info.download_url, follow_redirects=True, timeout=60, headers=headers) as response:
+    with httpx.stream("GET", url, follow_redirects=True, timeout=60, headers=headers) as response:
         if response.status_code == 416:  # the partial file is already complete (or bigger than the file)
             downloaded, total, mode = 0, 0, None
         else:
@@ -143,16 +243,11 @@ def download_update(info: UpdateInfo, progress: Callable[[int, int], None] | Non
             with partial.open(mode) as file:
                 for chunk in response.iter_bytes():
                     downloaded += len(chunk)
-                    if downloaded > 1024 * 1024 * 1024:
+                    if downloaded > MAX_UPDATE_BYTES:
                         raise RuntimeError("Превышен максимальный размер обновления")
                     file.write(chunk)
                     if progress:
                         progress(downloaded, total)
-    if sha256_file(partial).lower() != info.sha256.lower():
-        partial.unlink(missing_ok=True)
-        raise RuntimeError("Хэш обновления не совпал. Файл удалён.")
-    os.replace(partial, target)
-    return target
 
 
 def open_update_file(path: Path) -> None:

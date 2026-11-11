@@ -52,11 +52,11 @@ with open('build/version_info.py', 'w', encoding='utf-8') as _f:
                     fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('041904B0', [
-      StringStruct('CompanyName', 'Private VoiceChat'),
+      StringStruct('CompanyName', 'Private VoiceChat Team'),
       StringStruct('FileDescription', 'VoiceChat - voice chat and screen sharing'),
       StringStruct('FileVersion', '{_version}'),
       StringStruct('InternalName', 'PrivateVoiceChat'),
-      StringStruct('LegalCopyright', 'Private VoiceChat'),
+      StringStruct('LegalCopyright', '© 2026 Private VoiceChat Team'),
       StringStruct('OriginalFilename', 'PrivateVoiceChat.exe'),
       StringStruct('ProductName', 'VoiceChat'),
       StringStruct('ProductVersion', '{_version}')])]),

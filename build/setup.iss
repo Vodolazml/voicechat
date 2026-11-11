@@ -15,6 +15,14 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+AppCopyright=Copyright (C) 2026 {#MyAppPublisher}
+; The installer's own version resource: an installer that names nobody looks anonymous to antivirus heuristics.
+VersionInfoVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription=VoiceChat Setup
+VersionInfoProductName=VoiceChat
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCopyright=Copyright (C) 2026 {#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\Private VoiceChat
 DefaultGroupName={#MyAppName}
 SetupIconFile=..\assets\app_icon.ico

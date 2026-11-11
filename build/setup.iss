@@ -47,6 +47,8 @@ Name: "startwithwindows"; Description: "Запускать при старте W
 
 [Files]
 Source: "..\dist\PrivateVoiceChat\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Licenses of the bundled open-source components, next to the exe where people look for them.
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [InstallDelete]
 ; Older installers named the desktop shortcut after the app ("Private VoiceChat"); keep only "VoiceChat".

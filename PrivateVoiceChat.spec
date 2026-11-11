@@ -40,6 +40,8 @@ datas += [('assets/app_icon.ico', 'assets'), ('app/client/ui/qml', 'app/client/u
 import os
 if os.path.isdir('assets/voice'):
     datas += [('assets/voice', 'assets/voice')]  # spoken mic/sound prompts
+if os.path.isfile('THIRD_PARTY_NOTICES.md'):
+    datas += [('THIRD_PARTY_NOTICES.md', '.')]  # licenses of the bundled packages (deploy/third_party_notices.py)
 
 # Windows version resource, generated from app/version.py so it never goes stale (build/ is not in git).
 import re as _re

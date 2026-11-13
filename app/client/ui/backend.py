@@ -215,6 +215,39 @@ def _human_size(size: int) -> str:
     return f"{size} Б"
 
 
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+PREVIEW_MAX_BYTES = 15 * 1024 * 1024  # bigger pictures show as a file chip: no automatic download
+IMAGE_CACHE = Path.home() / ".private_voicechat" / "cache" / "images"
+
+
+def _is_image(name: str, content_type: str = "") -> bool:
+    return content_type.startswith("image/") or Path(name).suffix.lower() in IMAGE_TYPES
+
+
+def _file_digest(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cached_image(attachment: dict) -> Path:
+    return IMAGE_CACHE / f"{int(attachment.get('id', 0))}{Path(attachment.get('name', '')).suffix.lower()}"
+
+
+def _cache_image(attachment: dict, source: str) -> None:
+    if not attachment.get("id"):
+        return
+    try:
+        IMAGE_CACHE.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, _cached_image(attachment))
+    except OSError:
+        logger.debug("Image not cached", exc_info=True)
+
+
 def wake_tune() -> bytes:
     """About seven seconds of a bright, bouncy tune that is hard to sleep through (our own melody)."""
     notes = [784, 988, 1175, 988, 784, 988, 1319, 0, 1175, 988, 1175, 1568, 1319, 0, 1175, 988,
@@ -383,7 +416,10 @@ class Backend(QObject):
                                 "cameraKey", "canWake"])
         self.messages = ListModel(["id", "authorId", "author", "initials", "color", "html", "raw", "time",
                                    "day", "showDay", "edited", "deleted", "mine", "mention", "grouped", "avatar",
-                                   "fileId", "fileName", "fileSize"])
+                                   "fileId", "fileName", "fileSize", "fileImage", "sending"])
+        self._pending: list[dict] = []  # files waiting above the input until Enter
+        self._fetching: set[int] = set()  # pictures being fetched for their chat preview
+        self._local_id = 0              # ids of not-yet-sent messages shown at once: -1, -2, ...
         self._transfer = -1.0       # progress of the file being sent or saved, -1 when none
         self._transfer_text = ""
         self.toasts = ListModel(["id", "level", "text"])
@@ -1727,6 +1763,7 @@ class Backend(QObject):
             return
         self._chat_channel = channel_id
         self.messages.clear()
+        self._clear_pending()
         self._has_more = False
         self.chatChanged.emit()
         if channel_id:
@@ -1755,6 +1792,7 @@ class Backend(QObject):
                 "fileId": (message.get("attachment") or {}).get("id", 0),
                 "fileName": (message.get("attachment") or {}).get("name", ""),
                 "fileSize": _human_size((message.get("attachment") or {}).get("size", 0)),
+                "fileImage": self._image_preview(message.get("attachment") or {}), "sending": False,
                 "_ts": moment.timestamp(),
             }
             rows.append(row)
@@ -1845,6 +1883,9 @@ class Backend(QObject):
     def sendMessage(self, text: str) -> None:
         channel_id = self._chat_channel
         text = text.strip()
+        if channel_id and self._pending:
+            self._send_with_files(channel_id, text)
+            return
         if not channel_id or not text:
             return
         self._bg(lambda: self.api.send_message(channel_id, text), lambda message: self._on_message(message))
@@ -1868,26 +1909,29 @@ class Backend(QObject):
             self._transfer_text = text
         self.transferChanged.emit()
 
+    # Files chosen, dropped or pasted wait above the input (with a picture preview) until Enter or Send:
+    # sending on paste made it easy to send the same screenshot several times by accident.
+
     @Slot()
     def attachFile(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
-        path, _ = QFileDialog.getOpenFileName(None, "Отправить файл в чат", str(Path.home()))
-        if path:
-            self._send_file(path)
+        paths, _ = QFileDialog.getOpenFileNames(None, "Прикрепить файлы", str(Path.home()))
+        for path in paths:
+            self._stage_file(path)
 
     @Slot("QVariantList")
     def sendFiles(self, urls: list) -> None:
-        """Files dropped onto the chat."""
+        """Files dropped onto the chat: staged like attached ones."""
         for url in urls:
             path = QUrl(str(url)).toLocalFile() if str(url).startswith("file:") else str(url)
             if path and Path(path).is_file():
-                self._send_file(path)
+                self._stage_file(path)
 
     @Slot(result=bool)
     def pasteFromClipboard(self) -> bool:
-        """Ctrl+V in the chat: files copied in Explorer are sent as they are, a picture (a screenshot from
-        Win+Shift+S or PrtSc, an image copied in a browser) is sent as a PNG. Returns False for plain text,
+        """Ctrl+V in the chat: files copied in Explorer, or a picture (a screenshot from Win+Shift+S or PrtSc,
+        an image copied in a browser, kept as PNG), are staged above the input. Returns False for plain text,
         which the input field then pastes as usual."""
         from PySide6.QtGui import QGuiApplication
 
@@ -1901,7 +1945,7 @@ class Backend(QObject):
             paths = [path for path in paths if path and Path(path).is_file()]
             if paths:
                 for path in paths:
-                    self._send_file(path)
+                    self._stage_file(path)
                 return True
         if mime.hasImage():
             image = QGuiApplication.clipboard().image()
@@ -1913,43 +1957,145 @@ class Backend(QObject):
                 shutil.rmtree(folder, ignore_errors=True)
                 self.toast("error", "Не удалось подготовить картинку из буфера обмена")
                 return True
-            self._send_file(str(path), cleanup=folder)
+            self._stage_file(str(path), cleanup=folder)
             return True
         return False
 
-    def _send_file(self, path: str, cleanup: Path | None = None) -> None:
-        channel_id = self._chat_channel
-        if not channel_id:
+    def _stage_file(self, path: str, cleanup: Path | None = None) -> None:
+        if not self._chat_channel:
             return
         size = Path(path).stat().st_size
         if size > MAX_FILE_BYTES:
             self.toast("warning", f"Файл больше {MAX_FILE_BYTES // (1024 * 1024)} МБ, такой не отправить")
-            return
-        if size == 0:
+        elif size == 0:
             self.toast("warning", "Файл пустой")
-            return
-        name = Path(path).name
-        self._set_transfer(0.0, f"Отправляю {name}")
+        else:
+            digest = _file_digest(path)
+            if any(item["digest"] == digest for item in self._pending):
+                self.toast("info", "Этот файл уже прикреплён")
+            else:
+                self._pending.append({"path": path, "name": Path(path).name, "size": _human_size(size),
+                                      "image": QUrl.fromLocalFile(path).toString() if _is_image(path) else "",
+                                      "digest": digest, "cleanup": str(cleanup) if cleanup else ""})
+                self.pendingChanged.emit()
+                return
+        if cleanup is not None:
+            shutil.rmtree(cleanup, ignore_errors=True)
+
+    def _pending_files(self) -> list:
+        return [{k: item[k] for k in ("name", "size", "image")} for item in self._pending]
+
+    pendingChanged = Signal()
+    pendingFiles = Property("QVariantList", _pending_files, notify=pendingChanged)
+
+    @Slot(int)
+    def removePending(self, index: int) -> None:
+        if 0 <= index < len(self._pending):
+            item = self._pending.pop(index)
+            if item["cleanup"]:
+                shutil.rmtree(item["cleanup"], ignore_errors=True)
+            self.pendingChanged.emit()
+
+    def _clear_pending(self) -> None:
+        for item in self._pending:
+            if item["cleanup"]:
+                shutil.rmtree(item["cleanup"], ignore_errors=True)
+        self._pending = []
+        self.pendingChanged.emit()
+
+    def _send_with_files(self, channel_id: int, text: str) -> None:
+        """The staged files, each as its own message (the text goes with the first). Each shows up in the chat
+        at once, marked "sending", and is replaced by the real message when the server has it."""
+        items, self._pending = self._pending, []
+        self.pendingChanged.emit()
+        my_id = self._me.get("id", 0)
+        placeholders = []
+        for index, item in enumerate(items):
+            self._local_id -= 1
+            previous = self.messages.rows[-1] if self.messages.rows else None
+            row = self._decorate([{
+                "id": self._local_id, "channel_id": channel_id, "author_id": my_id,
+                "author_name": self._me.get("username", ""), "body": text if index == 0 else "",
+                "created_at": datetime.now(timezone.utc).isoformat(), "mentions": [],
+                "attachment": {"id": 0, "name": item["name"], "size": 0, "content_type": ""}}], previous)[0]
+            row.update(fileName=item["name"], fileSize=item["size"], fileImage=item["image"], sending=True)
+            self.messages.append(row)
+            placeholders.append(self._local_id)
+        self._set_transfer(0.0, f"Отправляю {items[0]['name']}" if len(items) == 1
+                           else f"Отправляю файлы: {len(items)}")
+        total = len(items)
 
         def work():
-            attachment = self.api.upload_file(channel_id, path,
-                                              lambda done: self._ui(lambda: self._set_transfer(done)))
-            return self.api.send_message(channel_id, "", attachment["id"])
+            sent = []
+            for index, item in enumerate(items):
+                attachment = self.api.upload_file(
+                    channel_id, item["path"],
+                    lambda part, index=index: self._ui(lambda: self._set_transfer((index + part) / total)))
+                message = self.api.send_message(channel_id, text if index == 0 else "", attachment["id"])
+                if item["image"]:  # we already have the picture: no need to fetch it back for the preview
+                    _cache_image(message.get("attachment") or {}, item["path"])
+                sent.append(message)
+                self._ui(lambda message=message, local=placeholders[index]: self._replace_local(local, message))
+            return sent
 
         def tidy():
-            if cleanup is not None:
-                shutil.rmtree(cleanup, ignore_errors=True)
+            for item in items:
+                if item["cleanup"]:
+                    shutil.rmtree(item["cleanup"], ignore_errors=True)
 
-        def done(message):
+        def done(_):
             tidy()
             self._set_transfer(-1)
-            self._on_message(message)
 
         def failed(exc):
             tidy()
             self._set_transfer(-1)
+            for local in placeholders:
+                self.messages.remove(local)
             self.toast("error", f"Файл не отправлен: {exc}")
         self._bg(work, done, failed)
+
+    def _replace_local(self, local_id: int, message: dict) -> None:
+        self.messages.remove(local_id)
+        self._on_message(message)
+
+    def _image_preview(self, attachment: dict) -> str:
+        """A picture in the chat shows itself: file:// URL of the cached copy, or "" while it is fetched
+        (once per picture, into ~/.private_voicechat/cache/images)."""
+        if not attachment.get("id") or not _is_image(attachment.get("name", ""), attachment.get("content_type", "")):
+            return ""
+        if attachment.get("size", 0) > PREVIEW_MAX_BYTES:
+            return ""
+        path = _cached_image(attachment)
+        if path.exists():
+            return QUrl.fromLocalFile(str(path)).toString()
+        attachment_id = attachment["id"]
+        if attachment_id in self._fetching:
+            return ""
+        self._fetching.add(attachment_id)
+
+        def work():
+            IMAGE_CACHE.mkdir(parents=True, exist_ok=True)
+            self.api.download_file(attachment_id, str(path))
+            return QUrl.fromLocalFile(str(path)).toString()
+
+        def done(url):
+            self._fetching.discard(attachment_id)
+            for row in self.messages.rows:
+                if row.get("fileId") == attachment_id:
+                    self.messages.update(row["id"], fileImage=url)
+
+        def failed(exc):
+            self._fetching.discard(attachment_id)
+            logger.info("Picture %d not fetched for the preview: %s", attachment_id, exc)
+        self._bg(work, done, failed)
+        return ""
+
+    @Slot(str)
+    def openImage(self, url: str) -> None:
+        """Opens a picture from the chat in the system viewer, full size."""
+        if url.startswith("file:"):
+            QDesktopServices.openUrl(QUrl(url))
 
     @Slot(int, str)
     def downloadFile(self, attachment_id: int, name: str) -> None:

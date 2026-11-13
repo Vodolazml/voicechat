@@ -141,9 +141,41 @@ Rectangle {
                             onLinkActivated: (link) => backend.openLink(link)
                             HoverHandler { cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
                         }
+                        Item {
+                            // A picture shows itself; a click opens it full size, the button saves it.
+                            id: picture
+                            visible: !msg.model.deleted && msg.model.fileImage !== ""
+                            readonly property real scaleDown: pic.implicitWidth > 0
+                                ? Math.min(1, Math.min(parent.width, 420) / pic.implicitWidth, 320 / pic.implicitHeight) : 1
+                            width: pic.implicitWidth * scaleDown; height: visible ? pic.implicitHeight * scaleDown : 0
+                            Image {
+                                id: pic
+                                anchors.fill: parent
+                                source: msg.model.fileImage
+                                asynchronous: true; smooth: true; mipmap: true
+                                sourceSize.width: 840
+                                fillMode: Image.PreserveAspectFit
+                                opacity: msg.model.sending ? 0.55 : 1
+                            }
+                            Rectangle { anchors.fill: parent; color: "transparent"; radius: 8; border.color: Theme.line }
+                            HoverHandler { id: picHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { enabled: !msg.model.sending; onTapped: backend.openImage(msg.model.fileImage) }
+                            IconButton {
+                                visible: picHover.hovered && msg.model.fileId > 0
+                                anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 6
+                                size: 30; glyph: "download"; tip: "Сохранить"; fill: Qt.rgba(0, 0, 0, 0.55)
+                                onClicked: backend.downloadFile(msg.model.fileId, msg.model.fileName)
+                            }
+                            Rectangle {
+                                visible: msg.model.sending
+                                anchors.centerIn: parent; width: sendingText.implicitWidth + 20; height: 26; radius: 13
+                                color: Qt.rgba(0, 0, 0, 0.6)
+                                Text { id: sendingText; anchors.centerIn: parent; text: "отправляется…"; color: "white"; font.family: Theme.font; font.pixelSize: 12 }
+                            }
+                        }
                         Rectangle {
                             // A file sent in the chat: any type, saved where the user chooses.
-                            visible: !msg.model.deleted && msg.model.fileId > 0
+                            visible: !msg.model.deleted && (msg.model.fileId > 0 || msg.model.sending) && msg.model.fileImage === ""
                             width: Math.min(parent.width, 380); height: 56; radius: 12
                             color: fileHover.hovered ? Theme.card : Theme.panel2
                             border.color: Theme.line
@@ -156,12 +188,12 @@ Rectangle {
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 1
                                     Text { Layout.fillWidth: true; text: msg.model.fileName; color: Theme.text; elide: Text.ElideMiddle; font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold }
-                                    Text { text: msg.model.fileSize; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11 }
+                                    Text { text: msg.model.sending ? "отправляется…" : msg.model.fileSize; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11 }
                                 }
-                                IconButton { size: 32; glyph: "download"; tip: "Сохранить"; onClicked: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
+                                IconButton { visible: msg.model.fileId > 0; size: 32; glyph: "download"; tip: "Сохранить"; onClicked: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
                             }
                             HoverHandler { id: fileHover; cursorShape: Qt.PointingHandCursor }
-                            TapHandler { onTapped: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
+                            TapHandler { enabled: msg.model.fileId > 0; onTapped: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
                         }
                         Field {
                             id: editField
@@ -210,6 +242,44 @@ Rectangle {
             }
         }
 
+        // Files waiting to be sent: Enter or the send button sends them, the cross takes one back.
+        Flow {
+            visible: backend.pendingFiles.length > 0
+            Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 6
+            spacing: 8
+            Repeater {
+                model: backend.pendingFiles
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    width: modelData.image !== "" ? 132 : 200; height: 104; radius: 10
+                    color: Theme.panel2; border.color: Theme.line
+                    Image {
+                        visible: modelData.image !== ""
+                        anchors.fill: parent; anchors.margins: 4; anchors.bottomMargin: 22
+                        source: modelData.image; asynchronous: true; sourceSize.width: 260
+                        fillMode: Image.PreserveAspectFit
+                    }
+                    Text {
+                        visible: modelData.image === ""
+                        anchors.centerIn: parent; anchors.verticalCenterOffset: -10
+                        text: (modelData.name.split(".").length > 1 ? modelData.name.split(".").pop() : "файл").substring(0, 4).toUpperCase()
+                        color: Theme.accent2; font.family: Theme.font; font.pixelSize: 18; font.weight: Font.Bold
+                    }
+                    Text {
+                        anchors.bottom: parent.bottom; anchors.bottomMargin: 4; x: 6; width: parent.width - 12
+                        text: modelData.name + " · " + modelData.size; elide: Text.ElideMiddle
+                        color: Theme.muted; font.family: Theme.font; font.pixelSize: 10
+                    }
+                    IconButton {
+                        anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 2
+                        size: 24; glyph: "close"; tip: "Убрать"; fill: Qt.rgba(0, 0, 0, 0.5)
+                        onClicked: backend.removePending(index)
+                    }
+                }
+            }
+        }
+
         // Composer
         Rectangle {
             Layout.fillWidth: true
@@ -221,7 +291,7 @@ Rectangle {
             border.color: input.activeFocus ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.6) : "transparent"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 6
-                IconButton { glyph: "add"; tip: "Отправить файл (до 50 МБ, любой тип). Можно перетащить файл в чат или вставить Ctrl+V"; enabled: backend.transferProgress < 0; onClicked: backend.attachFile() }
+                IconButton { glyph: "add"; tip: "Прикрепить файлы (до 50 МБ, любой тип). Можно перетащить в чат или вставить Ctrl+V"; onClicked: backend.attachFile() }
                 ScrollView {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     TextArea {
@@ -244,7 +314,7 @@ Rectangle {
                         onActiveFocusChanged: if (activeFocus) backend.markChatRead()
                     }
                 }
-                IconButton { glyph: "send"; tip: "Отправить (Enter)"; active: input.text.trim().length > 0; onClicked: root.send() }
+                IconButton { glyph: "send"; tip: "Отправить (Enter)"; active: input.text.trim().length > 0 || backend.pendingFiles.length > 0; onClicked: root.send() }
             }
         }
     }
@@ -258,12 +328,12 @@ Rectangle {
             anchors.fill: parent; anchors.margins: 8; radius: 16; visible: parent.containsDrag
             color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
             border.color: Theme.accent; border.width: 2
-            Text { anchors.centerIn: parent; text: "Отпустите, чтобы отправить файл"; color: Theme.text; font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold }
+            Text { anchors.centerIn: parent; text: "Отпустите, чтобы прикрепить файл"; color: Theme.text; font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold }
         }
     }
 
     function send() {
-        if (input.text.trim().length === 0) return
+        if (input.text.trim().length === 0 && backend.pendingFiles.length === 0) return
         backend.sendMessage(input.text)
         input.text = ""
         messages.stick = true

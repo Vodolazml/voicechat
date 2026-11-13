@@ -150,6 +150,25 @@ def test_sign_in_chat_and_call_flow(ui, qt_app, server):
     assert pump(qt_app, lambda: ui.messages.count == 1)
     assert '<a href="https://example.org"' in ui.messages.rows[0]["html"]
 
+    # A picture waits above the input, shows at once marked "sending", then becomes the real message whose
+    # preview comes from the local cache (no download needed).
+    from PySide6.QtGui import QColor, QImage
+    picture = QImage(40, 30, QImage.Format_RGB32)
+    picture.fill(QColor("green"))
+    shot = Path(settings_store.SETTINGS_PATH).parent / "shot.png"
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    picture.save(str(shot), "PNG")
+    backend_module.IMAGE_CACHE = shot.parent / "cache"
+    ui.sendFiles(["file:///" + str(shot).lstrip("/")])
+    assert len(ui.pendingFiles) == 1 and ui.pendingFiles[0]["image"]
+    assert ui.messages.count == 1
+    ui.sendMessage("смотри")
+    assert ui.pendingFiles == [] and ui.messages.count == 2 and ui.messages.rows[-1]["sending"]
+    assert pump(qt_app, lambda: ui.messages.count == 2 and ui.messages.rows[-1]["id"] > 0
+                and ui.messages.rows[-1]["fileId"] > 0)
+    last = ui.messages.rows[-1]
+    assert last["raw"] == "смотри" and not last["sending"] and last["fileImage"].startswith("file:")
+
     # Join a voice channel: we appear in the list (from the server's live event) and on the stage.
     voice_id = next(r["id"] for r in ui.channels.rows if r["type"] == "voice")
     ui.joinChannel(voice_id)
@@ -280,7 +299,7 @@ def test_ctrl_v_sends_screenshots_and_copied_files(qt_app, tmp_path):
 
     def send_file(path, cleanup=None):
         sent.append((Path(path).name, Path(path).read_bytes()[:8], cleanup))
-    fake = SimpleNamespace(_chat_channel=7, _send_file=send_file, toast=lambda *a: None)
+    fake = SimpleNamespace(_chat_channel=7, _stage_file=send_file, toast=lambda *a: None)
     clipboard = QGuiApplication.clipboard()
 
     clipboard.setText("just text")
@@ -323,3 +342,48 @@ def test_sound_when_someone_else_starts_a_share_or_camera():
     assert played == ["share_on", "camera_on"]
     pcm = backend_module.SOUNDS["share_on"]
     assert len(pcm) % backend_module.FRAME_BYTES == 0 and len(backend_module.SOUNDS["camera_on"]) > 0
+
+
+def test_pasted_and_attached_files_wait_above_the_input(qt_app, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import Signal  # noqa: F401
+
+    toasts = []
+    emitted = []
+    fake = SimpleNamespace(_chat_channel=3, _pending=[], toast=lambda kind, text: toasts.append(text),
+                           pendingChanged=SimpleNamespace(emit=lambda: emitted.append(1)))
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 100)
+    doc = tmp_path / "doc.txt"
+    doc.write_bytes(b"hello")
+    stage = backend_module.Backend._stage_file
+    stage(fake, str(shot))
+    stage(fake, str(shot))  # the same picture twice: kept once
+    stage(fake, str(doc))
+    assert [item["name"] for item in fake._pending] == ["shot.png", "doc.txt"]
+    assert fake._pending[0]["image"].startswith("file:") and fake._pending[1]["image"] == ""
+    assert any("уже прикреплён" in t for t in toasts)
+    listed = backend_module.Backend._pending_files(fake)
+    assert listed[0] == {"name": "shot.png", "size": fake._pending[0]["size"], "image": fake._pending[0]["image"]}
+    backend_module.Backend.removePending(fake, 0)
+    assert [item["name"] for item in fake._pending] == ["doc.txt"]
+
+
+def test_picture_preview_is_cached_and_fetched_once(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(backend_module, "IMAGE_CACHE", tmp_path / "cache")
+    jobs = []
+    fake = SimpleNamespace(_fetching=set(), _bg=lambda work, done, failed: jobs.append((work, done)),
+                           messages=SimpleNamespace(rows=[], update=lambda *a, **k: None))
+    preview = backend_module.Backend._image_preview
+    assert preview(fake, {"id": 5, "name": "a.txt", "size": 10, "content_type": "text/plain"}) == ""
+    big = {"id": 6, "name": "huge.png", "size": backend_module.PREVIEW_MAX_BYTES + 1, "content_type": "image/png"}
+    assert preview(fake, big) == "" and not jobs
+    picture = {"id": 7, "name": "shot.PNG", "size": 100, "content_type": "image/png"}
+    assert preview(fake, picture) == "" and len(jobs) == 1
+    assert preview(fake, picture) == "" and len(jobs) == 1  # already being fetched
+    backend_module._cached_image(picture).parent.mkdir(parents=True)
+    backend_module._cached_image(picture).write_bytes(b"png")
+    assert preview(fake, picture).startswith("file:") and preview(fake, picture).endswith("7.png")

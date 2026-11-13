@@ -68,3 +68,24 @@ def test_paced_stream_keeps_30fps_when_35_arrive(monkeypatch):
     times = [i / 35 for i in range(350)]  # 10 s at 35 fps
     stream, built, disposed, put = _run_paced(monkeypatch, times)
     assert 290 <= len(built) <= 302
+
+
+def test_share_frame_rate_steps_down_and_back_up():
+    cap = types.SimpleNamespace(fps=60, frame_limit=0)
+    t = 0.0
+    for _ in range(10):  # encoder makes 20 of 60 fps for 10 s
+        media._adapt_frame_rate(cap, 20.0, t)
+        t += 1
+    assert cap.frame_limit == 45
+    for _ in range(10):
+        media._adapt_frame_rate(cap, 20.0, t)
+        t += 1
+    assert cap.frame_limit == 30
+    for _ in range(50):  # keeps up with 30
+        media._adapt_frame_rate(cap, 30.0, t)
+        t += 1
+    assert cap.frame_limit == 45
+    for _ in range(50):
+        media._adapt_frame_rate(cap, 44.0, t)
+        t += 1
+    assert cap.frame_limit == 0  # back to all 60

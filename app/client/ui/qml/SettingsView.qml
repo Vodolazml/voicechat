@@ -226,6 +226,7 @@ Rectangle {
                     spacing: 6
                     Toggle { title: "Голосовые подсказки"; hint: "«Микрофон выключен», «Звук включён» и т. п. при нажатии кнопок и горячих клавиш. Без них — короткий сигнал"; checked: root.s.voice_prompts; onToggled: (v) => backend.setSetting("voice_prompts", v) }
                     Toggle { title: "Звук, когда кто-то заходит или выходит"; checked: root.s.sound_join_leave; onToggled: (v) => backend.setSetting("sound_join_leave", v) }
+                    Toggle { title: "Звук, когда кто-то включает демонстрацию экрана или камеру"; checked: root.s.sound_video; onToggled: (v) => backend.setSetting("sound_video", v) }
                     Toggle { title: "Звук новых сообщений в канале звонка"; checked: root.s.sound_messages; onToggled: (v) => backend.setSetting("sound_messages", v) }
                     Toggle { title: "Уведомлять, когда меня упомянули (@логин)"; checked: root.s.notify_mentions; onToggled: (v) => backend.setSetting("notify_mentions", v) }
                     Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12; Layout.topMargin: 8

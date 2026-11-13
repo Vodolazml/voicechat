@@ -58,7 +58,8 @@ UI_DEFAULTS: dict[str, Any] = {
     "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.5,
     "overlay_text_opacity": 1.0,
     "overlay_speakers_only": False,
-    "sound_join_leave": True, "sound_messages": True, "notify_mentions": True, "voice_prompts": True,
+    "sound_join_leave": True, "sound_video": True, "sound_messages": True, "notify_mentions": True,
+    "voice_prompts": True,
     "overlay_x": 0.02, "overlay_y": 0.03,
     "accent": "#7c5cff", "compact": False, "close_to_tray": True, "autostart": False,
     "screen_preset": "1080p60", "screen_monitor": 1, "camera_id": "",
@@ -159,7 +160,41 @@ def describe_sent(stats: dict) -> tuple[str, str]:
     return text, " · ".join(detail)
 
 
+def _share_sound() -> bytes:
+    """Someone started showing their screen: a bright rising four-note fanfare, clearly not a join (three
+    short notes) and loud enough to come through a game."""
+    rate = SAMPLE_RATE
+    parts = []
+    for freq, length in ((659.0, 0.09), (880.0, 0.09), (1109.0, 0.09), (1319.0, 0.32)):
+        t = np.arange(int(rate * length)) / rate
+        envelope = np.minimum(1.0, t * 250) * np.exp(-t * (5 if length > 0.2 else 14))
+        tone = (np.sin(2 * np.pi * freq * t) + 0.4 * np.sin(4 * np.pi * freq * t)
+                + 0.12 * np.sin(6 * np.pi * freq * t))
+        parts.append(tone * envelope)
+    pcm = (np.concatenate(parts) * 0.3 * 32767).clip(-32767, 32767).astype(np.int16).tobytes()
+    return pcm + bytes((-len(pcm)) % FRAME_BYTES)
+
+
+def _camera_sound() -> bytes:
+    """Someone turned on a camera: a two-part "camera shutter" click, then a warm two-note tone."""
+    rate = SAMPLE_RATE
+    rng = np.random.default_rng(7)
+    parts = []
+    for decay in (90.0, 60.0):  # shutter: two short bursts of filtered noise
+        t = np.arange(int(rate * 0.045)) / rate
+        noise = np.convolve(rng.standard_normal(len(t)), np.ones(6) / 6, mode="same")
+        parts += [noise * np.exp(-t * decay) * 0.9, np.zeros(int(rate * 0.04))]
+    for freq, length in ((784.0, 0.11), (1047.0, 0.26)):
+        t = np.arange(int(rate * length)) / rate
+        envelope = np.minimum(1.0, t * 250) * np.exp(-t * (6 if length > 0.2 else 12))
+        parts.append((np.sin(2 * np.pi * freq * t) + 0.25 * np.sin(4 * np.pi * freq * t)) * envelope)
+    pcm = (np.concatenate(parts) * 0.3 * 32767).clip(-32767, 32767).astype(np.int16).tobytes()
+    return pcm + bytes((-len(pcm)) % FRAME_BYTES)
+
+
 SOUNDS = {
+    "share_on": _share_sound(),
+    "camera_on": _camera_sound(),
     "join": _chime((587.0, 784.0, 1175.0), 90, 0.32),
     "leave": _chime((1175.0, 784.0, 523.0), 90, 0.32),
     "message": _chime((988.0,), 60, 0.16),
@@ -227,7 +262,7 @@ def load_prompt(path: Path) -> bytes | None:
 
 
 # Recorded announcements that replace the join/leave chimes when the files are there.
-ANNOUNCEMENTS = ("join", "leave")
+ANNOUNCEMENTS = ("join", "leave", "share_on", "camera_on")
 SPOKEN: set[str] = set()  # sounds loaded from recordings (played louder than the synthetic chimes)
 
 
@@ -363,6 +398,7 @@ class Backend(QObject):
         self._capturer: ScreenCapturer | None = None
         self._camera = None                        # CameraCapturer while our camera is on
         self._cameras: set[int] = set()            # who has a camera on in our call
+        self._video_seen: set[str] = set()         # "share"/"camera" reported at least once in this call
         self._avatars: dict[int, int] = {}         # user id -> picture version (0: none)
         self._members: list[dict] = []             # people in the current space
         self._members_raw: list[dict] = []
@@ -1216,6 +1252,7 @@ class Backend(QObject):
             self.sounds.keep_open = False  # closes itself once the last sound has played
             self._speakers.clear()
             self._streams.clear()
+            self._video_seen.clear()
             self._watching.clear()
             self._sharing = False
             self._capturer = None
@@ -1264,8 +1301,18 @@ class Backend(QObject):
         if user_id == self._me.get("id"):
             self.callChanged.emit()
 
+    def _announce_video(self, kind: str, before: set[int], now: set[int]) -> None:
+        """A sound when someone else starts a screen share or a camera. The first report after joining a
+        call only tells who already shows something, so it stays quiet."""
+        if kind not in self._video_seen:
+            self._video_seen.add(kind)
+            return
+        if (now - before) - {self._me.get("id", 0)}:
+            self._sound("share_on" if kind == "share" else "camera_on", "sound_video")
+
     def _on_streams(self, users: set[int]) -> None:
         my_id = self._me.get("id", 0)
+        self._announce_video("share", self._streams, set(users))
         self._sharing = my_id in users
         for uid in self._streams - users:
             video_hub().drop(uid)
@@ -1275,6 +1322,7 @@ class Backend(QObject):
         self._rebuild()
 
     def _on_cameras(self, users: set[int]) -> None:
+        self._announce_video("camera", self._cameras, set(users))
         for uid in self._cameras - users:
             video_hub().drop(camera_key(uid))
         self._cameras = set(users)
@@ -1313,7 +1361,8 @@ class Backend(QObject):
         if self.call is None or self._deafened or (setting and not self.ui.get(setting, True)):
             return
         lane = "announce" if name in ANNOUNCEMENTS else "ui"
-        self._play(SOUNDS[name], lane=lane, key=name, gain=0.9 if name in SPOKEN else 0.6)
+        loud = name in SPOKEN or name in ("share_on", "camera_on")  # meant to be heard over a game
+        self._play(SOUNDS[name], lane=lane, key=name, gain=0.9 if loud else 0.6)
 
     def _prompt(self, name: str) -> None:
         """Mic/headphone button feedback. Spoken even right after deafening, so you hear "Звук выключен".

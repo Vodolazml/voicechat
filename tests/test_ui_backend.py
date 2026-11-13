@@ -306,3 +306,20 @@ def test_ctrl_v_sends_screenshots_and_copied_files(qt_app, tmp_path):
 
     fake._chat_channel = 0
     assert backend_module.Backend.pasteFromClipboard(fake) is False
+
+
+def test_sound_when_someone_else_starts_a_share_or_camera():
+    from types import SimpleNamespace
+
+    played = []
+    fake = SimpleNamespace(_video_seen=set(), _me={"id": 1}, _sound=lambda name, setting="": played.append(name))
+    announce = backend_module.Backend._announce_video
+    announce(fake, "share", set(), {2})  # first report after joining: already sharing, no sound
+    assert played == []
+    announce(fake, "share", {2}, {2, 3})
+    announce(fake, "share", {2, 3}, {1, 2, 3})  # our own share: no sound
+    announce(fake, "camera", set(), set())
+    announce(fake, "camera", set(), {4})
+    assert played == ["share_on", "camera_on"]
+    pcm = backend_module.SOUNDS["share_on"]
+    assert len(pcm) % backend_module.FRAME_BYTES == 0 and len(backend_module.SOUNDS["camera_on"]) > 0

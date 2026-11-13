@@ -8,6 +8,7 @@ add delay. Playback pulls mixed audio from the Mixer in the output callback.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -188,6 +189,10 @@ class _Rechunker:
         self._pending.clear()
 
 
+SILENT_PEAK = 3          # raw int16 peak at or under this is "nothing at all" (about -80 dBFS)
+SILENT_SECONDS = 8.0
+
+
 class AudioEngine:
     def __init__(self, settings: AudioSettings, on_frame: Callable[[bytes], None],
                  on_problem: Callable[[str], None] = lambda message: None) -> None:
@@ -214,6 +219,7 @@ class AudioEngine:
         self._reverse_extra: deque[bytes] = deque(maxlen=20)  # UI sounds played by the separate player
         self._opened_names: tuple[str, str] | None = None  # device settings the open streams were made for
         self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
+        self._window_peak = 0        # loudest raw sample since the device watcher last looked
         self._monitor_stop = threading.Event()
         self._monitor: threading.Thread | None = None
         self._reset_counters()
@@ -230,6 +236,7 @@ class AudioEngine:
         self._overflows = 0
         self._underflows = 0
         self._peak_db = -96.0
+        self._raw_peak = 0         # loudest raw sample from the device, before any processing
 
     def stats(self) -> dict:
         """What the microphone and speakers did since the last call, for the log."""
@@ -237,6 +244,7 @@ class AudioEngine:
             "running": self._running, "mic_frames": self._frames_in, "sent_frames": self._frames_sent,
             "speaker_frames": self._frames_out, "uneven_blocks": self._odd_blocks,
             "mic_peak_db": round(self._peak_db, 1),
+            "raw_peak_db": round(20 * math.log10(max(self._raw_peak, 1) / 32767.0), 1),
             "threshold_db": round(getattr(self.gate, "threshold_db", self.settings.threshold_db), 1),
             "overflows": self._overflows, "underflows": self._underflows, "muted": self.muted,
             "mode": self.settings.mode,
@@ -364,9 +372,24 @@ class AudioEngine:
             signature = _system_signature()
             pending = None  # a change must look the same on two checks in a row (Windows settles first)
             last_calls, quiet_since = self._callbacks, None
+            silent_since, silence_handled = None, False
             while not stop.wait(1.5):
                 if not self._running:
+                    silent_since, silence_handled = None, False
                     continue
+                # A live microphone always hears some noise (at least a few units of the 16-bit range). A
+                # stream that delivers perfect silence for long is a muted or "stuck" device: Windows mute,
+                # a mic key on the laptop or headset, another app holding it, or a driver hiccup. Reopen it
+                # once; if it stays silent, tell the person what to check.
+                window, self._window_peak = self._window_peak, 0
+                if window > SILENT_PEAK or self.muted:
+                    silent_since, silence_handled = None, False
+                elif silent_since is None:
+                    silent_since = time.monotonic()
+                elif not silence_handled and time.monotonic() - silent_since > SILENT_SECONDS:
+                    silence_handled = True
+                    logger.warning("The microphone delivers perfect silence (raw peak %d): reopening", window)
+                    self.on_problem("mic_silent")
                 now_signature = _system_signature()
                 if signature is None:
                     signature = now_signature
@@ -448,6 +471,13 @@ class AudioEngine:
         self._callbacks += 1
         if frames != FRAME_SAMPLES:
             self._odd_blocks += 1
+        raw = np.frombuffer(indata, dtype=np.int16)
+        if raw.size:
+            peak = int(np.abs(raw.astype(np.int32)).max())
+            if peak > self._raw_peak:
+                self._raw_peak = peak
+            if peak > self._window_peak:
+                self._window_peak = peak
         for frame in self._in_chunks.push(bytes(indata)):
             self._frames_in += 1
             self._process_frame(frame)

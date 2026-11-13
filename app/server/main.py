@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import avatars, chat, download_page, legal, presence, spaces
+from . import avatars, chat, download_page, files, legal, presence, spaces
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -65,7 +65,8 @@ app = FastAPI(
     redoc_url=None,
     openapi_url="/openapi.json" if _docs_enabled else None,
 )
-app.add_middleware(BodyLimitMiddleware, limit=settings.max_http_body_bytes)
+app.add_middleware(BodyLimitMiddleware, limit=settings.max_http_body_bytes,
+                   overrides=[(files.UPLOAD_PATH, None)])
 app.mount("/downloads", StaticFiles(directory=settings.downloads_dir, check_dir=False), name="downloads")
 if settings.allowed_hosts and "*" not in settings.allowed_hosts:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
@@ -81,6 +82,7 @@ if settings.cors_origins:
 
 app.include_router(presence.router)
 app.include_router(chat.router)
+app.include_router(files.router)
 app.include_router(spaces.router)
 app.include_router(avatars.router)
 app.include_router(download_page.router)
@@ -95,8 +97,11 @@ async def security_middleware(request: Request, call_next):
             body_size = int(content_length)
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "Некорректный размер запроса"})
-        if body_size > settings.max_http_body_bytes:
-            return JSONResponse(status_code=413, content={"detail": "Запрос слишком большой"})
+        upload = request.method == "PUT" and files.UPLOAD_PATH.match(request.url.path)
+        limit = files.max_file_bytes() if upload else settings.max_http_body_bytes
+        if body_size > limit:
+            detail = f"Файл больше {settings.max_file_mb} МБ" if upload else "Запрос слишком большой"
+            return JSONResponse(status_code=413, content={"detail": detail})
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -443,6 +448,7 @@ async def delete_account(payload: schemas.AccountDeleteIn, request: Request, use
     channel_id = leave_voice(db, state)[0] if state else 0
     user_id = user.id
     write_audit(db, actor_id=None, action="auth.account_deleted", target_type="user", target_id=user_id)
+    files.remove_user_files(db, user.id)
     legal.wipe_account(db, user)
     db.commit()
     hub.disconnect_user(user_id)

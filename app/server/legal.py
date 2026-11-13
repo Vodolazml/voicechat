@@ -26,8 +26,8 @@ logger = logging.getLogger("voicechat.legal")
 router = APIRouter(include_in_schema=False)
 
 # Bump when the policy, the terms or the consent change in substance: the app asks everyone to accept again.
-LEGAL_VERSION = 1
-LEGAL_DATE = "11.11.2026"
+LEGAL_VERSION = 2
+LEGAL_DATE = "13.11.2026"
 SESSION_RETENTION_DAYS = 90
 AUDIT_RETENTION_DAYS = 365
 PURGE_INTERVAL_SECONDS = 6 * 3600
@@ -189,10 +189,14 @@ def purge_old_records(db: Session) -> tuple[int, int]:
 async def retention_janitor(session_factory) -> None:
     while True:
         try:
+            from .files import purge_orphans
+
             with session_factory() as db:
                 sessions, audits = purge_old_records(db)
-            if sessions or audits:
-                logger.info("Retention: removed %s old sign-ins and %s audit records", sessions, audits)
+                orphans = purge_orphans(db)
+            if sessions or audits or orphans:
+                logger.info("Retention: removed %s old sign-ins, %s audit records, %s unsent files",
+                            sessions, audits, orphans)
         except Exception:
             logger.exception("Retention cleanup failed")
         await asyncio.sleep(PURGE_INTERVAL_SECONDS)

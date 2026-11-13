@@ -298,7 +298,7 @@ Rectangle {
                     PasswordMeter { Layout.fillWidth: true; value: newPwd.text }
                     Text { text: "УДАЛЕНИЕ АККАУНТА"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold; Layout.topMargin: 10 }
                     Card {
-                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Удаляются имя, аватарка, пароль, входы и тексты ваших сообщений. Это отзывает согласие на обработку данных. Вернуть аккаунт будет нельзя."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "Удаляются имя, аватарка, пароль, входы, тексты ваших сообщений и отправленные файлы. Это отзывает согласие на обработку данных. Вернуть аккаунт будет нельзя."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13 }
                         RowLayout {
                             Layout.fillWidth: true; spacing: 10
                             Field { id: deletePwd; Layout.fillWidth: true; placeholderText: "Пароль для подтверждения"; echoMode: TextInput.Password }

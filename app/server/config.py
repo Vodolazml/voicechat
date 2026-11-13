@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     client_update_required: bool = False
     client_release_notes_url: str = ""
     downloads_dir: str = "downloads"
+    # Files sent in chat (encrypted at rest). Production: on the /data volume.
+    files_dir: str = "storage/files"
+    max_file_mb: int = Field(default=50, ge=1, le=500)
+    # Uploads are refused when the disk has less free space than this, so chat files never fill the server.
+    min_free_disk_mb: int = Field(default=1500, ge=100)
     livekit_url: str = ""
     livekit_internal_url: str = "http://livekit:7880"
     livekit_api_key: str = ""

@@ -233,7 +233,20 @@ class MemberIn(OrmModel):
 
 
 class MessageCreateIn(OrmModel):
+    body: str = Field(default="", max_length=4000)
+    # A file uploaded with PUT /channels/{id}/files just before; the text may then be empty.
+    attachment_id: int | None = None
+
+
+class MessageEditIn(OrmModel):
     body: str = Field(min_length=1, max_length=4000)
+
+
+class AttachmentOut(OrmModel):
+    id: int
+    name: str
+    size: int
+    content_type: str
 
 
 class MessageOut(OrmModel):
@@ -246,6 +259,7 @@ class MessageOut(OrmModel):
     edited_at: datetime | None
     deleted: bool = False
     mentions: list[int] = []
+    attachment: AttachmentOut | None = None
 
 
 class ReadIn(BaseModel):

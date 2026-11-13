@@ -21,7 +21,7 @@ services:
     user: "0:0"
     volumes:
       - voicechat_data:/data
-    command: ["sh", "-c", "mkdir -p /data/downloads && chown -R 10001:10001 /data"]
+    command: ["sh", "-c", "mkdir -p /data/downloads /data/files && chown -R 10001:10001 /data"]
     restart: "no"
 
   api:
@@ -43,6 +43,7 @@ services:
     environment:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "UTF-8"
+      VOICECHAT_FILES_DIR: /data/files
     volumes:
       - voicechat_data:/data
       - ./downloads:/data/downloads:ro

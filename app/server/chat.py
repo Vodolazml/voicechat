@@ -61,10 +61,16 @@ def message_out(db: Session, message: models.Message, names: dict[int, str] | No
         user = db.get(models.User, message.author_id)
         author = user.display_name if user else f"Пользователь {message.author_id}"
     body = "" if message.is_deleted else unseal(message.channel_id, message.body)
+    attachment = None
+    if message.attachment_id and not message.is_deleted:
+        from .files import attachment_out
+
+        row = db.get(models.Attachment, message.attachment_id)
+        attachment = attachment_out(row) if row is not None and row.size > 0 else None
     return schemas.MessageOut(id=message.id, channel_id=message.channel_id, author_id=message.author_id,
                               author_name=author, body=body, created_at=message.created_at,
                               edited_at=message.edited_at, deleted=message.is_deleted,
-                              mentions=_mentioned_ids(db, body))
+                              mentions=_mentioned_ids(db, body), attachment=attachment)
 
 
 def _mentioned_ids(db: Session, body: str) -> list[int]:
@@ -106,10 +112,17 @@ def send_message(channel_id: int, payload: schemas.MessageCreateIn,
     _require(db, user, "text.send")
     rate_limit(f"chat:{user.id}", 20, 10)
     text = payload.body.strip()
-    if not text:
+    attachment = None
+    if payload.attachment_id:
+        attachment = db.get(models.Attachment, payload.attachment_id)
+        already = db.scalar(select(models.Message.id).where(models.Message.attachment_id == payload.attachment_id))
+        if (attachment is None or attachment.uploader_id != user.id or attachment.channel_id != channel_id
+                or attachment.size == 0 or already):
+            raise HTTPException(status_code=400, detail="Файл не найден, отправьте его ещё раз")
+    if not text and attachment is None:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
     message = models.Message(channel_id=channel_id, author_id=user.id, body=seal(channel_id, text),
-                             created_at=models.utcnow())
+                             created_at=models.utcnow(), attachment_id=attachment.id if attachment else None)
     db.add(message)
     db.flush()
     _mark_read(db, user.id, channel_id, message.id)
@@ -120,7 +133,7 @@ def send_message(channel_id: int, payload: schemas.MessageCreateIn,
 
 
 @router.patch("/messages/{message_id}", response_model=schemas.MessageOut)
-def edit_message(message_id: int, payload: schemas.MessageCreateIn,
+def edit_message(message_id: int, payload: schemas.MessageEditIn,
                  user: models.User = Depends(current_user), db: Session = Depends(get_db)):
     message = db.get(models.Message, message_id)
     if not message or message.is_deleted:
@@ -149,6 +162,10 @@ def delete_message(message_id: int, user: models.User = Depends(current_user), d
         raise HTTPException(status_code=403, detail="Недостаточно прав")
     message.is_deleted = True
     message.body = ""
+    if message.attachment_id:
+        from .files import remove_file
+
+        remove_file(db, message.attachment_id)
     db.commit()
     _publish(db, message.channel_id, {"type": "message.deleted", "channel_id": message.channel_id,
                                       "message_id": message_id})

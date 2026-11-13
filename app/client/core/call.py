@@ -70,6 +70,7 @@ class CallController:
         self._last_key_refresh = 0.0
         self._last_audio_notice = 0.0
         self._recovering = False
+        self._silence_noticed = False  # the "mic gives perfect silence" hint is shown once per call
 
     # --- public API (UI thread) -----------------------------------------------------------------
 
@@ -181,6 +182,7 @@ class CallController:
         if self.channel_id == channel_id and self.state in (CONNECTED, CONNECTING, RECONNECTING):
             return
         logger.info("Joining channel %s (from %s)", channel_id, self.channel_id)
+        self._silence_noticed = False
         if self.channel_id is not None:
             # The server moves us and kicks us from the old room. No IDLE in between, so the UI
             # switches channels without flashing "disconnected".
@@ -344,6 +346,17 @@ class CallController:
         if problem == "fallback":
             self.listener.on_notice("warning", "Выбранное устройство недоступно, звук идёт через стандартное. "
                                                "Переключусь обратно, когда оно появится")
+            return
+        if problem == "mic_silent":
+            if self.channel_id is not None and not self._silence_noticed:
+                self._silence_noticed = True
+                self.listener.on_notice(
+                    "warning", "Микрофон передаёт полную тишину, переоткрываю его. Если вас всё равно не слышно, "
+                               "проверьте кнопку выключения микрофона на ноутбуке или гарнитуре и звук в Windows, "
+                               "или выберите другой микрофон в настройках")
+            if not self._recovering:
+                self._recovering = True
+                self._submit(self._recover_audio, "audio")
             return
         # Also outside a call: the settings screen's mic test uses the same devices.
         now = time.monotonic()

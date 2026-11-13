@@ -162,6 +162,20 @@ class Message(Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), nullable=True)
+
+
+class Attachment(Base):
+    """A file sent in a chat. The bytes live encrypted in files_dir/<id>.bin; the name is encrypted too."""
+
+    __tablename__ = "attachments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id"), index=True)
+    uploader_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(Text)
+    size: Mapped[int] = mapped_column(Integer)
+    content_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ChannelRead(Base):

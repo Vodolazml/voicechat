@@ -129,7 +129,7 @@ Rectangle {
                             Text { text: msg.model.time; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11; anchors.baseline: parent.children[0].baseline }
                         }
                         Text {
-                            visible: root.editingId !== msg.model.id
+                            visible: root.editingId !== msg.model.id && (msg.model.deleted || msg.model.raw !== "")
                             width: parent.width
                             text: msg.model.deleted ? "<i>сообщение удалено</i>" : msg.model.html + (msg.model.edited ? " <font color='#686a82' size='2'>(изменено)</font>" : "")
                             textFormat: Text.RichText
@@ -140,6 +140,28 @@ Rectangle {
                             lineHeight: 1.2
                             onLinkActivated: (link) => backend.openLink(link)
                             HoverHandler { cursorShape: parent.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+                        }
+                        Rectangle {
+                            // A file sent in the chat: any type, saved where the user chooses.
+                            visible: !msg.model.deleted && msg.model.fileId > 0
+                            width: Math.min(parent.width, 380); height: 56; radius: 12
+                            color: fileHover.hovered ? Theme.card : Theme.panel2
+                            border.color: Theme.line
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 8; spacing: 10
+                                Rectangle {
+                                    width: 34; height: 34; radius: 9; color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18)
+                                    Text { anchors.centerIn: parent; text: (msg.model.fileName.split(".").length > 1 ? msg.model.fileName.split(".").pop() : "файл").substring(0, 4).toUpperCase(); color: Theme.accent2; font.family: Theme.font; font.pixelSize: 10; font.weight: Font.Bold }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true; spacing: 1
+                                    Text { Layout.fillWidth: true; text: msg.model.fileName; color: Theme.text; elide: Text.ElideMiddle; font.family: Theme.font; font.pixelSize: 14; font.weight: Font.DemiBold }
+                                    Text { text: msg.model.fileSize; color: Theme.faint; font.family: Theme.font; font.pixelSize: 11 }
+                                }
+                                IconButton { size: 32; glyph: "download"; tip: "Сохранить"; onClicked: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
+                            }
+                            HoverHandler { id: fileHover; cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: backend.downloadFile(msg.model.fileId, msg.model.fileName) }
                         }
                         Field {
                             id: editField
@@ -160,14 +182,31 @@ Rectangle {
                             width: actions.implicitWidth + 8; height: 32; radius: 8; color: Theme.card; border.color: Theme.line
                             Row {
                                 id: actions; anchors.centerIn: parent; spacing: 2
-                                IconButton { size: 26; glyph: "copy"; tip: "Копировать"; onClicked: backend.copyText(msg.model.raw) }
-                                IconButton { visible: msg.model.mine; size: 26; glyph: "edit"; tip: "Изменить"; onClicked: root.editingId = msg.model.id }
+                                IconButton { visible: msg.model.raw !== ""; size: 26; glyph: "copy"; tip: "Копировать"; onClicked: backend.copyText(msg.model.raw) }
+                                IconButton { visible: msg.model.mine && msg.model.raw !== ""; size: 26; glyph: "edit"; tip: "Изменить"; onClicked: root.editingId = msg.model.id }
                                 IconButton { visible: msg.model.mine || backend.canModerate; size: 26; glyph: "delete"; danger: true; tip: "Удалить"; onClicked: backend.deleteMessage(msg.model.id) }
                             }
                         }
                     }
                     HoverHandler { id: hover }
                 }
+            }
+        }
+
+        // A file being sent or saved
+        Rectangle {
+            visible: backend.transferProgress >= 0
+            Layout.fillWidth: true; Layout.leftMargin: 14; Layout.rightMargin: 14; Layout.topMargin: 4
+            Layout.preferredHeight: 34; radius: 10; color: Theme.panel2
+            Rectangle {
+                width: parent.width * Math.max(0, backend.transferProgress); height: parent.height; radius: 10
+                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.25)
+                Behavior on width { NumberAnimation { duration: 120 } }
+            }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter; x: 12; width: parent.width - 24; elide: Text.ElideMiddle
+                text: backend.transferText + " · " + Math.round(Math.max(0, backend.transferProgress) * 100) + "%"
+                color: Theme.text; font.family: Theme.font; font.pixelSize: 12
             }
         }
 
@@ -181,7 +220,8 @@ Rectangle {
             color: Theme.panel2
             border.color: input.activeFocus ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.6) : "transparent"
             RowLayout {
-                anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 6; spacing: 6
+                anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 6
+                IconButton { glyph: "add"; tip: "Отправить файл (до 50 МБ, любой тип). Можно перетащить файл в чат"; enabled: backend.transferProgress < 0; onClicked: backend.attachFile() }
                 ScrollView {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     TextArea {
@@ -204,6 +244,19 @@ Rectangle {
                 }
                 IconButton { glyph: "send"; tip: "Отправить (Enter)"; active: input.text.trim().length > 0; onClicked: root.send() }
             }
+        }
+    }
+
+    // Files dragged from Explorer onto the chat are sent as they are.
+    DropArea {
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+        onDropped: (drop) => { if (drop.hasUrls) { backend.sendFiles(drop.urls); drop.accept() } }
+        Rectangle {
+            anchors.fill: parent; anchors.margins: 8; radius: 16; visible: parent.containsDrag
+            color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+            border.color: Theme.accent; border.width: 2
+            Text { anchors.centerIn: parent; text: "Отпустите, чтобы отправить файл"; color: Theme.text; font.family: Theme.font; font.pixelSize: 16; font.weight: Font.DemiBold }
         }
     }
 

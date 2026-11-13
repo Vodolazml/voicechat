@@ -166,6 +166,18 @@ SOUNDS = {
 }
 
 
+MAX_FILE_BYTES = 50 * 1024 * 1024  # the server's default limit; it has the final word
+
+
+def _human_size(size: int) -> str:
+    if not size:
+        return ""
+    for unit, scale in (("ГБ", 1 << 30), ("МБ", 1 << 20), ("КБ", 1 << 10)):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}".replace(".0 ", " ")
+    return f"{size} Б"
+
+
 def wake_tune() -> bytes:
     """About seven seconds of a bright, bouncy tune that is hard to sleep through (our own melody)."""
     notes = [784, 988, 1175, 988, 784, 988, 1319, 0, 1175, 988, 1175, 1568, 1319, 0, 1175, 988,
@@ -262,6 +274,7 @@ class Backend(QObject):
     showWindowRequested = Signal()
     inviteCreated = Signal(str)
     membersChanged = Signal()
+    transferChanged = Signal()
     nicknameRequested = Signal(int)
     _post = Signal(object)
 
@@ -332,7 +345,10 @@ class Backend(QObject):
                                 "isMe", "keyChanged", "videoInfo", "videoDetail", "avatar", "camera",
                                 "cameraKey", "canWake"])
         self.messages = ListModel(["id", "authorId", "author", "initials", "color", "html", "raw", "time",
-                                   "day", "showDay", "edited", "deleted", "mine", "mention", "grouped", "avatar"])
+                                   "day", "showDay", "edited", "deleted", "mine", "mention", "grouped", "avatar",
+                                   "fileId", "fileName", "fileSize"])
+        self._transfer = -1.0       # progress of the file being sent or saved, -1 when none
+        self._transfer_text = ""
         self.toasts = ListModel(["id", "level", "text"])
 
         self._keys_poller = native.KeyPoller()
@@ -552,6 +568,8 @@ class Backend(QObject):
     chatChannelName = Property(str, lambda self: self._channel_name(self._chat_channel), notify=chatChanged)
     textChannelId = Property(int, lambda self: self._text_channel, notify=chatChanged)
     hasMoreMessages = Property(bool, lambda self: self._has_more, notify=chatChanged)
+    transferProgress = Property(float, lambda self: self._transfer, notify=transferChanged)
+    transferText = Property(str, lambda self: self._transfer_text, notify=transferChanged)
 
     focusUserId = Property(int, lambda self: self._focus_user, notify=focusChanged)
     focusVideoInfo = Property(str, lambda self: self._video_info.get(self._focus_user, ("", ""))[0],
@@ -1683,6 +1701,9 @@ class Backend(QObject):
                 "deleted": bool(message.get("deleted")), "mine": message["author_id"] == my_id,
                 "mention": mentioned or my_id in message.get("mentions", []), "grouped": grouped,
                 "avatar": self._avatar_url(message["author_id"]),
+                "fileId": (message.get("attachment") or {}).get("id", 0),
+                "fileName": (message.get("attachment") or {}).get("name", ""),
+                "fileSize": _human_size((message.get("attachment") or {}).get("size", 0)),
                 "_ts": moment.timestamp(),
             }
             rows.append(row)
@@ -1786,7 +1807,81 @@ class Backend(QObject):
     @Slot(int)
     def deleteMessage(self, message_id: int) -> None:
         self._bg(lambda: self.api.delete_message(message_id),
-                 lambda _: self.messages.update(message_id, deleted=True, html="", raw=""))
+                 lambda _: self.messages.update(message_id, deleted=True, html="", raw="", fileId=0))
+
+    # --- files in chat ------------------------------------------------------------------------------
+
+    def _set_transfer(self, progress: float, text: str = "") -> None:
+        self._transfer = progress
+        if text or progress < 0:
+            self._transfer_text = text
+        self.transferChanged.emit()
+
+    @Slot()
+    def attachFile(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getOpenFileName(None, "Отправить файл в чат", str(Path.home()))
+        if path:
+            self._send_file(path)
+
+    @Slot("QVariantList")
+    def sendFiles(self, urls: list) -> None:
+        """Files dropped onto the chat."""
+        for url in urls:
+            path = QUrl(str(url)).toLocalFile() if str(url).startswith("file:") else str(url)
+            if path and Path(path).is_file():
+                self._send_file(path)
+
+    def _send_file(self, path: str) -> None:
+        channel_id = self._chat_channel
+        if not channel_id:
+            return
+        size = Path(path).stat().st_size
+        if size > MAX_FILE_BYTES:
+            self.toast("warning", f"Файл больше {MAX_FILE_BYTES // (1024 * 1024)} МБ, такой не отправить")
+            return
+        if size == 0:
+            self.toast("warning", "Файл пустой")
+            return
+        name = Path(path).name
+        self._set_transfer(0.0, f"Отправляю {name}")
+
+        def work():
+            attachment = self.api.upload_file(channel_id, path,
+                                              lambda done: self._ui(lambda: self._set_transfer(done)))
+            return self.api.send_message(channel_id, "", attachment["id"])
+
+        def done(message):
+            self._set_transfer(-1)
+            self._on_message(message)
+
+        def failed(exc):
+            self._set_transfer(-1)
+            self.toast("error", f"Файл не отправлен: {exc}")
+        self._bg(work, done, failed)
+
+    @Slot(int, str)
+    def downloadFile(self, attachment_id: int, name: str) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        folder = Path.home() / "Downloads"
+        if not folder.exists():
+            folder = Path.home()
+        target, _ = QFileDialog.getSaveFileName(None, "Сохранить файл", str(folder / name))
+        if not target:
+            return
+        self._set_transfer(0.0, f"Скачиваю {name}")
+
+        def done(_):
+            self._set_transfer(-1)
+            self.toast("success", f"Сохранено: {Path(target).name}")
+
+        def failed(exc):
+            self._set_transfer(-1)
+            self.toast("error", f"Файл не скачан: {exc}")
+        self._bg(lambda: self.api.download_file(
+            attachment_id, target, lambda part: self._ui(lambda: self._set_transfer(part))), done, failed)
 
     @Slot(str)
     def openLink(self, url: str) -> None:
@@ -2040,11 +2135,19 @@ class Backend(QObject):
     @Slot()
     def saveReport(self) -> None:
         """Zip of logs and environment info (no passwords, tokens or keys) for troubleshooting."""
+        from PySide6.QtWidgets import QFileDialog
+
+        folder = Path.home() / "Desktop"
+        if not folder.exists():
+            folder = Path.home()
+        chosen, _ = QFileDialog.getSaveFileName(
+            None, "Сохранить отчёт", str(folder / f"voicechat-report-{datetime.now():%Y%m%d-%H%M%S}.zip"),
+            "Архив ZIP (*.zip)")
+        if not chosen:
+            return
+        target = Path(chosen if chosen.lower().endswith(".zip") else chosen + ".zip")
+
         def build() -> Path:
-            target_dir = Path.home() / "Desktop"
-            if not target_dir.exists():
-                target_dir = Path.home()
-            target = target_dir / f"voicechat-report-{datetime.now():%Y%m%d-%H%M%S}.zip"
             info = {
                 "version": APP_VERSION, "python": sys.version, "system": py_platform.platform(),
                 "device": default_device_name(), "server": self.api.base_url, "online": self._online,
@@ -2061,7 +2164,7 @@ class Backend(QObject):
         def done(path: Path):
             self.toast("success", f"Отчёт сохранён: {path.name}")
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
-        self._bg(build, done)
+        self._bg(build, done, lambda exc: self.toast("error", f"Отчёт не сохранён: {exc}"))
 
     @Slot()
     def requestShow(self) -> None:

@@ -307,8 +307,89 @@ class ApiClient:
             params["before"] = before
         return self.request("GET", f"/channels/{channel_id}/messages", params=params)
 
-    def send_message(self, channel_id: int, body: str) -> dict[str, Any]:
-        return self.request("POST", f"/channels/{channel_id}/messages", json={"body": body})
+    def send_message(self, channel_id: int, body: str, attachment_id: int | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"body": body}
+        if attachment_id:
+            payload["attachment_id"] = attachment_id
+        return self.request("POST", f"/channels/{channel_id}/messages", json=payload)
+
+    def _authorized(self, call: Callable[[], httpx.Response]) -> httpx.Response:
+        """Runs a streaming request, refreshing the access token once if it has expired."""
+        try:
+            response = call()
+            if response.status_code == 401 and self.refresh_token:
+                response.close()
+                failed_token = self.token
+                with self._refresh_lock:
+                    if self.token == failed_token:
+                        self.refresh_session(self.refresh_token)
+                response = call()
+        except httpx.HTTPError as exc:
+            raise ApiError("Нет связи с сервером. Проверьте интернет") from exc
+        if response.status_code >= 400:
+            try:
+                response.read()
+                detail = response.json().get("detail", "Ошибка запроса")
+            except Exception:
+                detail = "Ошибка запроса"
+            response.close()
+            raise ApiError(str(detail), response.status_code)
+        return response
+
+    def upload_file(self, channel_id: int, path: str, on_progress: Callable[[float], None] | None = None,
+                    ) -> dict[str, Any]:
+        """Sends a file of any type to a channel; returns the attachment for send_message."""
+        import mimetypes
+        import os
+
+        size = os.path.getsize(path)
+        name = os.path.basename(path)
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+        def chunks():
+            sent = 0
+            with open(path, "rb") as handle:
+                while block := handle.read(256 * 1024):
+                    sent += len(block)
+                    if on_progress:
+                        on_progress(sent / max(1, size))
+                    yield block
+
+        def call() -> httpx.Response:
+            return self._client.send(self._client.build_request(
+                "PUT", f"{self.base_url.rstrip('/')}/channels/{channel_id}/files", params={"name": name},
+                headers={**self._headers(), "Content-Type": content_type, "Content-Length": str(size)},
+                content=chunks(), timeout=httpx.Timeout(30, write=600, read=120)), stream=False)
+        response = self._authorized(call)
+        return response.json()
+
+    def download_file(self, attachment_id: int, target: str,
+                      on_progress: Callable[[float], None] | None = None) -> None:
+        """Saves a chat file to `target` (written next to it first, then renamed, so no half files)."""
+        import os
+
+        def call() -> httpx.Response:
+            return self._client.send(self._client.build_request(
+                "GET", f"{self.base_url.rstrip('/')}/files/{attachment_id}", headers=self._headers(),
+                timeout=httpx.Timeout(30, read=120)), stream=True)
+        response = self._authorized(call)
+        total = int(response.headers.get("content-length") or 0)
+        partial = target + ".part"
+        received = 0
+        try:
+            with open(partial, "wb") as handle:
+                for block in response.iter_bytes(256 * 1024):
+                    handle.write(block)
+                    received += len(block)
+                    if on_progress and total:
+                        on_progress(received / total)
+            os.replace(partial, target)
+        except httpx.HTTPError as exc:
+            raise ApiError("Связь оборвалась, файл не скачан") from exc
+        finally:
+            response.close()
+            if os.path.exists(partial):
+                os.remove(partial)
 
     def edit_message(self, message_id: int, body: str) -> dict[str, Any]:
         return self.request("PATCH", f"/messages/{message_id}", json={"body": body})

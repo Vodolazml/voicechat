@@ -373,3 +373,55 @@ def test_replugged_headset_with_windows_number_prefix_is_found(monkeypatch):
                            query_hostapis=lambda *a: [{"name": "Windows WASAPI", "default_input_device": -1}])
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     assert audio._device_index("Микрофон (Razer Barracuda X 2.4)", "input") == 0
+
+
+def test_raw_mic_peak_is_logged():
+    from types import SimpleNamespace
+
+    from app.client.core.audio import AudioEngine
+
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False), on_frame=lambda f: None)
+    ok = SimpleNamespace(input_overflow=False)
+    loud = (np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes()
+    engine._capture(bytes(FRAME_BYTES), FRAME_SAMPLES, None, ok)
+    assert engine.stats()["raw_peak_db"] <= -90
+    engine._capture(loud, FRAME_SAMPLES, None, ok)
+    assert -21 < engine.stats()["raw_peak_db"] < -19
+
+
+def test_perfectly_silent_mic_is_reopened_once(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.client.core import audio
+    from app.client.core.audio import AudioEngine
+
+    monkeypatch.setattr(audio, "SILENT_SECONDS", 0.5)
+    monkeypatch.setattr(audio, "_system_signature", lambda: None)
+    problems = []
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False),
+                         on_frame=lambda f: None, on_problem=problems.append)
+    engine._running = True
+    feeding = threading.Event()
+
+    def feed():
+        while not feeding.is_set():
+            engine._capture(bytes(FRAME_BYTES), FRAME_SAMPLES, None, SimpleNamespace(input_overflow=False))
+            time.sleep(0.01)
+    threading.Thread(target=feed, daemon=True).start()
+    engine._start_monitor()
+    try:
+        assert wait_for(lambda: "mic_silent" in problems, timeout=8)
+        time.sleep(3.2)
+        assert problems.count("mic_silent") == 1, "reopened once, not over and over"
+    finally:
+        feeding.set()
+        engine._monitor_stop.set()
+
+
+def test_silent_mic_shows_a_hint_once_per_call():
+    call, api, states, notices = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED)
+    call._on_audio_problem("mic_silent")
+    call._on_audio_problem("mic_silent")
+    assert sum("полную тишину" in n for n in notices) == 1

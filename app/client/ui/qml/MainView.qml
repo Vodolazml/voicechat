@@ -10,6 +10,9 @@ Item {
     RowLayout {
         anchors.fill: parent
         spacing: 0
+        // While the settings cover the window nothing underneath may react: a tap in the settings also
+        // reached the spaces rail's TapHandlers (they only take a passive grab) and switched spaces.
+        enabled: !settings.visible
         SpaceRail { Layout.fillHeight: true; onAddSpace: spaceDialog.open() }
         Sidebar {
             Layout.fillHeight: true

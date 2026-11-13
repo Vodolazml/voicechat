@@ -638,12 +638,17 @@ class ScreenCapturer:
         self.backend = ""
         # Filled by the media session from WebRTC's own statistics of the encoded stream.
         self.encoder: dict = {}
+        # Set by the media session while the encoder cannot keep up: hand over at most this many frames a
+        # second (0 = all captured frames).
+        self.frame_limit = 0
+        self._send_due = 0.0
 
     def stats(self) -> dict:
         """What really happens right now: captured and sent frames per second, the encoded size and rate."""
         return {"capture_fps": self._captured.value(), "sent_fps": self._sent.value(), "width": self.width,
                 "source_width": self._source_size[0], "source_height": self._source_size[1],
                 "height": self.height, "grab_ms": round(self._grab_ms, 1), "backend": self.backend,
+                "frame_limit": self.frame_limit,
                 **self.encoder}
 
     def _grabber(self):
@@ -661,6 +666,13 @@ class ScreenCapturer:
     def _send(self, source, data, last_preview: list) -> None:
         from livekit import rtc
 
+        limit = self.frame_limit
+        if limit:
+            now = time.perf_counter()
+            if now < self._send_due:
+                return
+            interval = 1.0 / limit
+            self._send_due = now + interval if self._send_due < now - interval else self._send_due + interval
         # BGRA memory order: no colour conversion on our side, WebRTC converts straight to I420.
         source.capture_frame(rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.BGRA, data))
         self._sent.tick()

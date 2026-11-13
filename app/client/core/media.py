@@ -40,6 +40,44 @@ def _default_encoder() -> str:
     return "NVENC" if os.path.exists(os.path.join(system, "nvEncodeAPI64.dll")) else ""
 
 
+# If the encoder still cannot keep up, fewer frames are handed to it: it then encodes every frame it gets
+# instead of falling far behind and skipping at random. The rate goes back up once it copes again.
+FPS_STEPS = (60, 45, 30, 20, 15)
+FPS_BEHIND = 0.6        # encoded under this share of what we hand over ...
+FPS_BEHIND_SECONDS = 8  # ... for this long: one step down
+FPS_RECOVER_SECONDS = 45  # keeping up this long: one step back up
+
+
+def _adapt_frame_rate(capturer, encoded_fps: float, now: float) -> None:
+    target = capturer.frame_limit or capturer.fps
+    state = capturer.__dict__.setdefault("_adapt", {"behind": None, "fine": None})
+    if encoded_fps <= 0:
+        return
+    if encoded_fps < FPS_BEHIND * target:
+        state["fine"] = None
+        state["behind"] = state["behind"] or now
+        if now - state["behind"] >= FPS_BEHIND_SECONDS:
+            lower = [step for step in FPS_STEPS if step < target]
+            if lower:
+                capturer.frame_limit = lower[0]
+                logger.info("Screen share: the encoder makes %.0f of %d fps, sending %d fps", encoded_fps, target,
+                            lower[0])
+            state["behind"] = None
+        return
+    state["behind"] = None
+    if capturer.frame_limit:
+        if encoded_fps >= 0.9 * target:
+            state["fine"] = state["fine"] or now
+            if now - state["fine"] >= FPS_RECOVER_SECONDS:
+                higher = [step for step in FPS_STEPS if target < step <= capturer.fps]
+                capturer.frame_limit = higher[-1] if higher and higher[-1] < capturer.fps else 0
+                logger.info("Screen share: the encoder keeps up again, sending %d fps",
+                            capturer.frame_limit or capturer.fps)
+                state["fine"] = None
+        else:
+            state["fine"] = None
+
+
 # --- receiving video ----------------------------------------------------------------------------
 # The screen tile is repainted at most 30 times a second, so turning more frames than that into pictures
 # is wasted work. Each 2560x1440 picture is ~15 MB copied while Python is busy; at 60 fps that alone took
@@ -106,7 +144,7 @@ _PACED_STREAM = None
 
 
 async def _read_video(track, key: int, on_frame: Callable[[int, Any], None],
-                      max_fps: float = VIDEO_MAX_FPS) -> None:
+                      max_fps: float = VIDEO_MAX_FPS, current: Callable[[], bool] = lambda: True) -> None:
     """Runs on the video loop: newest frames only, at most `max_fps`, each handed to `on_frame` as RGBA."""
     global _PACED_STREAM
     from livekit import rtc
@@ -118,6 +156,9 @@ async def _read_video(track, key: int, on_frame: Callable[[int, Any], None],
     started = logged = time.monotonic()
     try:
         async for event in stream:
+            if not current():
+                logger.info("Video from %d: a newer stream took over, closing this one", key)
+                break
             on_frame(key, event.frame)
             now = time.monotonic()
             if now - logged >= 60.0:
@@ -179,6 +220,7 @@ class MediaSession:
         self._camera = None
         self._cameras: set[int] = set()
         self._audio_streams: dict[int, object] = {}  # user id -> the stream that currently feeds the mixer
+        self._video_readers: dict[int, object] = {}  # video key -> token of the reader that may show frames
         self._key_problem_at: dict[int, float] = {}
         self.muted = False
         self.connected = False
@@ -589,13 +631,22 @@ class MediaSession:
     async def _receive_video(self, track, user_id: int) -> None:
         # Video is read on its own thread and event loop. On the media loop a 1440p60 stream kept it so busy
         # that everyone's voice arrived half missing and the microphone lost frames (2026-11-13 report).
-        future = asyncio.run_coroutine_threadsafe(_read_video(track, user_id, self.cb.on_video_frame),
-                                                  _video_loop())
+        # Only the newest stream per person is shown. After a key change or a re-subscribe the old stream
+        # could keep running next to the new one: each frame arrived two or three times (a viewer saw "90 fps"
+        # of a 60 fps share, 2026-11-13) and was decoded and converted as often.
+        token = object()
+        self._video_readers[user_id] = token
+        future = asyncio.run_coroutine_threadsafe(
+            _read_video(track, user_id, self.cb.on_video_frame, current=lambda: self._video_readers.get(user_id) is token),
+            _video_loop())
         try:
             await asyncio.wrap_future(future)
         except asyncio.CancelledError:
             future.cancel()
             raise
+        finally:
+            if self._video_readers.get(user_id) is token:
+                del self._video_readers[user_id]
 
     async def _start_screen(self, capturer) -> None:
         from livekit import rtc
@@ -628,9 +679,10 @@ class MediaSession:
             except Exception:
                 logger.warning("Unknown video encoder backend %s", backend)
         try:
-            # Keep both the full size and the frame rate; WebRTC drops a frame only when really overloaded,
-            # instead of quietly shrinking the picture (the default for screens).
-            options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE_AND_RESOLUTION)
+            # Keep the frame rate, let WebRTC lower the resolution while the processor cannot keep up (a game
+            # running next to a 1440p60 share took the software encoder down to 8 fps, 2026-11-13) and raise it
+            # again when it can. Keeping both made the encoder fall behind and the viewer got a slide show.
+            options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE)
         except Exception:
             pass
         try:
@@ -698,6 +750,7 @@ class MediaSession:
                     if last_bytes and now > last_bytes[0] else 0,
                 }
                 last_bytes = (now, sent.bytes_sent)
+                _adapt_frame_rate(capturer, encoded_fps, now)
                 if now - logged >= 15:
                     logged = now
                     logger.info("Screen share: %s", {**capturer.stats(), "preview": capturer.preview is not None})

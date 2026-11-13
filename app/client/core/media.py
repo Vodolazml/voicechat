@@ -28,6 +28,92 @@ def camera_key(user_id: int) -> int:
     return CAMERA_KEY_OFFSET + user_id
 
 
+# --- receiving video ----------------------------------------------------------------------------
+# The screen tile is repainted at most 30 times a second, so turning more frames than that into pictures
+# is wasted work. Each 2560x1440 picture is ~15 MB copied while Python is busy; at 60 fps that alone took
+# so much time that voices broke up. Frames in between are released untouched, without a copy.
+VIDEO_MAX_FPS = 30
+
+_video_thread_loop: asyncio.AbstractEventLoop | None = None
+_video_thread_lock = threading.Lock()
+
+
+def _video_loop() -> asyncio.AbstractEventLoop:
+    """One shared background loop for every incoming video stream, started on first use."""
+    global _video_thread_loop
+    with _video_thread_lock:
+        if _video_thread_loop is None or _video_thread_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="video-in", daemon=True).start()
+            _video_thread_loop = loop
+        return _video_thread_loop
+
+
+def _paced_stream_class():
+    from livekit import rtc
+    from livekit.rtc._ffi_client import FfiClient, FfiHandle
+    from livekit.rtc.video_frame import VideoFrame
+    from livekit.rtc.video_stream import VideoFrameEvent
+
+    class PacedVideoStream(rtc.VideoStream):
+        """A VideoStream that hands out at most `max_fps` frames a second and releases the rest unread."""
+
+        def __init__(self, track, max_fps: float = VIDEO_MAX_FPS, **kwargs) -> None:
+            self.min_interval = 1.0 / max_fps if max_fps > 0 else 0.0
+            self.decoded = 0
+            self.shown = 0
+            super().__init__(track, **kwargs)
+
+        async def _run(self) -> None:
+            last = float("-inf")  # the first frame is always shown
+            while True:
+                event = await self._ffi_queue.wait_for(self._is_event)
+                video_event = event.video_stream_event
+                if video_event.HasField("frame_received"):
+                    received = video_event.frame_received
+                    self.decoded += 1
+                    now = time.perf_counter()
+                    if now - last < self.min_interval:
+                        FfiHandle(received.buffer.handle.id).dispose()
+                        continue
+                    last = now
+                    self.shown += 1
+                    self._queue.put(VideoFrameEvent(frame=VideoFrame._from_owned_info(received.buffer),
+                                                    timestamp_us=received.timestamp_us,
+                                                    rotation=received.rotation))
+                elif video_event.HasField("eos"):
+                    break
+            FfiClient.instance.queue.unsubscribe(self._ffi_queue)
+
+    return PacedVideoStream
+
+
+_PACED_STREAM = None
+
+
+async def _read_video(track, key: int, on_frame: Callable[[int, Any], None],
+                      max_fps: float = VIDEO_MAX_FPS) -> None:
+    """Runs on the video loop: newest frames only, at most `max_fps`, each handed to `on_frame` as RGBA."""
+    global _PACED_STREAM
+    from livekit import rtc
+
+    if _PACED_STREAM is None:
+        _PACED_STREAM = _paced_stream_class()
+    # capacity=1: if painting falls behind, the older waiting frame is replaced by the newer one.
+    stream = _PACED_STREAM(track, max_fps=max_fps, capacity=1, format=rtc.VideoBufferType.RGBA)
+    started = logged = time.monotonic()
+    try:
+        async for event in stream:
+            on_frame(key, event.frame)
+            now = time.monotonic()
+            if now - logged >= 60.0:
+                logger.info("Video from %d: %dx%d, %d frames decoded, %d shown in %.0f s", key, event.frame.width,
+                            event.frame.height, stream.decoded, stream.shown, now - started)
+                logged = now
+    finally:
+        await stream.aclose()
+
+
 def key_index(key_id: str) -> int:
     """Both sides derive the key slot from the key id, so a rotated key never collides with the old one."""
     try:
@@ -417,6 +503,12 @@ class MediaSession:
                 self._spawn(self._receive_audio(track, user_id))
             elif track.kind == rtc.TrackKind.KIND_VIDEO:
                 camera = publication.source == rtc.TrackSource.SOURCE_CAMERA
+                quality = os.environ.get("VOICECHAT_VIEW_QUALITY", "").upper()  # trial: LOW / MEDIUM / HIGH
+                if quality and getattr(publication, "simulcasted", False):
+                    try:
+                        publication.set_video_quality(getattr(rtc.VideoQuality, f"VIDEO_QUALITY_{quality}"))
+                    except Exception as exc:
+                        logger.warning("Could not pick video layer %s: %s", quality, exc)
                 self._spawn(self._receive_video(track, camera_key(user_id) if camera else user_id))
 
         @room.on("active_speakers_changed")
@@ -481,14 +573,15 @@ class MediaSession:
                 self.mixer.remove(user_id)
 
     async def _receive_video(self, track, user_id: int) -> None:
-        from livekit import rtc
-
-        stream = rtc.VideoStream(track, capacity=2, format=rtc.VideoBufferType.RGBA)
+        # Video is read on its own thread and event loop. On the media loop a 1440p60 stream kept it so busy
+        # that everyone's voice arrived half missing and the microphone lost frames (2026-11-13 report).
+        future = asyncio.run_coroutine_threadsafe(_read_video(track, user_id, self.cb.on_video_frame),
+                                                  _video_loop())
         try:
-            async for event in stream:
-                self.cb.on_video_frame(user_id, event.frame)
-        finally:
-            await stream.aclose()
+            await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
 
     async def _start_screen(self, capturer) -> None:
         from livekit import rtc
@@ -503,7 +596,8 @@ class MediaSession:
         options = rtc.TrackPublishOptions(
             source=rtc.TrackSource.SOURCE_SCREENSHARE,
             video_encoding=rtc.VideoEncoding(max_bitrate=capturer.max_bitrate, max_framerate=capturer.fps),
-            simulcast=False)
+            # Trial switch: send extra lower layers so viewers can take a lighter one. Off until measured.
+            simulcast=os.environ.get("VOICECHAT_SCREEN_SIMULCAST") == "1")
         try:
             # H.264 keeps up better than VP8 on big screens (about 52 vs 44 fps at 1440p -> 1080p in tests).
             options.video_codec = rtc.VideoCodec.H264

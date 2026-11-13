@@ -824,7 +824,9 @@ class VideoHub(QObject):
     def push(self, user_id: int, video_frame) -> None:
         """Called from the media thread with an RGBA rtc.VideoFrame."""
         width, height = video_frame.width, video_frame.height
-        image = QImage(bytes(video_frame.data), width, height, width * 4, QImage.Format_RGBA8888)
+        # The frame already owns its own copy of the pixels; the image keeps that buffer alive, so no second
+        # ~15 MB copy per 1440p frame.
+        image = QImage(video_frame.data, width, height, width * 4, QImage.Format_RGBA8888)
         with self._lock:
             self._frames[user_id] = image
             self._rates.setdefault(user_id, _Rate()).tick()

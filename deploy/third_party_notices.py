@@ -31,6 +31,12 @@ https://www.gnu.org/licenses/lgpl-3.0.html.
 **LiveKit** (livekit, livekit-api, livekit-protocol) распространяется по Apache License 2.0 и включает
 WebRTC (BSD-3-Clause) и кодек Opus (BSD-3-Clause).
 
+**FFmpeg** (через PyAV; кодирование демонстрации экрана видеокартой) входит в виде отдельных библиотек
+в папке _internal\\av.libs. Эта сборка FFmpeg включает x264 и x265 и поэтому распространяется по GNU GPL
+версии 2 или новее; libavcodec и остальные библиотеки FFmpeg — LGPL v2.1+. Исходный код:
+https://ffmpeg.org/download.html, https://code.videolan.org/videolan/x264, https://bitbucket.org/multicoreware/x265_git,
+сборка: https://github.com/PyAV-Org/pyav-ffmpeg. Тексты лицензий: https://www.gnu.org/licenses/.
+
 **RNNoise** (шумоподавление) — BSD-3-Clause, Xiph.Org Foundation и Mozilla.
 
 **PortAudio** (через sounddevice) — лицензия PortAudio (MIT-подобная).

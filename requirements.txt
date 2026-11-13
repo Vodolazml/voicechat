@@ -11,8 +11,10 @@ uvicorn[standard]>=0.30.0
 websockets>=12.0
 pytest>=8.2.0
 numpy>=1.26
-livekit==1.1.18
+livekit==1.2.1
 livekit-api==1.2.1
 mss==10.2.0
+# Screen share encoded by an NVIDIA card (ffmpeg h264_nvenc); without it the processor encodes.
+av==19.0.2
 # Fast screen capture (Desktop Duplication); without it the client falls back to mss at ~20-30 fps.
 dxcam>=0.0.5; sys_platform == "win32"

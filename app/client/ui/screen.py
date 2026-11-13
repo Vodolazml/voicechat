@@ -673,8 +673,11 @@ class ScreenCapturer:
                 return
             interval = 1.0 / limit
             self._send_due = now + interval if self._send_due < now - interval else self._send_due + interval
-        # BGRA memory order: no colour conversion on our side, WebRTC converts straight to I420.
-        source.capture_frame(rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.BGRA, data))
+        if hasattr(source, "capture_bgra"):  # the graphics card encodes (NvencPipe): no extra copy
+            source.capture_bgra(data)
+        else:
+            # BGRA memory order: no colour conversion on our side, WebRTC converts straight to I420.
+            source.capture_frame(rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.BGRA, data))
         self._sent.tick()
         now = time.perf_counter()
         if self.preview is not None and now - last_preview[0] >= 1.0 / self.PREVIEW_FPS:

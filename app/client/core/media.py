@@ -29,15 +29,23 @@ def camera_key(user_id: int) -> int:
 
 
 # --- sending video -------------------------------------------------------------------------------
-_HARDWARE_FAILED: set[str] = set()  # encoders that failed in this run: not tried again until restart
+_CARD_FAILED = threading.Event()  # the card's encoder failed in this run: the processor until restart
 
 
-def _default_encoder() -> str:
-    """NVENC when an NVIDIA driver with its video encoder is installed (Windows), otherwise WebRTC's choice."""
-    if os.name != "nt" or "NVENC" in _HARDWARE_FAILED:
-        return ""
-    system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
-    return "NVENC" if os.path.exists(os.path.join(system, "nvEncodeAPI64.dll")) else ""
+def _card_encoder_usable() -> bool:
+    """Encode screen shares on an NVIDIA card (NVENC) when one is there and works. VOICECHAT_VIDEO_ENCODER=
+    SOFTWARE (or any other value) keeps the processor."""
+    if _CARD_FAILED.is_set() or os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper() not in ("", "NVENC"):
+        return False
+    if os.name == "nt":
+        system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+        if not os.path.exists(os.path.join(system, "nvEncodeAPI64.dll")):
+            return False
+    try:
+        from . import nvenc
+    except Exception:
+        return False
+    return nvenc.available()
 
 
 # If the encoder still cannot keep up, fewer frames are handed to it: it then encodes every frame it gets
@@ -648,7 +656,7 @@ class MediaSession:
             if self._video_readers.get(user_id) is token:
                 del self._video_readers[user_id]
 
-    async def _start_screen(self, capturer) -> None:
+    async def _start_screen(self, capturer, allow_card: bool = True) -> None:
         from livekit import rtc
 
         room = self._room
@@ -656,53 +664,78 @@ class MediaSession:
             raise RuntimeError("not connected")
         if self._screen is not None:
             await self._stop_screen()
-        source = rtc.VideoSource(capturer.width, capturer.height, is_screencast=True)
-        track = rtc.LocalVideoTrack.create_video_track("screen", source)
+        pipe = None
+        if allow_card and await asyncio.to_thread(_card_encoder_usable):
+            from . import nvenc
+
+            # The graphics card encodes; LiveKit only sends the finished H.264.
+            encoded = rtc.EncodedVideoSource(capturer.width, capturer.height)
+            loop = asyncio.get_running_loop()
+            pipe = nvenc.NvencPipe(encoded, capturer.width, capturer.height, capturer.fps, capturer.max_bitrate,
+                                   on_failure=lambda reason: loop.call_soon_threadsafe(
+                                       self._spawn, self._card_failed(capturer, reason)))
+            track = rtc.LocalVideoTrack.create_video_track("screen", encoded)
+            source = pipe
+        else:
+            source = rtc.VideoSource(capturer.width, capturer.height, is_screencast=True)
+            track = rtc.LocalVideoTrack.create_video_track("screen", source)
         options = rtc.TrackPublishOptions(
             source=rtc.TrackSource.SOURCE_SCREENSHARE,
             video_encoding=rtc.VideoEncoding(max_bitrate=capturer.max_bitrate, max_framerate=capturer.fps),
             # Trial switch: send extra lower layers so viewers can take a lighter one. Off until measured.
-            simulcast=os.environ.get("VOICECHAT_SCREEN_SIMULCAST") == "1")
-        try:
-            # H.264 keeps up better than VP8 on big screens (about 52 vs 44 fps at 1440p -> 1080p in tests).
-            options.video_codec = rtc.VideoCodec.H264
-        except Exception:
-            pass
-        # NVIDIA cards have a separate video encoder block: it barely touches the game, while the software
-        # encoder fought CS2 for the processor and fell to 13-50 fps at 1440p60 (2026-11-13).
-        backend = os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper() or _default_encoder()
-        if backend:
-            try:
-                from livekit.rtc._proto import room_pb2
+            simulcast=pipe is None and os.environ.get("VOICECHAT_SCREEN_SIMULCAST") == "1")
+        # H.264 keeps up better than VP8 on big screens (about 52 vs 44 fps at 1440p -> 1080p in tests).
+        options.video_codec = rtc.VideoCodec.H264
+        from livekit.rtc._proto import room_pb2
 
-                options.video_encoder = getattr(room_pb2, f"ENCODER_BACKEND_{backend}")
+        if pipe is not None:
+            options.video_encoder = room_pb2.ENCODER_BACKEND_PRE_ENCODED
+        else:
+            backend = os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper()  # trials: SOFTWARE, HARDWARE ...
+            if backend:
+                try:
+                    options.video_encoder = getattr(room_pb2, f"ENCODER_BACKEND_{backend}")
+                except Exception:
+                    logger.warning("Unknown video encoder backend %s", backend)
+            try:
+                # Keep the frame rate, let WebRTC lower the resolution while the processor cannot keep up (a
+                # game next to a 1440p60 share took the software encoder down to 8 fps, 2026-11-13) and raise
+                # it again when it can. Keeping both made the encoder fall behind: a slide show for viewers.
+                options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE)
             except Exception:
-                logger.warning("Unknown video encoder backend %s", backend)
-        try:
-            # Keep the frame rate, let WebRTC lower the resolution while the processor cannot keep up (a game
-            # running next to a 1440p60 share took the software encoder down to 8 fps, 2026-11-13) and raise it
-            # again when it can. Keeping both made the encoder fall behind and the viewer got a slide show.
-            options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE)
-        except Exception:
-            pass
+                pass
         try:
             publication = await room.local_participant.publish_track(track, options)
         except Exception:
-            if not backend:
+            if pipe is None:
                 raise
-            logger.warning("Publishing the screen with the %s encoder failed: trying the standard one", backend,
-                           exc_info=True)
-            _HARDWARE_FAILED.add(backend)
-            options.video_encoder = 0  # ENCODER_BACKEND_AUTO
-            publication = await room.local_participant.publish_track(track, options)
+            logger.warning("Publishing the card-encoded screen failed: using the processor", exc_info=True)
+            pipe.close()
+            _CARD_FAILED.set()
+            await self._start_screen(capturer, allow_card=False)
+            return
+        capturer.pipe = pipe
         self._use_local_key_index(key_index(self.outgoing_key()[0]))
         task = asyncio.create_task(capturer.run(source))
-        stats = asyncio.create_task(self._screen_stats(track, capturer, backend))
+        stats = asyncio.create_task(self._screen_stats(track, capturer))
         task.add_done_callback(lambda _: stats.cancel())
+        if pipe is not None:
+            task.add_done_callback(lambda _: pipe.close())
         self._screen = (publication, task, capturer)
         self._report_streams()
 
-    async def _screen_stats(self, track, capturer, backend: str = "") -> None:
+    async def _card_failed(self, capturer, reason: str) -> None:
+        """The card's encoder stopped mid-share: carry on with the processor, without asking anyone."""
+        _CARD_FAILED.set()
+        if self._screen is None or self._screen[2] is not capturer:
+            return
+        logger.warning("Screen share: the card encoder failed (%s), switching to the processor", reason)
+        try:
+            await self._start_screen(capturer, allow_card=False)
+        except Exception:
+            logger.warning("Screen share could not restart on the processor", exc_info=True)
+
+    async def _screen_stats(self, track, capturer) -> None:
         """Once a second: what the encoder really sends. Frame rates are counted from the encoded and sent
         frame counters (WebRTC's own frames_per_second field is often left at 0)."""
         reasons = {0: "", 1: "cpu", 2: "bandwidth", 3: "other"}
@@ -710,7 +743,6 @@ class MediaSession:
         last_bytes: tuple[float, int] | None = None
         misses = 0
         logged = 0.0
-        started, checked = time.monotonic(), False
         while True:
             await asyncio.sleep(1.0)
             try:
@@ -733,13 +765,6 @@ class MediaSession:
                     encoded_fps = max(0, out.frames_encoded - last[1]) / (now - last[0])
                     sent_fps = max(0, out.frames_sent - last[2]) / (now - last[0])
                 last = (now, out.frames_encoded, out.frames_sent)
-                if backend and not checked and now - started > 8:
-                    checked = True
-                    if out.frames_encoded == 0:
-                        # The card's encoder took the track but produced nothing: use the standard one next time.
-                        logger.warning("The %s encoder produced no frames in 8 s (%s)", backend,
-                                       out.encoder_implementation)
-                        _HARDWARE_FAILED.add(backend)
                 capturer.encoder = {
                     "sent_width": out.frame_width, "sent_height": out.frame_height,
                     "encoded_fps": round(encoded_fps, 1), "network_fps": round(sent_fps, 1),
@@ -749,8 +774,14 @@ class MediaSession:
                     "kbps": int(8 * max(0, sent.bytes_sent - last_bytes[1]) / (now - last_bytes[0]) / 1000)
                     if last_bytes and now > last_bytes[0] else 0,
                 }
+                pipe = getattr(capturer, "pipe", None)
+                if pipe is not None:  # the card encodes: WebRTC only passes our H.264 on
+                    encoded_fps = pipe.fps_now()
+                    capturer.encoder.update(encoder="NVENC (видеокарта)", encoded_fps=round(encoded_fps, 1),
+                                            sent_width=capturer.width, sent_height=capturer.height)
                 last_bytes = (now, sent.bytes_sent)
-                _adapt_frame_rate(capturer, encoded_fps, now)
+                if pipe is None:
+                    _adapt_frame_rate(capturer, encoded_fps, now)
                 if now - logged >= 15:
                     logged = now
                     logger.info("Screen share: %s", {**capturer.stats(), "preview": capturer.preview is not None})

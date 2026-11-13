@@ -67,6 +67,17 @@ with open('build/version_info.py', 'w', encoding='utf-8') as _f:
 )
 """)
 binaries += collect_dynamic_libs('pyrnnoise', destdir='pyrnnoise')
+# PyAV with its ffmpeg: screen shares encoded by an NVIDIA card (h264_nvenc). Its DLLs live next to the
+# package in "av.libs" (delvewheel); take them all, avcodec needs every one to load.
+try:
+    import glob as _glob
+    import av as _av
+    tmp_ret = collect_all('av')
+    datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+    _av_libs = os.path.join(os.path.dirname(os.path.dirname(_av.__file__)), 'av.libs')
+    binaries += [(path, 'av.libs') for path in _glob.glob(os.path.join(_av_libs, '*.dll'))]
+except Exception as _exc:
+    print('PyAV not bundled:', _exc)
 hiddenimports += ['mss', 'websockets', 'websockets.asyncio.client', 'app.client.ui.app']
 try:
     tmp_ret = collect_all('dxcam')  # Windows only; optional

@@ -28,6 +28,18 @@ def camera_key(user_id: int) -> int:
     return CAMERA_KEY_OFFSET + user_id
 
 
+# --- sending video -------------------------------------------------------------------------------
+_HARDWARE_FAILED: set[str] = set()  # encoders that failed in this run: not tried again until restart
+
+
+def _default_encoder() -> str:
+    """NVENC when an NVIDIA driver with its video encoder is installed (Windows), otherwise WebRTC's choice."""
+    if os.name != "nt" or "NVENC" in _HARDWARE_FAILED:
+        return ""
+    system = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    return "NVENC" if os.path.exists(os.path.join(system, "nvEncodeAPI64.dll")) else ""
+
+
 # --- receiving video ----------------------------------------------------------------------------
 # The screen tile is repainted at most 30 times a second, so turning more frames than that into pictures
 # is wasted work. Each 2560x1440 picture is ~15 MB copied while Python is busy; at 60 fps that alone took
@@ -605,7 +617,9 @@ class MediaSession:
             options.video_codec = rtc.VideoCodec.H264
         except Exception:
             pass
-        backend = os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper()  # e.g. NVENC or HARDWARE, for trials
+        # NVIDIA cards have a separate video encoder block: it barely touches the game, while the software
+        # encoder fought CS2 for the processor and fell to 13-50 fps at 1440p60 (2026-11-13).
+        backend = os.environ.get("VOICECHAT_VIDEO_ENCODER", "").upper() or _default_encoder()
         if backend:
             try:
                 from livekit.rtc._proto import room_pb2
@@ -619,15 +633,24 @@ class MediaSession:
             options.degradation_preference = int(rtc.DegradationPreference.MAINTAIN_FRAMERATE_AND_RESOLUTION)
         except Exception:
             pass
-        publication = await room.local_participant.publish_track(track, options)
+        try:
+            publication = await room.local_participant.publish_track(track, options)
+        except Exception:
+            if not backend:
+                raise
+            logger.warning("Publishing the screen with the %s encoder failed: trying the standard one", backend,
+                           exc_info=True)
+            _HARDWARE_FAILED.add(backend)
+            options.video_encoder = 0  # ENCODER_BACKEND_AUTO
+            publication = await room.local_participant.publish_track(track, options)
         self._use_local_key_index(key_index(self.outgoing_key()[0]))
         task = asyncio.create_task(capturer.run(source))
-        stats = asyncio.create_task(self._screen_stats(track, capturer))
+        stats = asyncio.create_task(self._screen_stats(track, capturer, backend))
         task.add_done_callback(lambda _: stats.cancel())
         self._screen = (publication, task, capturer)
         self._report_streams()
 
-    async def _screen_stats(self, track, capturer) -> None:
+    async def _screen_stats(self, track, capturer, backend: str = "") -> None:
         """Once a second: what the encoder really sends. Frame rates are counted from the encoded and sent
         frame counters (WebRTC's own frames_per_second field is often left at 0)."""
         reasons = {0: "", 1: "cpu", 2: "bandwidth", 3: "other"}
@@ -635,6 +658,7 @@ class MediaSession:
         last_bytes: tuple[float, int] | None = None
         misses = 0
         logged = 0.0
+        started, checked = time.monotonic(), False
         while True:
             await asyncio.sleep(1.0)
             try:
@@ -657,6 +681,13 @@ class MediaSession:
                     encoded_fps = max(0, out.frames_encoded - last[1]) / (now - last[0])
                     sent_fps = max(0, out.frames_sent - last[2]) / (now - last[0])
                 last = (now, out.frames_encoded, out.frames_sent)
+                if backend and not checked and now - started > 8:
+                    checked = True
+                    if out.frames_encoded == 0:
+                        # The card's encoder took the track but produced nothing: use the standard one next time.
+                        logger.warning("The %s encoder produced no frames in 8 s (%s)", backend,
+                                       out.encoder_implementation)
+                        _HARDWARE_FAILED.add(backend)
                 capturer.encoder = {
                     "sent_width": out.frame_width, "sent_height": out.frame_height,
                     "encoded_fps": round(encoded_fps, 1), "network_fps": round(sent_fps, 1),

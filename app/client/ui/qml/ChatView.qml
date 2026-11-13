@@ -221,7 +221,7 @@ Rectangle {
             border.color: input.activeFocus ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.6) : "transparent"
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 6
-                IconButton { glyph: "add"; tip: "Отправить файл (до 50 МБ, любой тип). Можно перетащить файл в чат"; enabled: backend.transferProgress < 0; onClicked: backend.attachFile() }
+                IconButton { glyph: "add"; tip: "Отправить файл (до 50 МБ, любой тип). Можно перетащить файл в чат или вставить Ctrl+V"; enabled: backend.transferProgress < 0; onClicked: backend.attachFile() }
                 ScrollView {
                     Layout.fillWidth: true; Layout.fillHeight: true
                     TextArea {
@@ -239,6 +239,8 @@ Rectangle {
                             root.send()
                         }
                         Keys.onEnterPressed: root.send()
+                        // Ctrl+V with a screenshot or files copied in Explorer sends them; plain text pastes as usual.
+                        Keys.onPressed: (event) => { if (event.matches(StandardKey.Paste) && backend.pasteFromClipboard()) event.accepted = true }
                         onActiveFocusChanged: if (activeFocus) backend.markChatRead()
                     }
                 }

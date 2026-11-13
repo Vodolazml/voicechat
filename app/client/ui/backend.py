@@ -13,7 +13,9 @@ import logging
 import os
 import platform as py_platform
 import re
+import shutil
 import sys
+import tempfile
 import time
 import wave
 import zipfile
@@ -1833,7 +1835,40 @@ class Backend(QObject):
             if path and Path(path).is_file():
                 self._send_file(path)
 
-    def _send_file(self, path: str) -> None:
+    @Slot(result=bool)
+    def pasteFromClipboard(self) -> bool:
+        """Ctrl+V in the chat: files copied in Explorer are sent as they are, a picture (a screenshot from
+        Win+Shift+S or PrtSc, an image copied in a browser) is sent as a PNG. Returns False for plain text,
+        which the input field then pastes as usual."""
+        from PySide6.QtGui import QGuiApplication
+
+        if not self._chat_channel:
+            return False
+        mime = QGuiApplication.clipboard().mimeData()
+        if mime is None:
+            return False
+        if mime.hasUrls():
+            paths = [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+            paths = [path for path in paths if path and Path(path).is_file()]
+            if paths:
+                for path in paths:
+                    self._send_file(path)
+                return True
+        if mime.hasImage():
+            image = QGuiApplication.clipboard().image()
+            if image.isNull():
+                return False
+            folder = Path(tempfile.mkdtemp(prefix="voicechat-paste-"))
+            path = folder / time.strftime("screenshot-%Y%m%d-%H%M%S.png")
+            if not image.save(str(path), "PNG"):
+                shutil.rmtree(folder, ignore_errors=True)
+                self.toast("error", "Не удалось подготовить картинку из буфера обмена")
+                return True
+            self._send_file(str(path), cleanup=folder)
+            return True
+        return False
+
+    def _send_file(self, path: str, cleanup: Path | None = None) -> None:
         channel_id = self._chat_channel
         if not channel_id:
             return
@@ -1852,11 +1887,17 @@ class Backend(QObject):
                                               lambda done: self._ui(lambda: self._set_transfer(done)))
             return self.api.send_message(channel_id, "", attachment["id"])
 
+        def tidy():
+            if cleanup is not None:
+                shutil.rmtree(cleanup, ignore_errors=True)
+
         def done(message):
+            tidy()
             self._set_transfer(-1)
             self._on_message(message)
 
         def failed(exc):
+            tidy()
             self._set_transfer(-1)
             self.toast("error", f"Файл не отправлен: {exc}")
         self._bg(work, done, failed)

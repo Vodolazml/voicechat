@@ -6,6 +6,7 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -267,3 +268,41 @@ def test_voice_prompts_load_as_whole_frames(tmp_path):
     assert pcm and len(pcm) % FRAME_BYTES == 0
     assert abs(len(pcm) // 2 - 48000) < 600  # one second, resampled to 48 kHz mono
     assert load_prompt(tmp_path / "missing.wav") is None
+
+
+def test_ctrl_v_sends_screenshots_and_copied_files(qt_app, tmp_path):
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtGui import QColor, QGuiApplication, QImage
+
+    sent = []
+
+    def send_file(path, cleanup=None):
+        sent.append((Path(path).name, Path(path).read_bytes()[:8], cleanup))
+    fake = SimpleNamespace(_chat_channel=7, _send_file=send_file, toast=lambda *a: None)
+    clipboard = QGuiApplication.clipboard()
+
+    clipboard.setText("just text")
+    assert backend_module.Backend.pasteFromClipboard(fake) is False and not sent
+
+    image = QImage(4, 3, QImage.Format_RGB32)
+    image.fill(QColor("red"))
+    clipboard.setImage(image)
+    assert backend_module.Backend.pasteFromClipboard(fake) is True
+    name, head, cleanup = sent.pop()
+    assert name.startswith("screenshot-") and name.endswith(".png") and head == b"\x89PNG\r\n\x1a\n"
+    assert cleanup is not None and cleanup.is_dir()
+    import shutil
+    shutil.rmtree(cleanup)
+
+    copied = tmp_path / "отчёт.pdf"
+    copied.write_bytes(b"%PDF-1.7")
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(copied))])
+    clipboard.setMimeData(mime)
+    assert backend_module.Backend.pasteFromClipboard(fake) is True
+    assert sent.pop()[:2] == ("отчёт.pdf", b"%PDF-1.7")
+
+    fake._chat_channel = 0
+    assert backend_module.Backend.pasteFromClipboard(fake) is False

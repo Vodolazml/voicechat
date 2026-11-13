@@ -389,13 +389,14 @@ def test_raw_mic_peak_is_logged():
     assert -21 < engine.stats()["raw_peak_db"] < -19
 
 
-def test_perfectly_silent_mic_is_reopened_once(monkeypatch):
+def test_perfectly_silent_mic_is_reopened_a_few_times_not_forever(monkeypatch):
     from types import SimpleNamespace
 
     from app.client.core import audio
     from app.client.core.audio import AudioEngine
 
     monkeypatch.setattr(audio, "SILENT_SECONDS", 0.5)
+    monkeypatch.setattr(audio, "SILENT_REOPENS", 2)
     monkeypatch.setattr(audio, "_system_signature", lambda: None)
     problems = []
     engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False),
@@ -410,9 +411,9 @@ def test_perfectly_silent_mic_is_reopened_once(monkeypatch):
     threading.Thread(target=feed, daemon=True).start()
     engine._start_monitor()
     try:
-        assert wait_for(lambda: "mic_silent" in problems, timeout=8)
+        assert wait_for(lambda: problems.count("mic_silent") == 2, timeout=10), "tried again while still silent"
         time.sleep(3.2)
-        assert problems.count("mic_silent") == 1, "reopened once, not over and over"
+        assert problems.count("mic_silent") == 2, "a few tries, not over and over"
     finally:
         feeding.set()
         engine._monitor_stop.set()

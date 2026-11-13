@@ -65,7 +65,7 @@ def _paced_stream_class():
             super().__init__(track, **kwargs)
 
         async def _run(self) -> None:
-            last = float("-inf")  # the first frame is always shown
+            due = float("-inf")  # the first frame is always shown
             while True:
                 event = await self._ffi_queue.wait_for(self._is_event)
                 video_event = event.video_stream_event
@@ -73,10 +73,12 @@ def _paced_stream_class():
                     received = video_event.frame_received
                     self.decoded += 1
                     now = time.perf_counter()
-                    if now - last < self.min_interval:
+                    if now < due:
                         FfiHandle(received.buffer.handle.id).dispose()
                         continue
-                    last = now
+                    # Schedule from the previous slot, not from this frame: with 35 fps coming in, "33 ms since
+                    # the last shown frame" dropped every other frame and showed 17 fps (2026-11-13 report).
+                    due = now + self.min_interval if due < now - self.min_interval else due + self.min_interval
                     self.shown += 1
                     self._queue.put(VideoFrameEvent(frame=VideoFrame._from_owned_info(received.buffer),
                                                     timestamp_us=received.timestamp_us,

@@ -191,6 +191,7 @@ class _Rechunker:
 
 SILENT_PEAK = 3          # raw int16 peak at or under this is "nothing at all" (about -80 dBFS)
 SILENT_SECONDS = 8.0
+SILENT_REOPENS = 4       # reopen tries per silent episode, SILENT_SECONDS apart
 
 
 class AudioEngine:
@@ -372,23 +373,26 @@ class AudioEngine:
             signature = _system_signature()
             pending = None  # a change must look the same on two checks in a row (Windows settles first)
             last_calls, quiet_since = self._callbacks, None
-            silent_since, silence_handled = None, False
+            silent_since, silence_reopens = None, 0
             while not stop.wait(1.5):
                 if not self._running:
-                    silent_since, silence_handled = None, False
+                    silent_since, silence_reopens = None, 0
                     continue
                 # A live microphone always hears some noise (at least a few units of the 16-bit range). A
                 # stream that delivers perfect silence for long is a muted or "stuck" device: Windows mute,
-                # a mic key on the laptop or headset, another app holding it, or a driver hiccup. Reopen it
-                # once; if it stays silent, tell the person what to check.
+                # a mic key on the laptop or headset, another app holding it, or a driver hiccup. Reopen it,
+                # and again every SILENT_SECONDS while it stays silent (a single reopen was not always enough
+                # on 2026-11-13, a restart of the app was), up to SILENT_REOPENS times.
                 window, self._window_peak = self._window_peak, 0
                 if window > SILENT_PEAK or self.muted:
-                    silent_since, silence_handled = None, False
+                    silent_since, silence_reopens = None, 0
                 elif silent_since is None:
                     silent_since = time.monotonic()
-                elif not silence_handled and time.monotonic() - silent_since > SILENT_SECONDS:
-                    silence_handled = True
-                    logger.warning("The microphone delivers perfect silence (raw peak %d): reopening", window)
+                elif (silence_reopens < SILENT_REOPENS
+                      and time.monotonic() - silent_since > SILENT_SECONDS * (silence_reopens + 1)):
+                    silence_reopens += 1
+                    logger.warning("The microphone delivers perfect silence (raw peak %d): reopening (%d)", window,
+                                   silence_reopens)
                     self.on_problem("mic_silent")
                 now_signature = _system_signature()
                 if signature is None:

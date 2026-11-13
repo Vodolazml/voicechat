@@ -18,7 +18,7 @@ def _event(i, kind="frame"):
     return types.SimpleNamespace(video_stream_event=ve)
 
 
-def test_paced_stream_releases_frames_between(monkeypatch):
+def _run_paced(monkeypatch, times):
     import livekit.rtc._ffi_client as ffi
     import livekit.rtc.video_frame as vf
 
@@ -35,13 +35,13 @@ def test_paced_stream_releases_frames_between(monkeypatch):
     monkeypatch.setattr(vf.VideoFrame, "_from_owned_info", staticmethod(lambda info: built.append(info.handle.id) or info))
     cls = media._paced_stream_class()
 
-    events = [_event(i) for i in range(10)] + [_event(0, "eos")]
+    events = [_event(i) for i in range(len(times))] + [_event(0, "eos")]
 
     class FakeQueue:
         async def wait_for(self, _):
             return events.pop(0)
 
-    clock = iter([0.0, 0.01, 0.02, 0.04, 0.05, 0.07, 0.08, 0.10, 0.11, 0.2])
+    clock = iter(times)
     monkeypatch.setattr(media.time, "perf_counter", lambda: next(clock))
     monkeypatch.setattr(ffi.FfiClient, "instance", types.SimpleNamespace(queue=types.SimpleNamespace(unsubscribe=lambda q: None)), raising=False)
 
@@ -53,8 +53,18 @@ def test_paced_stream_releases_frames_between(monkeypatch):
     stream._queue = types.SimpleNamespace(put=put.append)
     stream._is_event = lambda e: True
     asyncio.run(stream._run())
+    return stream, built, disposed, put
 
+
+def test_paced_stream_releases_frames_between(monkeypatch):
+    stream, built, disposed, put = _run_paced(monkeypatch, [0.0, 0.01, 0.02, 0.04, 0.05, 0.07, 0.08, 0.105, 0.11, 0.2])
     assert stream.decoded == 10
-    assert built == [0, 3, 6, 9]  # 30 fps: one frame per ~33 ms
+    assert built == [0, 3, 5, 7, 9]  # 30 fps: one frame per ~33 ms
     assert sorted(disposed + built) == list(range(10))  # every frame released exactly once
-    assert len(put) == 4
+    assert len(put) == 5
+
+
+def test_paced_stream_keeps_30fps_when_35_arrive(monkeypatch):
+    times = [i / 35 for i in range(350)]  # 10 s at 35 fps
+    stream, built, disposed, put = _run_paced(monkeypatch, times)
+    assert 290 <= len(built) <= 302

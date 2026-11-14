@@ -121,6 +121,17 @@ def test_webhook_for_old_room_does_not_end_new_call(client):
     assert [(s["user_id"], s["channel_id"]) for s in states] == [(2, voice[1])]
 
 
+def test_webhook_for_connection_replaced_after_network_blip_does_not_end_call(client):
+    admin, friend, space, voice = setup_admin_and_friend(client)
+    client.post(f"/channels/{voice[0]}/connect", headers=friend, json={})
+    # The app reconnected with the same identity; LiveKit closes the old connection as a duplicate.
+    body, headers = signed_webhook({"event": "participant_left", "room": {"name": f"channel-{voice[0]}"},
+                                    "participant": {"identity": "u2", "disconnect_reason": "DUPLICATE_IDENTITY"}})
+    assert client.post("/livekit/webhook", content=body, headers=headers).status_code == 200
+    states = client.get(f"/spaces/{space}/voice", headers=admin).json()
+    assert [(s["user_id"], s["channel_id"]) for s in states] == [(2, voice[0])]
+
+
 def test_webhook_for_older_connection_does_not_end_rejoined_call(client):
     import time
 

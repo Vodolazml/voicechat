@@ -148,8 +148,10 @@ class CallController:
         elif kind == "e2ee.updated" and event.get("channel_id") == channel_id:
             self._submit(lambda: self._sync_keys(channel_id), "keys")
         elif kind == "connected":
-            # Event stream reconnected: we may have missed joins; refresh keys.
+            # Event stream reconnected: we may have missed joins; refresh keys, and check the server
+            # still has us in the channel.
             self._submit(lambda: self._sync_keys(channel_id), "keys")
+            self._submit(lambda: self._confirm_presence(channel_id), "presence")
 
     def shutdown(self, timeout: float = 5.0) -> None:
         """App exit: leave the channel (so friends see it at once), stop audio, stop threads."""
@@ -300,6 +302,17 @@ class CallController:
         logger.info("Fetching keys again: cannot decrypt user %s in channel %s", user_id, channel_id)
         self._submit(lambda: self._sync_keys(channel_id), "keys")
 
+    def _confirm_presence(self, channel_id: int | None) -> None:
+        if channel_id is None or self.channel_id != channel_id:
+            return
+        try:
+            self.api.update_voice(channel_id, self.muted, self.deafened, False)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                self._rejoin_after_drop(channel_id)
+            else:
+                logger.info("Presence check failed: %s", exc)
+
     def _rejoin_after_drop(self, channel_id: int) -> None:
         if self.channel_id != channel_id:
             return
@@ -396,7 +409,14 @@ class CallController:
         mapped = {"connected": CONNECTED, "reconnecting": RECONNECTING, "connecting": CONNECTING,
                   UNAVAILABLE: UNAVAILABLE}.get(state)
         if mapped and mapped != self.state:
+            was = self.state
             self._set_state(mapped)
+            if mapped == CONNECTED and was == RECONNECTING:
+                # The media connection came back after a network blip. Tell the server we are here now,
+                # not at the next heartbeat: it may have dropped us meanwhile, and friends would see us
+                # gone while still hearing us.
+                channel_id = self.channel_id
+                self._submit(lambda: self._confirm_presence(channel_id), "presence")
 
     def _on_speakers(self, speakers: set[int]) -> None:
         if self.audio.transmitting and not self.muted:

@@ -518,6 +518,13 @@ async def livekit_webhook(request: Request) -> dict[str, str]:
     if user_id is None or not media_sessions.presence_identity(identity) or not room.startswith("channel-"):
         return {"status": "ignored"}
     channel_id = int(room.removeprefix("channel-"))
+    # After a network blip the app reconnects with the same identity and LiveKit closes the old
+    # connection as a duplicate. The person never left: dropping them made friends see "left" while
+    # still hearing them (2026-11-14).
+    reason = int(getattr(event.participant, "disconnect_reason", 0) or 0)
+    if reason == livekit_api.DisconnectReason.DUPLICATE_IDENTITY:
+        logger.info("Ignoring LiveKit leave of a replaced connection: user %s, channel %s", user_id, channel_id)
+        return {"status": "ignored"}
     connection_joined = int(getattr(event.participant, "joined_at", 0) or 0)
     await asyncio.to_thread(_drop_state_if_in, channel_id, user_id, connection_joined)
     return {"status": "ok"}

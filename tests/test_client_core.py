@@ -271,6 +271,27 @@ def test_heartbeat_rejoin_never_returns_to_a_channel_we_left():
     assert [args[0] for name, args in api.calls if name == "connect"] == [11]
 
 
+def test_media_reconnect_confirms_presence_and_rejoins_if_dropped():
+    call, api, states, _ = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED and call.channel_id == 10)
+
+    class Gone(Exception):
+        status_code = 404
+
+    def update_voice(*args):
+        api.calls.append(("update_voice", args))
+        raise Gone()
+
+    api.update_voice = update_voice
+    api.calls.clear()
+    # A network blip: LiveKit reconnects, and meanwhile the server dropped us.
+    call._on_media_state("reconnecting")
+    call._on_media_state("connected")
+    assert wait_for(lambda: any(name == "connect" for name, _ in api.calls))
+    assert [args[0] for name, args in api.calls if name == "connect"] == [10]
+
+
 def test_audio_stats_count_and_reset():
     from types import SimpleNamespace
 

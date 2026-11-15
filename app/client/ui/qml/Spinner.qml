@@ -17,6 +17,8 @@ Item {
             ctx.arc(width / 2, height / 2, width / 2 - ctx.lineWidth, 0, Math.PI * 1.4);
             ctx.stroke();
         }
-        RotationAnimation on rotation { from: 0; to: 360; duration: 800; loops: Animation.Infinite; running: root.visible }
+        // Not while the app is in the background: an endless rotation makes Qt redraw the window every frame.
+        RotationAnimation on rotation { from: 0; to: 360; duration: 800; loops: Animation.Infinite
+                                        running: root.visible && Qt.application.state === Qt.ApplicationActive }
     }
 }

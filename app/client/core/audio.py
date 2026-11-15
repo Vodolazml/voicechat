@@ -231,6 +231,7 @@ class AudioEngine:
         self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
         self._window_peak = 0        # loudest raw sample since the device watcher last looked
         self._window_out = 0         # loudest processed sample since the device watcher last looked
+        self._window_apm = 0         # loudest sample after WebRTC processing, same window
         self._heard_since_open = False  # the mic has delivered real sound (not just a click) since opening
         self._sound_blocks = 0
         self._monitor_stop = threading.Event()
@@ -408,6 +409,7 @@ class AudioEngine:
             last_calls, quiet_since = self._callbacks, None
             silent_since, silence_reopens = None, 0
             dead_since = None
+            rebuilt_check = 0  # checks left to report whether the voice came back after a rebuild
             while not stop.wait(1.5):
                 if not self._running:
                     silent_since, silence_reopens = None, 0
@@ -421,15 +423,25 @@ class AudioEngine:
                 # hint whenever someone was quiet, and every reopen cut their mic for a moment.
                 raw_window, self._window_peak = self._window_peak, 0
                 out_window, self._window_out = self._window_out, 0
+                apm_window, self._window_apm = self._window_apm, 0
+                if rebuilt_check:
+                    rebuilt_check -= 1
+                    if rebuilt_check == 0 or out_window > 1:
+                        logger.info("After recreating the processing: raw peak %d, after WebRTC %d, out %d",
+                                    raw_window, apm_window, out_window)
+                        rebuilt_check = 0
                 # The mic hears sound but our processing turns it into zeros: rebuild the processing.
                 if not self.muted and raw_window > 300 and out_window <= 1:
                     if dead_since is None:
                         dead_since = time.monotonic()
                     elif time.monotonic() - dead_since > PROCESSED_DEAD_SECONDS:
-                        logger.warning("The mic hears sound (raw peak %d) but processing outputs silence: "
-                                       "recreating the processing", raw_window)
+                        # Which stage zeroes it: WebRTC (echo/noise/gain) or RNNoise after it.
+                        logger.warning("The mic hears sound (raw peak %d) but processing outputs silence "
+                                       "(after WebRTC %d, after RNNoise %d): recreating the processing",
+                                       raw_window, apm_window, out_window)
                         self._new_processing()
                         dead_since = None
+                        rebuilt_check = 4
                 else:
                     dead_since = None
                 if self._heard_since_open or self.muted:
@@ -558,6 +570,8 @@ class AudioEngine:
         peak = _peak(frame)
         if peak > self._apm_peak:
             self._apm_peak = peak
+        if peak > self._window_apm:
+            self._window_apm = peak
         samples = to_float(frame)
         probability = None
         rnnoise = self._rnnoise

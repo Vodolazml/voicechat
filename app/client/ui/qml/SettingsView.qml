@@ -22,11 +22,13 @@ Rectangle {
         {icon: "bug", title: "О программе"}
     ]
 
+    // The mic test (level meter) keeps the microphone and its processing running: only while the voice
+    // tab is shown and our window is in front, not behind a game.
+    readonly property bool micTestWanted: visible && tab === 0 && Qt.application.state === Qt.ApplicationActive
+    onMicTestWantedChanged: backend.setMicTest(micTestWanted)
     onVisibleChanged: {
-        backend.setMicTest(visible && tab === 0)
         if (visible) { backend.refreshDevices(); backend.loadSessions() }
     }
-    onTabChanged: backend.setMicTest(visible && tab === 0)
     Keys.onEscapePressed: root.closed()
 
     // Settings cover the main window; without this, clicks on empty places fell through to the channel

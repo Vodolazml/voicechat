@@ -72,7 +72,7 @@ Rectangle {
                     Text { Layout.topMargin: 4; text: "Добро пожаловать в #" + backend.chatChannelName; color: Theme.text; font.family: Theme.font; font.pixelSize: root.compactHeader ? 16 : 22; font.weight: Font.Bold; elide: Text.ElideRight; Layout.fillWidth: true }
                     Text { text: "Это начало канала. Сообщения видят все, у кого есть к нему доступ."; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13; wrapMode: Text.WordWrap; Layout.fillWidth: true }
                 }
-                Spinner { visible: backend.hasMoreMessages; anchors.centerIn: parent; color: Theme.muted; size: 18 }
+                Spinner { visible: backend.hasMoreMessages && messages.atYBeginning; anchors.centerIn: parent; color: Theme.muted; size: 18 }
             }
 
             delegate: Column {

@@ -520,7 +520,7 @@ def test_processing_that_turns_speech_into_zeros_is_rebuilt(monkeypatch):
     assert problems == [], "a live mic with broken processing is not a stuck mic"
 
 
-def test_rnnoise_is_skipped_on_near_silence_and_reports_no_speech():
+def test_rnnoise_runs_on_every_frame_including_pauses():
     from app.client.core.audio import AudioEngine
 
     calls = []
@@ -533,9 +533,9 @@ def test_rnnoise_is_skipped_on_near_silence_and_reports_no_speech():
     engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False), on_frame=lambda f: None)
     engine._rnnoise = Counting()
     engine._process_frame(bytes(FRAME_BYTES))
-    assert calls == [], "near silence: RNNoise not run"
+    assert calls == [1], "RNNoise hears the pauses too: skipping them left it stale and words started rasping"
     engine._process_frame((np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes())
-    assert calls == [1]
+    assert calls == [1, 1]
 
 
 def test_mixer_spends_nothing_on_quiet_peers():
@@ -545,3 +545,55 @@ def test_mixer_spends_nothing_on_quiet_peers():
     for _ in range(10):
         mixer.put(2, SILENCE)
     assert all(mixer.mix() == SILENCE for _ in range(8))
+
+
+def _engine_sent(settings=None):
+    from app.client.core.audio import AudioEngine
+
+    sent = []
+    engine = AudioEngine(settings or AudioSettings(noise="off", echo_cancellation=False, auto_gain=True),
+                         on_frame=sent.append)
+    engine._apm = None
+    engine.gate.process = lambda samples, probability=None: True
+    engine.gate.level_db = -20.0
+    return engine, sent
+
+
+def _tone(amplitude: int) -> bytes:
+    t = np.arange(FRAME_SAMPLES)
+    return (amplitude * np.sin(2 * np.pi * 300 * t / 48000)).astype(np.int16).tobytes()
+
+
+def test_outgoing_voice_never_reaches_full_scale():
+    engine, sent = _engine_sent()
+    for _ in range(50):
+        engine._process_frame(_tone(32767))
+    first = engine.stats()
+    assert first["overload_frames"] == 50 and first["headroom_db"] < -3
+    assert first["sent_peak_db"] < -0.1, "even the first loud frame is soft-clipped, not cut at full scale"
+    for _ in range(250):
+        engine._process_frame(_tone(32767))
+    peaks = [int(np.abs(np.frombuffer(f, dtype=np.int16).astype(np.int32)).max()) for f in sent[50:]]
+    assert max(peaks) <= int(0.72 * 32767), "the limiter keeps peaks under -3 dBFS"
+    assert engine.stats()["sent_peak_db"] <= -2.5
+
+
+def test_quiet_mic_is_raised_slowly_towards_speech_level():
+    engine, sent = _engine_sent()
+    for _ in range(400):
+        engine._process_frame(_tone(1000))  # about -33 dBFS peak
+    late = np.abs(np.frombuffer(sent[-1], dtype=np.int16)).max()
+    assert late > 2500, "auto gain lifts a quiet voice"
+    engine2, sent2 = _engine_sent(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False))
+    for _ in range(50):
+        engine2._process_frame(_tone(1000))
+    assert np.abs(np.frombuffer(sent2[-1], dtype=np.int16)).max() <= 1001
+
+
+def test_overloaded_mic_hint_once_per_call():
+    call, api, states, notices = make_call()
+    call.join(10)
+    assert wait_for(lambda: call.state == CONNECTED)
+    call._on_audio_problem("mic_overload")
+    call._on_audio_problem("mic_overload")
+    assert sum("перегружен" in n for n in notices) == 1

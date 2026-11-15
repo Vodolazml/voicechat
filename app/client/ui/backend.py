@@ -447,6 +447,7 @@ class Backend(QObject):
             app.applicationStateChanged.connect(self._on_app_state)
         # Self-check in the log once a minute: frames the interface drew and processor time used.
         self._frames = 0
+        self._overlay_frames = 0
         self._usage_mark = (time.monotonic(), time.process_time())
         self._usage_timer = QTimer(self, interval=60_000, timeout=self._log_usage)
         self._usage_timer.start()
@@ -1379,14 +1380,18 @@ class Backend(QObject):
         """Called by the windows for every frame they draw (any thread)."""
         self._frames += 1
 
+    def count_overlay_frame(self) -> None:
+        self._overlay_frames += 1
+
     def _log_usage(self) -> None:
         now, cpu = time.monotonic(), time.process_time()
         then, cpu_then = self._usage_mark
         self._usage_mark = (now, cpu)
         frames, self._frames = self._frames, 0
+        overlay, self._overlay_frames = self._overlay_frames, 0
         wall = max(now - then, 0.001)
-        logger.info("Usage: %d interface frames in %.0f s, processor %.1f%% of all cores (%.1f%% of one), "
-                    "%s, %s", frames, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
+        logger.info("Usage: %d interface frames (+%d overlay) in %.0f s, processor %.1f%% of all cores "
+                    "(%.1f%% of one), %s, %s", frames, overlay, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
                     (cpu - cpu_then) / wall * 100, "active" if self._active else "in background",
                     "in a call" if self._call_channel else "not in a call")
 

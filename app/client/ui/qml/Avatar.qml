@@ -1,6 +1,7 @@
 import QtQuick
 
-// Round avatar: their picture if they set one, otherwise initials; a soft green halo pulses while they speak.
+// Round avatar: their picture if they set one, otherwise initials; a green halo while they speak.
+// No endless pulse: with friends talking it redrew the window at the monitor rate (233 fps on PC3).
 Item {
     id: root
     property string initials: "?"
@@ -23,23 +24,6 @@ Item {
         scale: root.speaking ? 1 : 0.85
         Behavior on opacity { NumberAnimation { duration: Theme.fast } }
         Behavior on scale { NumberAnimation { duration: Theme.fast; easing.type: Easing.OutBack } }
-    }
-    Rectangle {
-        anchors.centerIn: parent
-        width: root.size + 16; height: width; radius: width / 2
-        color: "transparent"
-        border.width: 2
-        border.color: Theme.speaking
-        visible: root.speaking
-        opacity: 0
-        SequentialAnimation on opacity {
-            running: root.speaking && Qt.application.state === Qt.ApplicationActive; loops: Animation.Infinite
-            NumberAnimation { from: 0.45; to: 0; duration: 900; easing.type: Easing.OutCubic }
-        }
-        SequentialAnimation on scale {
-            running: root.speaking && Qt.application.state === Qt.ApplicationActive; loops: Animation.Infinite
-            NumberAnimation { from: 0.8; to: 1.15; duration: 900; easing.type: Easing.OutCubic }
-        }
     }
     Rectangle {
         anchors.fill: parent

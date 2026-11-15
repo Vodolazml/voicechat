@@ -17,8 +17,8 @@ from typing import Callable
 
 import numpy as np
 
-from .dsp import (FADE_IN, FADE_OUT, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, SILENCE, Mixer, RNNoise, VoiceGate,
-                  apply_gain, fade, to_bytes, to_float)
+from .dsp import (FADE_IN, FADE_OUT, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, SILENCE, Leveler, Limiter, Mixer,
+                  RNNoise, VoiceGate, apply_gain, fade, to_bytes, to_float)
 from .rt import boost_voice_thread
 
 logger = logging.getLogger("voicechat.audio")
@@ -195,9 +195,25 @@ SILENT_FIRST = 3.5       # a mic silent since it was opened is reopened this soo
 SILENT_SECONDS = 8.0     # and again this often while it stays silent
 SILENT_REOPENS = 4       # reopen tries per opening, the hint shows after the last one
 PROCESSED_DEAD_SECONDS = 2.0  # the mic hears sound but processing outputs zeros this long: rebuild it
-RNNOISE_FLOOR = 100      # raw int16 peak (about -50 dBFS) under which RNNoise is skipped
 SOUND_BLOCKS = 30        # blocks with real sound (about 0.3 s) before a fresh mic counts as alive: opening
                          # a stuck Realtek mic gives one click and then zeros (Evgen, 2026-11-15 18:16)
+# A mic set too loud in Windows or the headset app (PC3's Logitech G733, 2026-11-14/15: peaks at -0.6..-3 dBFS)
+# leaves the echo/noise/gain processing no headroom: its output hit full scale and the voice came out harsh.
+HOT_PEAK = 23197         # -3 dBFS: louder than this before processing is turned down (headroom guard)
+HEADROOM_TARGET = 16422  # -6 dBFS: where the guard puts such peaks
+HEADROOM_MIN = 0.25      # the guard never turns the mic down more than 12 dB
+HEADROOM_RECOVER = 10 ** (0.15 / 20 / 100)  # +0.15 dB per second back towards no attenuation
+OVERLOAD_PEAK = 29204    # -1 dBFS straight from the device: the mic is overloaded (often already clipped)
+OVERLOAD_FRAMES = 30     # that many such 10 ms frames within OVERLOAD_WINDOW seconds shows a hint
+OVERLOAD_WINDOW = 60.0
+FULL_SCALE = 32700       # a processed sample this loud is clipping
+# Our own automatic gain for the outgoing voice. WebRTC's (in the LiveKit module, no target setting) drove
+# speech to exactly 0 dBFS nearly every minute for everyone (2026-11-15): loud syllables were cut off and
+# friends heard rasping. Ours brings speech to about -20 dBFS RMS slowly and never past the limiter ceiling.
+VOICE_TARGET_DBFS = -20.0
+VOICE_MAX_GAIN = 4.0     # +12 dB for a quiet mic
+VOICE_MIN_GAIN = 0.5
+OUT_CEILING = 0.71       # -3 dBFS: the soft limiter keeps every outgoing peak under this
 
 
 def _peak(frame: bytes) -> int:
@@ -236,6 +252,10 @@ class AudioEngine:
         self._window_apm = 0         # loudest sample after WebRTC processing, same window
         self._heard_since_open = False  # the mic has delivered real sound (not just a click) since opening
         self._sound_blocks = 0
+        self._headroom = 1.0         # headroom guard gain applied before processing (1.0 = untouched)
+        self._leveler = Leveler(VOICE_TARGET_DBFS, VOICE_MAX_GAIN, VOICE_MIN_GAIN)
+        self._limiter = Limiter(ceiling=OUT_CEILING)
+        self._window_overload = 0    # device frames at -1 dBFS or louder since the device watcher last looked
         self._monitor_stop = threading.Event()
         self._monitor: threading.Thread | None = None
         self._reset_counters()
@@ -255,6 +275,10 @@ class AudioEngine:
         self._raw_peak = 0         # loudest raw sample from the device, before any processing
         self._apm_peak = 0         # loudest sample after WebRTC processing (echo, noise, gain)
         self._out_peak = 0         # loudest sample after RNNoise, what the voice gate sees
+        self._overload_frames = 0  # 10 ms frames at -1 dBFS or louder from the device (mic set too loud)
+        self._clipped_frames = 0   # processed frames that hit full scale (heard as a harsh, cracking voice)
+        self._sent_peak = 0        # loudest sample actually sent, after our gain and limiter
+        self._min_headroom = 1.0   # strongest headroom guard attenuation in the period
 
     def stats(self) -> dict:
         """What the microphone and speakers did since the last call, for the log."""
@@ -267,6 +291,9 @@ class AudioEngine:
             "apm_peak_db": round(20 * math.log10(max(self._apm_peak, 1) / 32767.0), 1),
             "out_peak_db": round(20 * math.log10(max(self._out_peak, 1) / 32767.0), 1),
             "threshold_db": round(getattr(self.gate, "threshold_db", self.settings.threshold_db), 1),
+            "sent_peak_db": round(20 * math.log10(max(self._sent_peak, 1) / 32767.0), 1),
+            "overload_frames": self._overload_frames, "clipped_frames": self._clipped_frames,
+            "headroom_db": round(20 * math.log10(max(self._min_headroom, 1e-3)), 1),
             "overflows": self._overflows, "underflows": self._underflows, "muted": self.muted,
             "mode": self.settings.mode,
         }
@@ -320,7 +347,7 @@ class AudioEngine:
 
             self._apm = rtc.AudioProcessingModule(
                 echo_cancellation=config[0], noise_suppression=config[1], high_pass_filter=True,
-                auto_gain_control=config[2])
+                auto_gain_control=False)  # our own Leveler does it, see VOICE_TARGET_DBFS
             self._apm_config = config
         except Exception:
             logger.exception("WebRTC audio processing unavailable")
@@ -340,6 +367,8 @@ class AudioEngine:
                 self._out_pending.clear()
                 self._heard_since_open = False
                 self._sound_blocks = 0
+                self._headroom = 1.0
+                self._limiter.gain = 1.0
                 self._new_processing()
                 mic = _device_index(self.settings.input_device, "input")
                 speakers = _device_index(self.settings.output_device, "output")
@@ -412,10 +441,26 @@ class AudioEngine:
             silent_since, silence_reopens = None, 0
             dead_since = None
             rebuilt_check = 0  # checks left to report whether the voice came back after a rebuild
+            overloads: deque[tuple[float, int]] = deque()  # (when, overloaded frames) per check
+            overload_told = False
             while not stop.wait(1.5):
                 if not self._running:
                     silent_since, silence_reopens = None, 0
+                    overloads.clear()
                     continue
+                # A mic set too loud: tell the person once per opening, the guard below can soften it
+                # but not undo distortion that the headset itself already made.
+                now = time.monotonic()
+                over, self._window_overload = self._window_overload, 0
+                if over and not self.muted:
+                    overloads.append((now, over))
+                while overloads and now - overloads[0][0] > OVERLOAD_WINDOW:
+                    overloads.popleft()
+                if not overload_told and sum(n for _, n in overloads) >= OVERLOAD_FRAMES:
+                    overload_told = True
+                    logger.warning("The microphone is overloaded: %d frames at -1 dBFS or louder within %d s",
+                                   sum(n for _, n in overloads), int(OVERLOAD_WINDOW))
+                    self.on_problem("mic_overload")
                 # A microphone that has not delivered a single sound since it was opened is stuck: Windows
                 # mute, a mic key on the laptop or headset, another app holding it, or a Realtek driver that
                 # did not wake up (Evgen's first joins, 2026-11-13..15; rejoining helped). Reopen it soon, and
@@ -557,8 +602,30 @@ class AudioEngine:
             self._frames_in += 1
             self._process_frame(frame)
 
+    def _guard_headroom(self, frame: bytes) -> bytes:
+        """Turn a too-loud mic down before processing, quickly on a loud peak and back up slowly.
+
+        The gain glides across the frame (no step in the waveform) and changes rarely once it has
+        settled, so echo cancellation adapts to it like to a volume change in Windows."""
+        peak = _peak(frame)
+        previous = self._headroom
+        if peak * previous > HOT_PEAK:
+            self._headroom = max(HEADROOM_MIN, HEADROOM_TARGET / peak)
+        elif previous < 1.0:
+            self._headroom = min(1.0, previous * HEADROOM_RECOVER)
+        if self._headroom < self._min_headroom:
+            self._min_headroom = self._headroom
+        if previous >= 0.999 and self._headroom >= 0.999:
+            return frame
+        ramp = np.linspace(previous, self._headroom, FRAME_SAMPLES, dtype=np.float32)
+        return to_bytes(to_float(frame) * ramp)
+
     def _process_frame(self, frame: bytes) -> None:
         frame = apply_gain(frame, self.settings.input_gain)
+        if _peak(frame) >= OVERLOAD_PEAK:
+            self._overload_frames += 1
+            self._window_overload += 1
+        frame = self._guard_headroom(frame)
         apm = self._apm
         if apm is not None:
             try:
@@ -571,6 +638,8 @@ class AudioEngine:
             except Exception:
                 pass
         peak = _peak(frame)
+        if peak >= FULL_SCALE:
+            self._clipped_frames += 1
         if peak > self._apm_peak:
             self._apm_peak = peak
         if peak > self._window_apm:
@@ -578,11 +647,10 @@ class AudioEngine:
         samples = to_float(frame)
         probability = None
         rnnoise = self._rnnoise
-        # RNNoise is the costliest step; on near silence (between words, most of a call) it has nothing
-        # to remove and the voice gate stays closed anyway.
-        if rnnoise is not None and peak <= RNNOISE_FLOOR:
-            probability = 0.0  # what RNNoise says about near silence: no speech
-        elif rnnoise is not None:
+        # RNNoise runs on every frame. 0.5.7 skipped near-silent ones to save processor time, but it is a
+        # recurrent network with overlapping windows: resumed on a word's first syllable with the state of
+        # the last word, it rasped at word starts for everyone (2026-11-15).
+        if rnnoise is not None:
             samples, probability = rnnoise.process(samples)
             frame = to_bytes(samples)
             peak = _peak(frame)
@@ -603,6 +671,13 @@ class AudioEngine:
         was_sending, self._was_sending = self._was_sending, send
         if self.muted:
             return  # the track itself is muted; nothing goes out
+        if send or was_sending:
+            if self.settings.auto_gain:
+                samples = self._leveler.process(samples, learn=send)
+            samples = self._limiter.process(samples)
+            frame = to_bytes(samples)
+            if _peak(frame) > self._sent_peak:
+                self._sent_peak = _peak(frame)
         # The stream never stops while unmuted: between words it carries silence (Opus DTX makes that
         # almost free). It used to stop dead and start again on the next word, and friends' jitter
         # buffers heard every restart as a crackle. The voice fades in and out over 10 ms, so the gate

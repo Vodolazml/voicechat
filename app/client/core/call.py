@@ -71,6 +71,7 @@ class CallController:
         self._last_audio_notice = 0.0
         self._recovering = False
         self._silence_noticed = False  # the "mic gives perfect silence" hint is shown once per call
+        self._overload_noticed = False  # the "mic too loud" hint, also once per call
 
     # --- public API (UI thread) -----------------------------------------------------------------
 
@@ -185,6 +186,7 @@ class CallController:
             return
         logger.info("Joining channel %s (from %s)", channel_id, self.channel_id)
         self._silence_noticed = False
+        self._overload_noticed = False
         if self.channel_id is not None:
             # The server moves us and kicks us from the old room. No IDLE in between, so the UI
             # switches channels without flashing "disconnected".
@@ -359,6 +361,13 @@ class CallController:
         if problem == "fallback":
             self.listener.on_notice("warning", "Выбранное устройство недоступно, звук идёт через стандартное. "
                                                "Переключусь обратно, когда оно появится")
+            return
+        if problem == "mic_overload":
+            if self.channel_id is not None and not self._overload_noticed:
+                self._overload_noticed = True
+                self.listener.on_notice(
+                    "warning", "Микрофон перегружен, голос может хрипеть. Уменьшите громкость микрофона в Windows "
+                               "(Параметры → Звук → Ввод) до 60–70 или усиление в программе гарнитуры")
             return
         if problem in ("mic_silent", "mic_silent_last"):
             # The quick reopens go unnoticed; the hint only once they have all failed. A person who is

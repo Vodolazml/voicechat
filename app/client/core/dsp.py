@@ -95,9 +95,9 @@ class Leveler:
         self.level_db = target_dbfs
         self.gain = 1.0
 
-    def process(self, samples: np.ndarray) -> np.ndarray:
+    def process(self, samples: np.ndarray, learn: bool = True) -> np.ndarray:
         level = rms_dbfs(samples)
-        if level > -55.0:  # only learn from speech, not from silence between words
+        if learn and level > -55.0:  # only learn from speech, not from silence between words
             self.level_db += (level - self.level_db) * 0.02
             wanted = 10 ** ((self.target - self.level_db) / 20)
             wanted = min(self.max_gain, max(self.min_gain, wanted))

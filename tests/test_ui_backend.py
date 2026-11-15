@@ -412,3 +412,25 @@ def test_others_video_stops_arriving_while_nobody_can_see_it(qt_app):
     hidden[0] = False
     Backend._check_video_pause(stub)
     assert sorted(calls) == [(5, True), (7, True)] and not stub._video_paused
+
+
+def test_background_app_skips_cosmetic_updates_and_catches_up_when_active(qt_app):
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import Qt
+
+    from app.client.ui.backend import Backend
+
+    rebuilt = []
+    stub = SimpleNamespace(_speakers=set(), _active=False, _ui_stale=False, _call_channel=4,
+                           ui={"overlay_enabled": False}, _rebuild=lambda: rebuilt.append(True))
+    stub._overlay_shown = lambda: Backend._overlay_shown(stub)
+    stub._ui_quiet = lambda: Backend._ui_quiet(stub)
+    Backend._on_speakers(stub, {2})
+    assert rebuilt == [] and stub._ui_stale and stub._speakers == {2}
+    Backend._on_app_state(stub, Qt.ApplicationState.ApplicationActive)
+    assert rebuilt == [True] and not stub._ui_stale
+    # With the overlay on during a call, speaking still updates in the background.
+    stub._active, stub.ui = False, {"overlay_enabled": True}
+    Backend._on_speakers(stub, {3})
+    assert rebuilt == [True, True]

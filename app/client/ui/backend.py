@@ -436,6 +436,20 @@ class Backend(QObject):
         # receiving them then: a 1080p60 share watched in the background cost a laptop 120 -> 75 fps.
         self._video_paused = False
         self._pause_timer = QTimer(self, interval=2000, timeout=self._check_video_pause)
+        # While the app is not active (a game in front, minimized, in the tray) the interface changes
+        # nothing it does not have to: no level meter, no own preview, no speaking highlights (unless the
+        # overlay shows them). Each change made Qt redraw the window, which games behind it felt.
+        # What was skipped is applied when the app becomes active again.
+        self._active = QGuiApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+        self._ui_stale = False
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_app_state)
+        # Self-check in the log once a minute: frames the interface drew and processor time used.
+        self._frames = 0
+        self._usage_mark = (time.monotonic(), time.process_time())
+        self._usage_timer = QTimer(self, interval=60_000, timeout=self._log_usage)
+        self._usage_timer.start()
         self._capturer: ScreenCapturer | None = None
         self._camera = None                        # CameraCapturer while our camera is on
         self._cameras: set[int] = set()            # who has a camera on in our call
@@ -1334,7 +1348,40 @@ class Backend(QObject):
     def _on_speakers(self, speakers: set[int]) -> None:
         if speakers != self._speakers:
             self._speakers = set(speakers)
+            if self._ui_quiet():
+                self._ui_stale = True
+                return
             self._rebuild()
+
+    # --- background: draw and compute nothing that nobody sees ---------------------------------
+
+    def _overlay_shown(self) -> bool:
+        return bool(self._call_channel) and bool(self.ui.get("overlay_enabled"))
+
+    def _ui_quiet(self) -> bool:
+        """The app is in the background and no overlay shows the call: skip cosmetic updates."""
+        return not self._active and not self._overlay_shown()
+
+    def _on_app_state(self, state) -> None:
+        self._active = state == Qt.ApplicationState.ApplicationActive
+        if self._active and self._ui_stale:
+            self._ui_stale = False
+            self._rebuild()
+
+    def count_frame(self) -> None:
+        """Called by the windows for every frame they draw (any thread)."""
+        self._frames += 1
+
+    def _log_usage(self) -> None:
+        now, cpu = time.monotonic(), time.process_time()
+        then, cpu_then = self._usage_mark
+        self._usage_mark = (now, cpu)
+        frames, self._frames = self._frames, 0
+        wall = max(now - then, 0.001)
+        logger.info("Usage: %d interface frames in %.0f s, processor %.1f%% of all cores (%.1f%% of one), "
+                    "%s, %s", frames, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
+                    (cpu - cpu_then) / wall * 100, "active" if self._active else "in background",
+                    "in a call" if self._call_channel else "not in a call")
 
     def _on_quality(self, user_id: int, quality: int) -> None:
         self._quality[user_id] = quality
@@ -1532,7 +1579,7 @@ class Backend(QObject):
         self._save()
         try:
             my_id = self._me.get("id", 0)
-            capturer = ScreenCapturer(ident, preset, preview=lambda image: video_hub().push_image(my_id, image),
+            capturer = ScreenCapturer(ident, preset, preview=lambda image: self._active and video_hub().push_image(my_id, image),
                                       kind=kind)
         except Exception as exc:  # noqa: BLE001
             self.toast("error", str(exc))
@@ -1571,7 +1618,7 @@ class Backend(QObject):
         my_id = self._me.get("id", 0)
         try:
             capturer = CameraCapturer(
-                camera_id, preview=lambda image: video_hub().push_image(camera_key(my_id), image),
+                camera_id, preview=lambda image: self._active and video_hub().push_image(camera_key(my_id), image),
                 on_error=lambda text: self._ui(lambda: (self.toast("error", f"Камера: {text}"), self.stopCamera())))
             capturer.start()
         except Exception as exc:  # noqa: BLE001
@@ -2217,6 +2264,8 @@ class Backend(QObject):
         return native.qt_key_name(key, text)
 
     def _update_video_info(self) -> None:
+        if not self._active:
+            return
         my_id = self._me.get("id", 0)
         info: dict[int, tuple[str, str]] = {}
         if self._capturer is not None and self._sharing:
@@ -2263,6 +2312,8 @@ class Backend(QObject):
     def _poll_level(self) -> None:
         if self.call is None:
             return
+        if self._ui_quiet():
+            return  # the meter and our own speaking highlight catch up when the app is active again
         audio = self.call.audio
         level = max(0.0, min(1.0, (getattr(audio, "input_level_db", -96.0) + 60.0) / 60.0))
         transmitting = bool(audio.transmitting) and not self._muted

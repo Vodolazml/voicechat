@@ -107,6 +107,11 @@ def main() -> int:
     if not engine.rootObjects():
         return 1
     window = engine.rootObjects()[0]
+    # Every frame any of our windows draws is counted for the minute "Usage" line in the log.
+    for root in engine.rootObjects():
+        for quick in [root, *root.findChildren(QQuickWindow)]:
+            if isinstance(quick, QQuickWindow):
+                quick.frameSwapped.connect(backend.count_frame, Qt.DirectConnection)
     native.style_title_bar(int(window.winId()), caption="#0d0e14", text="#c9cbe0", border="#1d1e2a")
     guard.show_requested.connect(backend.requestShow)
 

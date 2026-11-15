@@ -193,6 +193,14 @@ SILENT_PEAK = 3          # raw int16 peak at or under this is "nothing at all" (
 SILENT_FIRST = 3.5       # a mic silent since it was opened is reopened this soon
 SILENT_SECONDS = 8.0     # and again this often while it stays silent
 SILENT_REOPENS = 4       # reopen tries per opening, the hint shows after the last one
+PROCESSED_DEAD_SECONDS = 2.0  # the mic hears sound but processing outputs zeros this long: rebuild it
+SOUND_BLOCKS = 30        # blocks with real sound (about 0.3 s) before a fresh mic counts as alive: opening
+                         # a stuck Realtek mic gives one click and then zeros (Evgen, 2026-11-15 18:16)
+
+
+def _peak(frame: bytes) -> int:
+    samples = np.frombuffer(frame, dtype=np.int16)
+    return int(np.abs(samples.astype(np.int32)).max()) if samples.size else 0
 
 
 class AudioEngine:
@@ -222,7 +230,9 @@ class AudioEngine:
         self._opened_names: tuple[str, str] | None = None  # device settings the open streams were made for
         self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
         self._window_peak = 0        # loudest raw sample since the device watcher last looked
-        self._heard_since_open = False  # the mic has delivered at least one real sound since it was opened
+        self._window_out = 0         # loudest processed sample since the device watcher last looked
+        self._heard_since_open = False  # the mic has delivered real sound (not just a click) since opening
+        self._sound_blocks = 0
         self._monitor_stop = threading.Event()
         self._monitor: threading.Thread | None = None
         self._reset_counters()
@@ -240,6 +250,8 @@ class AudioEngine:
         self._underflows = 0
         self._peak_db = -96.0
         self._raw_peak = 0         # loudest raw sample from the device, before any processing
+        self._apm_peak = 0         # loudest sample after WebRTC processing (echo, noise, gain)
+        self._out_peak = 0         # loudest sample after RNNoise, what the voice gate sees
 
     def stats(self) -> dict:
         """What the microphone and speakers did since the last call, for the log."""
@@ -248,6 +260,9 @@ class AudioEngine:
             "speaker_frames": self._frames_out, "uneven_blocks": self._odd_blocks,
             "mic_peak_db": round(self._peak_db, 1),
             "raw_peak_db": round(20 * math.log10(max(self._raw_peak, 1) / 32767.0), 1),
+            # Where a lost voice disappears: after WebRTC processing, then after RNNoise.
+            "apm_peak_db": round(20 * math.log10(max(self._apm_peak, 1) / 32767.0), 1),
+            "out_peak_db": round(20 * math.log10(max(self._out_peak, 1) / 32767.0), 1),
             "threshold_db": round(getattr(self.gate, "threshold_db", self.settings.threshold_db), 1),
             "overflows": self._overflows, "underflows": self._underflows, "muted": self.muted,
             "mode": self.settings.mode,
@@ -277,6 +292,19 @@ class AudioEngine:
             self._ensure_apm()
         if restart:
             self.restart()
+
+    def _new_processing(self) -> None:
+        """Fresh echo/noise/gain processing and RNNoise, as at app start. They used to live as long as the
+        app: once they got into a state that turned speech into zeros (Evgen, 2026-11-13 and 11-15),
+        rejoining did not help, only restarting the app did. The audio callback holds its own reference
+        to the old objects for the frame it is on, so swapping them here is safe."""
+        self._apm_config = None
+        self._ensure_apm()
+        if self.settings.noise == NOISE_STRONG and RNNoise.available():
+            try:
+                self._rnnoise = RNNoise()
+            except Exception:
+                logger.warning("RNNoise could not be recreated", exc_info=True)
 
     def _ensure_apm(self) -> None:
         # "Strong" = WebRTC suppression plus RNNoise on top, so it is never weaker than "standard",
@@ -308,6 +336,8 @@ class AudioEngine:
                 self._in_chunks.clear()
                 self._out_pending.clear()
                 self._heard_since_open = False
+                self._sound_blocks = 0
+                self._new_processing()
                 mic = _device_index(self.settings.input_device, "input")
                 speakers = _device_index(self.settings.output_device, "output")
                 missing = [name for name, index in ((self.settings.input_device, mic),
@@ -377,6 +407,7 @@ class AudioEngine:
             pending = None  # a change must look the same on two checks in a row (Windows settles first)
             last_calls, quiet_since = self._callbacks, None
             silent_since, silence_reopens = None, 0
+            dead_since = None
             while not stop.wait(1.5):
                 if not self._running:
                     silent_since, silence_reopens = None, 0
@@ -388,7 +419,19 @@ class AudioEngine:
                 # Once it has delivered sound, later pure zeros are NOT a fault: Realtek drivers and Windows
                 # "audio enhancements" cut pauses to exact zero. Treating that as stuck showed a "mic broken"
                 # hint whenever someone was quiet, and every reopen cut their mic for a moment.
-                self._window_peak = 0
+                raw_window, self._window_peak = self._window_peak, 0
+                out_window, self._window_out = self._window_out, 0
+                # The mic hears sound but our processing turns it into zeros: rebuild the processing.
+                if not self.muted and raw_window > 300 and out_window <= 1:
+                    if dead_since is None:
+                        dead_since = time.monotonic()
+                    elif time.monotonic() - dead_since > PROCESSED_DEAD_SECONDS:
+                        logger.warning("The mic hears sound (raw peak %d) but processing outputs silence: "
+                                       "recreating the processing", raw_window)
+                        self._new_processing()
+                        dead_since = None
+                else:
+                    dead_since = None
                 if self._heard_since_open or self.muted:
                     silent_since, silence_reopens = None, 0
                 elif silent_since is None:
@@ -492,7 +535,9 @@ class AudioEngine:
             if peak > self._window_peak:
                 self._window_peak = peak
             if peak > SILENT_PEAK:
-                self._heard_since_open = True
+                self._sound_blocks += 1
+                if self._sound_blocks >= SOUND_BLOCKS:
+                    self._heard_since_open = True
         for frame in self._in_chunks.push(bytes(indata)):
             self._frames_in += 1
             self._process_frame(frame)
@@ -510,12 +555,20 @@ class AudioEngine:
                 frame = bytes(audio.data.cast("B"))
             except Exception:
                 pass
+        peak = _peak(frame)
+        if peak > self._apm_peak:
+            self._apm_peak = peak
         samples = to_float(frame)
         probability = None
         rnnoise = self._rnnoise
         if rnnoise is not None:
             samples, probability = rnnoise.process(samples)
             frame = to_bytes(samples)
+            peak = _peak(frame)
+        if peak > self._out_peak:
+            self._out_peak = peak
+        if peak > self._window_out:
+            self._window_out = peak
         is_voice = self.gate.process(samples, probability)
         self.input_level_db = self.gate.level_db
         if self.input_level_db > self._peak_db:

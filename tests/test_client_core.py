@@ -455,12 +455,27 @@ def test_quiet_pauses_after_real_sound_are_not_a_broken_mic(monkeypatch):
     engine = _silence_engine(monkeypatch, problems)
     stop = threading.Event()
     voice = (np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes()
-    frames = iter([voice])
+    frames = iter([voice] * 40)
     _feed(engine, lambda: next(frames, bytes(FRAME_BYTES)), stop)
     engine._start_monitor()
     try:
         time.sleep(3.5)
         assert problems == []
+    finally:
+        stop.set()
+        engine._monitor_stop.set()
+
+
+def test_a_click_when_opening_does_not_make_a_stuck_mic_look_alive(monkeypatch):
+    problems = []
+    engine = _silence_engine(monkeypatch, problems)
+    stop = threading.Event()
+    click = (np.full(FRAME_SAMPLES, 1800, dtype=np.int16)).tobytes()
+    frames = iter([click, click])
+    _feed(engine, lambda: next(frames, bytes(FRAME_BYTES)), stop)
+    engine._start_monitor()
+    try:
+        assert wait_for(lambda: "mic_silent" in problems, timeout=5)
     finally:
         stop.set()
         engine._monitor_stop.set()
@@ -475,3 +490,31 @@ def test_silent_mic_hint_only_after_the_last_reopen_and_once_per_call():
     call._on_audio_problem("mic_silent_last")
     call._on_audio_problem("mic_silent_last")
     assert sum("ни звука" in n for n in notices) == 1
+
+
+def test_processing_that_turns_speech_into_zeros_is_rebuilt(monkeypatch):
+    from app.client.core import audio
+
+    monkeypatch.setattr(audio, "PROCESSED_DEAD_SECONDS", 0.5)
+    problems = []
+    engine = _silence_engine(monkeypatch, problems)
+
+    class Broken:
+        def process(self, samples):
+            return np.zeros_like(samples), 0.0
+
+    engine._rnnoise = Broken()
+    rebuilt = []
+    monkeypatch.setattr(engine, "_new_processing", lambda: rebuilt.append(True))
+    stop = threading.Event()
+    voice = (np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes()
+    _feed(engine, lambda: voice, stop)
+    engine._start_monitor()
+    try:
+        assert wait_for(lambda: rebuilt, timeout=8)
+        stats = engine.stats()
+        assert stats["out_peak_db"] <= -90 and stats["raw_peak_db"] > -30
+    finally:
+        stop.set()
+        engine._monitor_stop.set()
+    assert problems == [], "a live mic with broken processing is not a stuck mic"

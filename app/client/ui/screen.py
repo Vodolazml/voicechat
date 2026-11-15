@@ -15,9 +15,9 @@ import threading
 import time
 from dataclasses import dataclass
 
-from PySide6.QtCore import Property, QObject, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import Property, QObject, QSize, Qt, Signal
 from PySide6.QtGui import QImage, QPainter
-from PySide6.QtQuick import QQuickPaintedItem
+from PySide6.QtMultimedia import QVideoFrame, QVideoFrameFormat, QVideoSink
 
 logger = logging.getLogger("voicechat.screen")
 
@@ -821,15 +821,42 @@ class _NoProcess(Exception):
     pass
 
 
+def i420_frame(width: int, height: int, data) -> QVideoFrame:
+    """A QVideoFrame from a packed I420 buffer (Y, then U and V at half size). The graphics card turns it
+    into colours and scales it, the processor only copies the planes (2.5x less than RGBA)."""
+    import numpy as np
+
+    frame = QVideoFrame(QVideoFrameFormat(QSize(width, height), QVideoFrameFormat.PixelFormat.Format_YUV420P))
+    if not frame.map(QVideoFrame.MapMode.WriteOnly):
+        raise RuntimeError("cannot map a video frame")
+    try:
+        src = np.frombuffer(data, dtype=np.uint8)
+        cw, ch = (width + 1) // 2, (height + 1) // 2
+        offset = 0
+        for plane, (w, h) in enumerate(((width, height), (cw, ch), (cw, ch))):
+            stride = frame.bytesPerLine(plane)
+            dst = np.frombuffer(frame.bits(plane), dtype=np.uint8)
+            part = src[offset:offset + w * h].reshape(h, w)
+            rows = min(h, len(dst) // stride)  # Qt rounds odd chroma heights down, libyuv up
+            if stride == w:
+                dst[:w * rows] = part[:rows].ravel()
+            else:
+                dst[:stride * rows].reshape(rows, stride)[:, :w] = part[:rows]
+            offset += w * h
+    finally:
+        frame.unmap()
+    return frame
+
+
 class VideoHub(QObject):
-    """Latest decoded frame per streamer, delivered to the UI thread."""
+    """Latest frame per streamer (a QVideoFrame the graphics card draws), delivered to the UI thread."""
 
     frame = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
         self._lock = threading.Lock()
-        self._frames: dict[int, QImage] = {}
+        self._frames: dict[int, QVideoFrame] = {}
         self._rates: dict[int, _Rate] = {}
         self.frame.connect(self._noop)
 
@@ -837,32 +864,30 @@ class VideoHub(QObject):
         pass
 
     def push(self, user_id: int, video_frame) -> None:
-        """Called from the media thread with an RGBA rtc.VideoFrame."""
-        width, height = video_frame.width, video_frame.height
-        # The frame already owns its own copy of the pixels; the image keeps that buffer alive, so no second
-        # ~15 MB copy per 1440p frame.
-        image = QImage(video_frame.data, width, height, width * 4, QImage.Format_RGBA8888)
+        """Called from the video thread with an I420 rtc.VideoFrame, as the decoder produced it."""
+        frame = i420_frame(video_frame.width, video_frame.height, video_frame.data)
         with self._lock:
-            self._frames[user_id] = image
+            self._frames[user_id] = frame
             self._rates.setdefault(user_id, _Rate()).tick()
         self.frame.emit(user_id)
 
     def received(self, user_id: int) -> dict | None:
         """Real size and frames per second of what we receive and decode from this person."""
         with self._lock:
-            image = self._frames.get(user_id)
+            frame = self._frames.get(user_id)
             rate = self._rates.get(user_id)
-            if image is None or rate is None:
+            if frame is None or rate is None:
                 return None
-            return {"width": image.width(), "height": image.height(), "fps": rate.value()}
+            return {"width": frame.width(), "height": frame.height(), "fps": rate.value()}
 
     def push_image(self, user_id: int, image: QImage) -> None:
-        """Local preview of our own screen share (any thread)."""
+        """Local preview of our own screen share or camera (any thread)."""
+        frame = QVideoFrame(image)
         with self._lock:
-            self._frames[user_id] = image
+            self._frames[user_id] = frame
         self.frame.emit(user_id)
 
-    def latest(self, user_id: int) -> QImage | None:
+    def latest(self, user_id: int) -> QVideoFrame | None:
         with self._lock:
             return self._frames.get(user_id)
 
@@ -870,6 +895,7 @@ class VideoHub(QObject):
         with self._lock:
             self._frames.pop(user_id, None)
             self._rates.pop(user_id, None)
+        self.frame.emit(user_id)
 
 
 HUB: VideoHub | None = None
@@ -882,19 +908,19 @@ def video_hub() -> VideoHub:
     return HUB
 
 
-class VideoView(QQuickPaintedItem):
-    """`VideoView { userId: 5 }` paints that user's stream, letterboxed and smoothly scaled."""
+class VideoFeed(QObject):
+    """Feeds one person's frames into a VideoOutput's sink (VideoView.qml). Qt draws them on the graphics
+    card: colour conversion and scaling no longer run on the processor next to the voice."""
 
     userIdChanged = Signal()
+    videoSinkChanged = Signal()
     hasFrameChanged = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._user_id = 0
-        self._image: QImage | None = None
-        self._last_paint = 0.0
-        self._repaint_pending = False
-        self.setRenderTarget(QQuickPaintedItem.FramebufferObject)
+        self._sink: QVideoSink | None = None
+        self._has = False
         video_hub().frame.connect(self._on_frame)
 
     def _get_user_id(self) -> int:
@@ -903,45 +929,31 @@ class VideoView(QQuickPaintedItem):
     def _set_user_id(self, value: int) -> None:
         if value != self._user_id:
             self._user_id = value
-            self._image = video_hub().latest(value)
             self.userIdChanged.emit()
-            self.hasFrameChanged.emit()
-            self.update()
+            self._show()
+
+    def _get_sink(self):
+        return self._sink
+
+    def _set_sink(self, sink) -> None:
+        if sink is not self._sink:
+            self._sink = sink
+            self.videoSinkChanged.emit()
+            self._show()
 
     userId = Property(int, _get_user_id, _set_user_id, notify=userIdChanged)
-    hasFrame = Property(bool, lambda self: self._image is not None, notify=hasFrameChanged)
-
-    MAX_PAINT_FPS = 30
+    videoSink = Property(QObject, _get_sink, _set_sink, notify=videoSinkChanged)
+    hasFrame = Property(bool, lambda self: self._has, notify=hasFrameChanged)
 
     def _on_frame(self, user_id: int) -> None:
         if user_id == self._user_id:
-            had = self._image is not None
-            self._image = video_hub().latest(user_id)
-            if not had:
-                self.hasFrameChanged.emit()
-            # Scaling a big frame into the tile is real work on the interface thread, and while it runs the
-            # audio callbacks wait. 30 repaints a second look smooth and leave them room.
-            now = time.perf_counter()
-            if now - self._last_paint >= 1.0 / self.MAX_PAINT_FPS:
-                self._last_paint = now
-                self.update()
-            elif not self._repaint_pending:
-                self._repaint_pending = True
-                QTimer.singleShot(max(1, int((1.0 / self.MAX_PAINT_FPS - (now - self._last_paint)) * 1000)),
-                                  self._deferred_update)
+            self._show()
 
-    def _deferred_update(self) -> None:
-        self._repaint_pending = False
-        self._last_paint = time.perf_counter()
-        self.update()
-
-    def paint(self, painter: QPainter) -> None:
-        image = self._image
-        if image is None:
-            return
-        bounds = self.boundingRect()
-        scale = min(bounds.width() / image.width(), bounds.height() / image.height())
-        w, h = image.width() * scale, image.height() * scale
-        target = QRectF(bounds.x() + (bounds.width() - w) / 2, bounds.y() + (bounds.height() - h) / 2, w, h)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        painter.drawImage(target, image)
+    def _show(self) -> None:
+        frame = video_hub().latest(self._user_id) if self._user_id else None
+        if self._sink is not None:
+            self._sink.setVideoFrame(frame if frame is not None else QVideoFrame())
+        has = frame is not None
+        if has != self._has:
+            self._has = has
+            self.hasFrameChanged.emit()

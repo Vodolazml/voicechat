@@ -153,14 +153,17 @@ _PACED_STREAM = None
 
 async def _read_video(track, key: int, on_frame: Callable[[int, Any], None],
                       max_fps: float = VIDEO_MAX_FPS, current: Callable[[], bool] = lambda: True) -> None:
-    """Runs on the video loop: newest frames only, at most `max_fps`, each handed to `on_frame` as RGBA."""
+    """Runs on the video loop: newest frames only, at most `max_fps`, each handed to `on_frame` as I420.
+
+    I420 is what the decoder produces: no conversion to RGBA on the processor (15 MB a 1440p frame); the
+    interface hands the planes to the graphics card, which converts and scales."""
     global _PACED_STREAM
     from livekit import rtc
 
     if _PACED_STREAM is None:
         _PACED_STREAM = _paced_stream_class()
     # capacity=1: if painting falls behind, the older waiting frame is replaced by the newer one.
-    stream = _PACED_STREAM(track, max_fps=max_fps, capacity=1, format=rtc.VideoBufferType.RGBA)
+    stream = _PACED_STREAM(track, max_fps=max_fps, capacity=1, format=rtc.VideoBufferType.I420)
     started = logged = time.monotonic()
     try:
         async for event in stream:

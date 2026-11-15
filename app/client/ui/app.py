@@ -16,7 +16,7 @@ from app.client.single_instance import SingleInstanceGuard
 from . import platform as native
 from .backend import Backend, configure_logging
 from .images import AvatarProvider, ShotProvider
-from .screen import VideoView
+from .screen import VideoFeed
 
 QML_DIR = Path(__file__).resolve().parent / "qml"
 
@@ -92,7 +92,7 @@ def main() -> int:
     if not guard.try_acquire():
         return 0
 
-    qmlRegisterType(VideoView, "VoiceChat", 1, 0, "VideoView")
+    qmlRegisterType(VideoFeed, "VoiceChat", 1, 0, "VideoFeed")
     backend = Backend()
     helper = OverlayHelper()
     tray = _tray(app, backend, icon)

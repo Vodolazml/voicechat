@@ -360,16 +360,18 @@ class CallController:
             self.listener.on_notice("warning", "Выбранное устройство недоступно, звук идёт через стандартное. "
                                                "Переключусь обратно, когда оно появится")
             return
-        if problem == "mic_silent":
-            if self.channel_id is not None and not self._silence_noticed:
+        if problem in ("mic_silent", "mic_silent_last"):
+            # The quick reopens go unnoticed; the hint only once they have all failed. A person who is
+            # simply quiet on a mic whose driver sends exact zeros in pauses would otherwise get it too.
+            if problem == "mic_silent_last" and self.channel_id is not None and not self._silence_noticed:
                 self._silence_noticed = True
                 self.listener.on_notice(
-                    "warning", "Микрофон передаёт полную тишину, переоткрываю его. Если вас всё равно не слышно, "
-                               "проверьте кнопку выключения микрофона на ноутбуке или гарнитуре и звук в Windows, "
+                    "warning", "Микрофон пока не передал ни звука. Если вас не слышно, проверьте кнопку "
+                               "выключения микрофона на ноутбуке или гарнитуре и звук в Windows, "
                                "или выберите другой микрофон в настройках")
             if not self._recovering:
                 self._recovering = True
-                self._submit(self._recover_audio, "audio")
+                self._submit(lambda: self._recover_audio(reinit=False), "audio")
             return
         # Also outside a call: the settings screen's mic test uses the same devices.
         now = time.monotonic()
@@ -382,16 +384,16 @@ class CallController:
             self._recovering = True
             self._submit(self._recover_audio, "audio")
 
-    def _recover_audio(self) -> None:
+    def _recover_audio(self, reinit: bool = True) -> None:
         try:
-            self._recover_audio_attempts()
+            self._recover_audio_attempts(reinit)
         finally:
             self._recovering = False
 
-    def _recover_audio_attempts(self) -> None:
+    def _recover_audio_attempts(self, reinit: bool = True) -> None:
         for attempt in range(5):
             try:
-                self.audio.restart()
+                self.audio.restart(reinit=reinit)
                 logger.info("Audio devices reopened after a loss (attempt %d)", attempt + 1)
                 return
             except Exception:

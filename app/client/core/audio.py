@@ -190,8 +190,9 @@ class _Rechunker:
 
 
 SILENT_PEAK = 3          # raw int16 peak at or under this is "nothing at all" (about -80 dBFS)
-SILENT_SECONDS = 8.0
-SILENT_REOPENS = 4       # reopen tries per silent episode, SILENT_SECONDS apart
+SILENT_FIRST = 3.5       # a mic silent since it was opened is reopened this soon
+SILENT_SECONDS = 8.0     # and again this often while it stays silent
+SILENT_REOPENS = 4       # reopen tries per opening, the hint shows after the last one
 
 
 class AudioEngine:
@@ -221,6 +222,7 @@ class AudioEngine:
         self._opened_names: tuple[str, str] | None = None  # device settings the open streams were made for
         self._callbacks = 0          # capture callbacks so far, to notice a stream that silently stopped
         self._window_peak = 0        # loudest raw sample since the device watcher last looked
+        self._heard_since_open = False  # the mic has delivered at least one real sound since it was opened
         self._monitor_stop = threading.Event()
         self._monitor: threading.Thread | None = None
         self._reset_counters()
@@ -305,6 +307,7 @@ class AudioEngine:
                 self._refresh_device_list_if_missing()
                 self._in_chunks.clear()
                 self._out_pending.clear()
+                self._heard_since_open = False
                 mic = _device_index(self.settings.input_device, "input")
                 speakers = _device_index(self.settings.output_device, "output")
                 missing = [name for name, index in ((self.settings.input_device, mic),
@@ -378,22 +381,24 @@ class AudioEngine:
                 if not self._running:
                     silent_since, silence_reopens = None, 0
                     continue
-                # A live microphone always hears some noise (at least a few units of the 16-bit range). A
-                # stream that delivers perfect silence for long is a muted or "stuck" device: Windows mute,
-                # a mic key on the laptop or headset, another app holding it, or a driver hiccup. Reopen it,
-                # and again every SILENT_SECONDS while it stays silent (a single reopen was not always enough
-                # on 2026-11-13, a restart of the app was), up to SILENT_REOPENS times.
-                window, self._window_peak = self._window_peak, 0
-                if window > SILENT_PEAK or self.muted:
+                # A microphone that has not delivered a single sound since it was opened is stuck: Windows
+                # mute, a mic key on the laptop or headset, another app holding it, or a Realtek driver that
+                # did not wake up (Evgen's first joins, 2026-11-13..15; rejoining helped). Reopen it soon, and
+                # again while it stays silent, up to SILENT_REOPENS times.
+                # Once it has delivered sound, later pure zeros are NOT a fault: Realtek drivers and Windows
+                # "audio enhancements" cut pauses to exact zero. Treating that as stuck showed a "mic broken"
+                # hint whenever someone was quiet, and every reopen cut their mic for a moment.
+                self._window_peak = 0
+                if self._heard_since_open or self.muted:
                     silent_since, silence_reopens = None, 0
                 elif silent_since is None:
                     silent_since = time.monotonic()
                 elif (silence_reopens < SILENT_REOPENS
-                      and time.monotonic() - silent_since > SILENT_SECONDS * (silence_reopens + 1)):
+                      and time.monotonic() - silent_since > SILENT_FIRST + SILENT_SECONDS * silence_reopens):
                     silence_reopens += 1
-                    logger.warning("The microphone delivers perfect silence (raw peak %d): reopening (%d)", window,
-                                   silence_reopens)
-                    self.on_problem("mic_silent")
+                    logger.warning("The microphone has delivered only perfect silence since it was opened: "
+                                   "reopening (%d)", silence_reopens)
+                    self.on_problem("mic_silent" if silence_reopens < SILENT_REOPENS else "mic_silent_last")
                 now_signature = _system_signature()
                 if signature is None:
                     signature = now_signature
@@ -435,8 +440,11 @@ class AudioEngine:
             self._close_streams()
             self.mixer.clear()
 
-    def restart(self) -> None:
-        """Re-open devices: after unplugging a headset or changing the Windows default device."""
+    def restart(self, reinit: bool = True) -> None:
+        """Re-open devices: after unplugging a headset or changing the Windows default device.
+
+        reinit=False only reopens the streams (a stuck microphone): re-initialising PortAudio took up to
+        10 s on a Realtek laptop, and the device list has not changed then anyway."""
         import sounddevice as sd
 
         with self._lock:
@@ -444,11 +452,12 @@ class AudioEngine:
             self._running = False
             self._close_streams()
             # PortAudio caches the device list; re-initialise it to see newly plugged devices.
-            try:
-                sd._terminate()
-                sd._initialize()
-            except Exception:
-                logger.debug("PortAudio re-init failed", exc_info=True)
+            if reinit:
+                try:
+                    sd._terminate()
+                    sd._initialize()
+                except Exception:
+                    logger.debug("PortAudio re-init failed", exc_info=True)
         if was_running:
             self.start()
 
@@ -482,6 +491,8 @@ class AudioEngine:
                 self._raw_peak = peak
             if peak > self._window_peak:
                 self._window_peak = peak
+            if peak > SILENT_PEAK:
+                self._heard_since_open = True
         for frame in self._in_chunks.push(bytes(indata)):
             self._frames_in += 1
             self._process_frame(frame)

@@ -176,7 +176,7 @@ class FakeAudio:
     def stop(self):
         self.running = False
 
-    def restart(self):
+    def restart(self, reinit=True):
         pass
 
     def apply_settings(self, settings):
@@ -375,7 +375,7 @@ def test_choosing_another_device_in_settings_reopens_audio(monkeypatch):
 def test_device_changes_reopen_audio_once_and_fallback_only_warns():
     call, api, states, notices = make_call()
     reopened = []
-    call.audio.restart = lambda: reopened.append(True)
+    call.audio.restart = lambda reinit=True: reopened.append(True)
     call._on_audio_problem("fallback")
     assert reopened == [] and any("стандартное" in n for n in notices)
     call._on_audio_problem("devices_changed")
@@ -410,40 +410,68 @@ def test_raw_mic_peak_is_logged():
     assert -21 < engine.stats()["raw_peak_db"] < -19
 
 
-def test_perfectly_silent_mic_is_reopened_a_few_times_not_forever(monkeypatch):
-    from types import SimpleNamespace
-
+def _silence_engine(monkeypatch, problems):
     from app.client.core import audio
     from app.client.core.audio import AudioEngine
 
+    monkeypatch.setattr(audio, "SILENT_FIRST", 0.3)
     monkeypatch.setattr(audio, "SILENT_SECONDS", 0.5)
     monkeypatch.setattr(audio, "SILENT_REOPENS", 2)
     monkeypatch.setattr(audio, "_system_signature", lambda: None)
-    problems = []
     engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False),
                          on_frame=lambda f: None, on_problem=problems.append)
     engine._running = True
-    feeding = threading.Event()
+    return engine
 
-    def feed():
-        while not feeding.is_set():
-            engine._capture(bytes(FRAME_BYTES), FRAME_SAMPLES, None, SimpleNamespace(input_overflow=False))
+
+def _feed(engine, frames, stop):
+    from types import SimpleNamespace
+
+    def run():
+        while not stop.is_set():
+            engine._capture(frames(), FRAME_SAMPLES, None, SimpleNamespace(input_overflow=False))
             time.sleep(0.01)
-    threading.Thread(target=feed, daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def test_mic_silent_since_opening_is_reopened_a_few_times_not_forever(monkeypatch):
+    problems = []
+    engine = _silence_engine(monkeypatch, problems)
+    stop = threading.Event()
+    _feed(engine, lambda: bytes(FRAME_BYTES), stop)
     engine._start_monitor()
     try:
-        assert wait_for(lambda: problems.count("mic_silent") == 2, timeout=10), "tried again while still silent"
+        assert wait_for(lambda: problems == ["mic_silent", "mic_silent_last"], timeout=10)
         time.sleep(3.2)
-        assert problems.count("mic_silent") == 2, "a few tries, not over and over"
+        assert problems == ["mic_silent", "mic_silent_last"], "a few tries, not over and over"
     finally:
-        feeding.set()
+        stop.set()
         engine._monitor_stop.set()
 
 
-def test_silent_mic_shows_a_hint_once_per_call():
+def test_quiet_pauses_after_real_sound_are_not_a_broken_mic(monkeypatch):
+    # Realtek drivers and Windows audio enhancements send exact zeros while the person is quiet.
+    problems = []
+    engine = _silence_engine(monkeypatch, problems)
+    stop = threading.Event()
+    voice = (np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes()
+    frames = iter([voice])
+    _feed(engine, lambda: next(frames, bytes(FRAME_BYTES)), stop)
+    engine._start_monitor()
+    try:
+        time.sleep(3.5)
+        assert problems == []
+    finally:
+        stop.set()
+        engine._monitor_stop.set()
+
+
+def test_silent_mic_hint_only_after_the_last_reopen_and_once_per_call():
     call, api, states, notices = make_call()
     call.join(10)
     assert wait_for(lambda: call.state == CONNECTED)
     call._on_audio_problem("mic_silent")
-    call._on_audio_problem("mic_silent")
-    assert sum("полную тишину" in n for n in notices) == 1
+    assert not any("ни звука" in n for n in notices), "the quick reopens go unnoticed"
+    call._on_audio_problem("mic_silent_last")
+    call._on_audio_problem("mic_silent_last")
+    assert sum("ни звука" in n for n in notices) == 1

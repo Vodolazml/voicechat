@@ -34,7 +34,10 @@ def boost_voice_thread(task: str = "Pro Audio") -> None:
         info = _PowerThrottling(1, 0x1, 0x0)  # THREAD_POWER_THROTTLING_EXECUTION_SPEED: off
         kernel32 = ctypes.windll.kernel32
         kernel32.SetThreadInformation(kernel32.GetCurrentThread(), 3, ctypes.byref(info), ctypes.sizeof(info))
+        # PortAudio's WASAPI streams register their own threads with MMCSS already; a second
+        # registration then fails, which is fine.
+        error = 0 if handle else ctypes.windll.kernel32.GetLastError()
         logger.info("Voice thread %s: audio scheduling %s", threading.current_thread().name,
-                    "on" if handle else "unavailable")
+                    "on" if handle else f"not added (error {error}, PortAudio may have registered it)")
     except Exception:
         logger.debug("Voice thread priority not set", exc_info=True)

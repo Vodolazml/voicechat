@@ -53,6 +53,10 @@ Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion skip
 [InstallDelete]
 ; Older installers named the desktop shortcut after the app ("Private VoiceChat"); keep only "VoiceChat".
 Type: files; Name: "{userdesktop}\{#MyAppName}.lnk"
+; The program's libraries are reinstalled whole from this build. Inno only overwrites, so files that
+; older versions had and this one dropped piled up: 506 MB of them by 0.5.3. client_config.json sits
+; next to the exe, outside _internal, and settings live in the user's profile, so nothing is lost.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

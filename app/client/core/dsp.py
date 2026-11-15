@@ -241,6 +241,8 @@ class Mixer:
                 if self.deafened or user_id in self.muted_users:
                     buffer.last = None
                     continue
+                if frame == SILENCE and buffer.last is None:
+                    continue  # they are quiet (most of a call): nothing to level, scale or add
                 samples = to_float(frame)
                 if self.normalize:
                     samples = buffer.leveler.process(samples)

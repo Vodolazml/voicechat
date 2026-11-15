@@ -140,18 +140,51 @@ class _PowerThrottling(ctypes.Structure):
 
 
 def set_call_active(active: bool) -> None:
-    """Keep full CPU speed and prevent sleep while in a call; restore normal behaviour afterwards."""
+    """Prevent sleep while in a call; restore normal behaviour afterwards."""
     if not IS_WINDOWS:
         return
     try:
         kernel32 = ctypes.windll.kernel32
-        info = _PowerThrottling(1, 0x1, 0x0 if active else 0x1)  # EXECUTION_SPEED: off during calls
-        kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4, ctypes.byref(info), ctypes.sizeof(info))
+        # No process-wide "full speed" any more: it kept the whole app (interface, video, Python) on the
+        # fast cores a game needs. Only the voice threads are exempt now (core/rt.py).
         ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
         kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if active else 0))
-        ctypes.windll.winmm.timeBeginPeriod(1) if active else ctypes.windll.winmm.timeEndPeriod(1)
     except Exception:
         logger.debug("Power settings not applied", exc_info=True)
+
+
+_precise_timer = False
+
+
+def set_precise_timer(on: bool) -> None:
+    """1 ms timer resolution, only while we send a screen or camera (even frame pacing). The voice does
+    not need it (WASAPI wakes the audio thread itself), and every extra wake-up costs a game a little."""
+    global _precise_timer
+    if not IS_WINDOWS or on == _precise_timer:
+        return
+    try:
+        (ctypes.windll.winmm.timeBeginPeriod if on else ctypes.windll.winmm.timeEndPeriod)(1)
+        _precise_timer = on
+    except Exception:
+        logger.debug("Timer resolution not changed", exc_info=True)
+
+
+_background = None
+
+
+def set_background(background: bool) -> None:
+    """Below-normal priority while the app is in the background: whatever it does then waits for a
+    game, never the other way round. The voice threads keep their own audio priority (core/rt.py)."""
+    global _background
+    if not IS_WINDOWS or background == _background:
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        BELOW_NORMAL, NORMAL = 0x4000, 0x20
+        kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL if background else NORMAL)
+        _background = background
+    except Exception:
+        logger.debug("Priority not changed", exc_info=True)
 
 
 def make_click_through(win_id: int) -> None:

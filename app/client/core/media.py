@@ -251,6 +251,10 @@ class MediaSession:
             self._thread.join(timeout)
 
     def _run(self) -> None:
+        # This loop carries the voice both ways (mic frames out, friends' frames into the mixer).
+        from .rt import boost_voice_thread
+
+        boost_voice_thread("Audio")
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)

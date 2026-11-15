@@ -19,6 +19,7 @@ import numpy as np
 
 from .dsp import (FADE_IN, FADE_OUT, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE, SILENCE, Mixer, RNNoise, VoiceGate,
                   apply_gain, fade, to_bytes, to_float)
+from .rt import boost_voice_thread
 
 logger = logging.getLogger("voicechat.audio")
 
@@ -194,6 +195,7 @@ SILENT_FIRST = 3.5       # a mic silent since it was opened is reopened this soo
 SILENT_SECONDS = 8.0     # and again this often while it stays silent
 SILENT_REOPENS = 4       # reopen tries per opening, the hint shows after the last one
 PROCESSED_DEAD_SECONDS = 2.0  # the mic hears sound but processing outputs zeros this long: rebuild it
+RNNOISE_FLOOR = 100      # raw int16 peak (about -50 dBFS) under which RNNoise is skipped
 SOUND_BLOCKS = 30        # blocks with real sound (about 0.3 s) before a fresh mic counts as alive: opening
                          # a stuck Realtek mic gives one click and then zeros (Evgen, 2026-11-15 18:16)
 
@@ -534,6 +536,7 @@ class AudioEngine:
     # --- real-time callbacks ----------------------------------------------------------------------
 
     def _capture(self, indata, frames, time_info, status) -> None:
+        boost_voice_thread()
         if status and status.input_overflow:
             self._overflows += 1
         self._callbacks += 1
@@ -575,7 +578,11 @@ class AudioEngine:
         samples = to_float(frame)
         probability = None
         rnnoise = self._rnnoise
-        if rnnoise is not None:
+        # RNNoise is the costliest step; on near silence (between words, most of a call) it has nothing
+        # to remove and the voice gate stays closed anyway.
+        if rnnoise is not None and peak <= RNNOISE_FLOOR:
+            probability = 0.0  # what RNNoise says about near silence: no speech
+        elif rnnoise is not None:
             samples, probability = rnnoise.process(samples)
             frame = to_bytes(samples)
             peak = _peak(frame)
@@ -609,6 +616,7 @@ class AudioEngine:
             self.on_frame(SILENCE)
 
     def _playback(self, outdata, frames, time_info, status) -> None:
+        boost_voice_thread()
         if status and status.output_underflow:
             self._underflows += 1
         if frames != FRAME_SAMPLES:

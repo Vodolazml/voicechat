@@ -513,8 +513,35 @@ def test_processing_that_turns_speech_into_zeros_is_rebuilt(monkeypatch):
     try:
         assert wait_for(lambda: rebuilt, timeout=8)
         stats = engine.stats()
-        assert stats["out_peak_db"] <= -90 and stats["raw_peak_db"] > -30
+        assert stats["raw_peak_db"] > -30 and stats["out_peak_db"] < stats["raw_peak_db"] - 20
     finally:
         stop.set()
         engine._monitor_stop.set()
     assert problems == [], "a live mic with broken processing is not a stuck mic"
+
+
+def test_rnnoise_is_skipped_on_near_silence_and_reports_no_speech():
+    from app.client.core.audio import AudioEngine
+
+    calls = []
+
+    class Counting:
+        def process(self, samples):
+            calls.append(1)
+            return samples, 0.9
+
+    engine = AudioEngine(AudioSettings(noise="off", echo_cancellation=False, auto_gain=False), on_frame=lambda f: None)
+    engine._rnnoise = Counting()
+    engine._process_frame(bytes(FRAME_BYTES))
+    assert calls == [], "near silence: RNNoise not run"
+    engine._process_frame((np.full(FRAME_SAMPLES, 3277, dtype=np.int16)).tobytes())
+    assert calls == [1]
+
+
+def test_mixer_spends_nothing_on_quiet_peers():
+    from app.client.core.dsp import SILENCE, Mixer
+
+    mixer = Mixer()
+    for _ in range(10):
+        mixer.put(2, SILENCE)
+    assert all(mixer.mix() == SILENCE for _ in range(8))

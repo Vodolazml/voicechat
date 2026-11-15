@@ -1316,6 +1316,7 @@ class Backend(QObject):
             self._set("_focus_user", 0, self.focusChanged)
             self._ping_timer.stop()
             native.set_call_active(False)
+            self._apply_priority()
             if self._mic_test and self.call is not None:
                 # Settings are open on the voice tab: keep the level meter alive after hanging up.
                 try:
@@ -1341,6 +1342,7 @@ class Backend(QObject):
                     self._ping_timer.start()
                     self._measure_ping()
                 native.set_call_active(True)
+        self._apply_priority()
         self._update_timers()
         self.callChanged.emit()
         self._rebuild()
@@ -1364,9 +1366,14 @@ class Backend(QObject):
 
     def _on_app_state(self, state) -> None:
         self._active = state == Qt.ApplicationState.ApplicationActive
+        self._apply_priority()
         if self._active and self._ui_stale:
             self._ui_stale = False
             self._rebuild()
+
+    def _apply_priority(self) -> None:
+        native.set_background(not self._active)
+        native.set_precise_timer(self._capturer is not None or self._camera is not None)
 
     def count_frame(self) -> None:
         """Called by the windows for every frame they draw (any thread)."""
@@ -1586,6 +1593,7 @@ class Backend(QObject):
             return
         self.call.start_screen(capturer)
         self._capturer = capturer
+        self._apply_priority()
         if not self._video_timer.isActive():
             self._video_timer.start()
         self.toast("success", f"Демонстрация {'окна' if kind == 'window' else 'экрана'}: {preset.title}")
@@ -1595,6 +1603,7 @@ class Backend(QObject):
         if self.call is not None:
             self.call.stop_screen()
         self._capturer = None
+        self._apply_priority()
         video_hub().drop(self._me.get("id", 0))
 
     # --- camera -------------------------------------------------------------------------------
@@ -1625,6 +1634,7 @@ class Backend(QObject):
             self.toast("error", str(exc))
             return
         self._camera = capturer
+        self._apply_priority()
         self.ui["camera_id"] = camera_id
         self._save()
         self.call.start_camera(capturer)
@@ -1642,6 +1652,7 @@ class Backend(QObject):
 
     def _stop_camera_device(self) -> None:
         camera, self._camera = self._camera, None
+        self._apply_priority()
         if camera is not None:
             camera.stop()
             camera.deleteLater()

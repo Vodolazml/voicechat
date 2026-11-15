@@ -387,3 +387,28 @@ def test_picture_preview_is_cached_and_fetched_once(tmp_path, monkeypatch):
     backend_module._cached_image(picture).parent.mkdir(parents=True)
     backend_module._cached_image(picture).write_bytes(b"png")
     assert preview(fake, picture).startswith("file:") and preview(fake, picture).endswith("7.png")
+
+
+def test_others_video_stops_arriving_while_nobody_can_see_it(qt_app):
+    from types import SimpleNamespace
+
+    from app.client.ui.backend import Backend
+
+    calls = []
+    hidden = [False]
+    stub = SimpleNamespace(
+        _watching={5, 7}, _video_paused=False,
+        call=SimpleNamespace(watch=lambda uid, on: calls.append((uid, on))),
+        _pause_timer=SimpleNamespace(stop=lambda: None),
+        _video_hidden=lambda: hidden[0])
+    Backend._check_video_pause(stub)
+    assert calls == [], "visible: nothing changes"
+    hidden[0] = True  # minimized, or a fullscreen game in front
+    Backend._check_video_pause(stub)
+    assert sorted(calls) == [(5, False), (7, False)] and stub._video_paused
+    calls.clear()
+    Backend._check_video_pause(stub)
+    assert calls == [], "only on a change"
+    hidden[0] = False
+    Backend._check_video_pause(stub)
+    assert sorted(calls) == [(5, True), (7, True)] and not stub._video_paused

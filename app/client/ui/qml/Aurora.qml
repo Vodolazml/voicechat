@@ -5,6 +5,9 @@ Rectangle {
     id: root
     color: Theme.bg
     clip: true
+    // Drift only while the window is in front and shown: endless animations redraw the whole window
+    // every frame, which games behind or in front of us feel.
+    readonly property bool live: visible && Qt.application.state === Qt.ApplicationActive
 
     component Blob: Canvas {
         id: blob
@@ -26,7 +29,7 @@ Rectangle {
     Blob {
         tint: Theme.accent
         x: root.width * 0.05 - 260; y: root.height * 0.1 - 300
-        SequentialAnimation on x { loops: Animation.Infinite
+        SequentialAnimation on x { loops: Animation.Infinite; running: root.live
             NumberAnimation { to: root.width * 0.25 - 260; duration: 14000; easing.type: Easing.InOutSine }
             NumberAnimation { to: root.width * 0.05 - 260; duration: 14000; easing.type: Easing.InOutSine } }
     }
@@ -34,7 +37,7 @@ Rectangle {
         tint: "#ff3d9a"
         x: root.width * 0.65 - 360; y: root.height * 0.55 - 360
         opacity: 0.4
-        SequentialAnimation on y { loops: Animation.Infinite
+        SequentialAnimation on y { loops: Animation.Infinite; running: root.live
             NumberAnimation { to: root.height * 0.35 - 360; duration: 17000; easing.type: Easing.InOutSine }
             NumberAnimation { to: root.height * 0.55 - 360; duration: 17000; easing.type: Easing.InOutSine } }
     }
@@ -42,7 +45,7 @@ Rectangle {
         tint: "#22c3e6"
         x: root.width * 0.85 - 360; y: -260
         opacity: 0.3
-        SequentialAnimation on x { loops: Animation.Infinite
+        SequentialAnimation on x { loops: Animation.Infinite; running: root.live
             NumberAnimation { to: root.width * 0.6 - 360; duration: 19000; easing.type: Easing.InOutSine }
             NumberAnimation { to: root.width * 0.85 - 360; duration: 19000; easing.type: Easing.InOutSine } }
     }

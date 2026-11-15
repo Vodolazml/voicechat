@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import logging
 import sys
 
@@ -114,6 +115,24 @@ def foreground_is_fullscreen() -> bool:
         return state.value in (2, 3, 4)
     except Exception:
         return False
+
+
+def foreground_is_ours() -> bool:
+    """Is the window in front one of ours (for example our own fullscreen video)?"""
+    if not IS_WINDOWS:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        pid = ctypes.c_ulong(0)
+        user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), ctypes.byref(pid))
+        return pid.value == os.getpid()
+    except Exception:
+        return False
+
+
+def game_in_front() -> bool:
+    """Someone else's fullscreen app (a game) is in front."""
+    return foreground_is_fullscreen() and not foreground_is_ours()
 
 
 class _PowerThrottling(ctypes.Structure):

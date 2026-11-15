@@ -431,6 +431,11 @@ class Backend(QObject):
         self._ping_timer = QTimer(self, interval=10_000, timeout=self._measure_ping)
         # Real (measured) resolution and frame rate of streams, refreshed once a second.
         self._video_timer = QTimer(self, interval=1000, timeout=self._update_video_info)
+        # Others' screens and cameras are decoded by the processor (LiveKit has no hardware decoder on
+        # Windows). Nobody sees them while our window is minimized or a game is in front, so we stop
+        # receiving them then: a 1080p60 share watched in the background cost a laptop 120 -> 75 fps.
+        self._video_paused = False
+        self._pause_timer = QTimer(self, interval=2000, timeout=self._check_video_pause)
         self._capturer: ScreenCapturer | None = None
         self._camera = None                        # CameraCapturer while our camera is on
         self._cameras: set[int] = set()            # who has a camera on in our call
@@ -1451,10 +1456,36 @@ class Backend(QObject):
                 self._set("_focus_user", 0, self.focusChanged)
         else:
             self._set("_focus_user", user_id, self.focusChanged)
-        self.call.watch(user_id, watching)
+        self.call.watch(user_id, watching and not self._video_paused)
         self.stage.update(user_id, watching=watching)
         if watching and not self._video_timer.isActive():
             self._video_timer.start()
+        if self._watching and not self._pause_timer.isActive():
+            self._pause_timer.start()
+
+    def _video_hidden(self) -> bool:
+        if native.game_in_front():
+            return True
+        for window in QGuiApplication.topLevelWindows():
+            if window.flags() & Qt.WindowTransparentForInput:
+                continue  # the overlay
+            if window.isVisible() and window.visibility() not in (window.Visibility.Minimized,
+                                                                  window.Visibility.Hidden):
+                return False
+        return True
+
+    def _check_video_pause(self) -> None:
+        if not self._watching or self.call is None:
+            self._pause_timer.stop()
+            self._video_paused = False
+            return
+        paused = self._video_hidden()
+        if paused == self._video_paused:
+            return
+        self._video_paused = paused
+        logger.info("Receiving others' video %s", "paused: nobody can see it" if paused else "resumed")
+        for uid in list(self._watching):
+            self.call.watch(uid, not paused)
 
     @Slot(int)
     def focusUser(self, user_id: int) -> None:

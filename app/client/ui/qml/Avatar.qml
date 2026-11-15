@@ -33,11 +33,11 @@ Item {
         visible: root.speaking
         opacity: 0
         SequentialAnimation on opacity {
-            running: root.speaking; loops: Animation.Infinite
+            running: root.speaking && Qt.application.state === Qt.ApplicationActive; loops: Animation.Infinite
             NumberAnimation { from: 0.45; to: 0; duration: 900; easing.type: Easing.OutCubic }
         }
         SequentialAnimation on scale {
-            running: root.speaking; loops: Animation.Infinite
+            running: root.speaking && Qt.application.state === Qt.ApplicationActive; loops: Animation.Infinite
             NumberAnimation { from: 0.8; to: 1.15; duration: 900; easing.type: Easing.OutCubic }
         }
     }

@@ -68,8 +68,11 @@ Window {
                     id: mark
                     anchors.centerIn: parent
                     size: 84; glow: true
+                    // Only while the splash is shown. Left running in the hidden splash, this one animation
+                    // made Qt redraw the main window at full speed whenever it was not minimised (140 fps
+                    // behind a game on a 60 Hz monitor, Evgen 2026-11-17).
                     SequentialAnimation on scale {
-                        loops: Animation.Infinite
+                        loops: Animation.Infinite; running: splash.visible
                         NumberAnimation { from: 1; to: 1.06; duration: 700; easing.type: Easing.InOutSine }
                         NumberAnimation { from: 1.06; to: 1; duration: 700; easing.type: Easing.InOutSine }
                     }

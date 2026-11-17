@@ -134,9 +134,47 @@ def foreground_is_ours() -> bool:
         return False
 
 
+def foreground_covers_monitor() -> bool:
+    """The window in front fills its whole monitor (borderless fullscreen games, which Windows does not
+    always report as fullscreen). The desktop and the taskbar don't count."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        name = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(ctypes.c_void_p(hwnd), name, 64)
+        if name.value in ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+            return False
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT), ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
+
+        rect = RECT()
+        if not user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+            return False
+        user32.MonitorFromWindow.restype = ctypes.c_void_p
+        monitor = user32.MonitorFromWindow(ctypes.c_void_p(hwnd), 2)  # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not user32.GetMonitorInfoW(ctypes.c_void_p(monitor), ctypes.byref(info)):
+            return False
+        m = info.rcMonitor
+        return rect.left <= m.left and rect.top <= m.top and rect.right >= m.right and rect.bottom >= m.bottom
+    except Exception:
+        return False
+
+
 def game_in_front() -> bool:
     """Someone else's fullscreen app (a game) is in front."""
-    return foreground_is_fullscreen() and not foreground_is_ours()
+    return (foreground_is_fullscreen() or foreground_covers_monitor()) and not foreground_is_ours()
 
 
 class _PowerThrottling(ctypes.Structure):

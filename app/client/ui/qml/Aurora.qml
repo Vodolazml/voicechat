@@ -7,7 +7,9 @@ Rectangle {
     clip: true
     // Drift only while the window is in front and shown: endless animations redraw the whole window
     // every frame, which games behind or in front of us feel.
-    readonly property bool live: visible && Qt.application.state === Qt.ApplicationActive
+    // (An item in a hidden window still has visible: true, hence the window check.)
+    readonly property bool live: visible && Window.window !== null && Window.window.visible
+                                 && Qt.application.state === Qt.ApplicationActive
 
     component Blob: Canvas {
         id: blob

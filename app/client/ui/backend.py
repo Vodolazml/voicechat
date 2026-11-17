@@ -59,12 +59,33 @@ UI_DEFAULTS: dict[str, Any] = {
     "overlay_enabled": False, "overlay_corner": "top-left", "overlay_scale": 1.0, "overlay_opacity": 0.5,
     "overlay_text_opacity": 1.0,
     "overlay_speakers_only": False,
+    # Over a fullscreen game: "speaking" = only while someone talks, "hide" = never, "always" = as usual.
+    # Any window above a game takes away its direct path to the screen (210 -> 144 fps in CS2, 2026-11-17).
+    "overlay_in_game": "speaking",
     "sound_join_leave": True, "sound_video": True, "sound_messages": True, "notify_mentions": True,
     "voice_prompts": True,
     "overlay_x": 0.02, "overlay_y": 0.03,
     "accent": "#7c5cff", "compact": False, "close_to_tray": True, "autostart": False,
     "screen_preset": "1080p60", "screen_monitor": 1, "camera_id": "",
 }
+
+
+def running_animations(limit: int = 12) -> list[str]:
+    """QML animations running in any of our windows (any of them makes Qt redraw every visible window)."""
+    found: list[str] = []
+    try:
+        for window in QGuiApplication.topLevelWindows():
+            for obj in window.findChildren(QObject):
+                name = obj.metaObject().className()
+                if ("Animation" in name or "Animator" in name) and obj.property("running"):
+                    parent = obj.parent()
+                    owner = parent.metaObject().className() if parent is not None else "?"
+                    found.append(f"{name.replace('QQuick', '')} on {owner} in '{window.title()}'")
+                    if len(found) >= limit:
+                        return found
+    except Exception:
+        logger.debug("Animation scan failed", exc_info=True)
+    return found
 
 
 def avatar_color(user_id: int) -> str:
@@ -337,6 +358,7 @@ class Backend(QObject):
     devicesChanged = Signal()
     levelChanged = Signal()
     anyoneSpeakingChanged = Signal()
+    gameInFrontChanged = Signal()
     onlineChanged = Signal()
     sessionsChanged = Signal()
     safetyChanged = Signal()
@@ -433,6 +455,9 @@ class Backend(QObject):
         self._keys_poller = native.KeyPoller()
         self._apply_hotkeys()
         self._key_timer = QTimer(self, interval=15, timeout=self._poll_keys)
+        # Is a fullscreen game in front? Checked twice a second, only in a call with the overlay on.
+        self._game_in_front = False
+        self._game_timer = QTimer(self, interval=500, timeout=self._poll_game)
         self._level_timer = QTimer(self, interval=60, timeout=self._poll_level)
         self._transmit_hold = QTimer(self, singleShot=True,
                                      timeout=lambda: self._set_transmitting(bool(getattr(self.call and self.call.audio,
@@ -668,6 +693,7 @@ class Backend(QObject):
     micLevel = Property(float, lambda self: self._level, notify=levelChanged)
     # The overlay in "only who speaks" mode hides its window completely while everyone is quiet, so
     # that a game in borderless mode gets its fast presentation path back (any window above it blocks it).
+    gameInFront = Property(bool, lambda self: self._game_in_front, notify=gameInFrontChanged)
     anyoneSpeaking = Property(bool, lambda self: bool(self._speakers) or self._transmitting,
                               notify=anyoneSpeakingChanged)
 
@@ -1433,6 +1459,9 @@ class Backend(QObject):
                     "of all cores (%.1f%% of one), %s, %s", frames, overlay, changes, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
                     (cpu - cpu_then) / wall * 100, "active" if self._active else "in background",
                     "in a call" if self._call_channel else "not in a call")
+        if not self._active and frames > 600:
+            # Something keeps the window drawing in the background: name the animations still running.
+            logger.warning("Background redraws: running animations: %s", running_animations() or "none")
 
     def _on_quality(self, user_id: int, quality: int) -> None:
         self._quality[user_id] = quality
@@ -2291,6 +2320,8 @@ class Backend(QObject):
             self.ui[key] = value
             if key.startswith("key_"):
                 self._apply_hotkeys()
+            if key == "overlay_enabled":
+                self._update_timers()
             if key == "autostart":
                 try:
                     native.set_autostart(bool(value), f'"{sys.executable}" --tray')
@@ -2350,7 +2381,18 @@ class Backend(QObject):
     def _native_voice(self) -> bool:
         return self.call is not None and bool(getattr(self.call.audio, "native", False))
 
+    def _poll_game(self) -> None:
+        game = bool(native.game_in_front())
+        if game != self._game_in_front:
+            self._game_in_front = game
+            self.gameInFrontChanged.emit()
+
     def _update_timers(self) -> None:
+        overlay = bool(self._call_channel) and bool(self.ui.get("overlay_enabled"))
+        if overlay and not self._game_timer.isActive():
+            self._game_timer.start()
+        elif not overlay and self._game_timer.isActive():
+            self._game_timer.stop()
         native = self._native_voice()
         # The native engine reports our own speaking by itself; the timer only feeds the settings meter.
         active = self._mic_test if native else (bool(self._call_channel) or self._mic_test)

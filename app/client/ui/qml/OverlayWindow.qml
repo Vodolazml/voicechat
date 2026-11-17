@@ -12,7 +12,13 @@ Window {
     transientParent: null
     // "Only who speaks": no window at all while everyone is quiet (a window above a borderless game
     // takes away its fast presentation path and costs fps).
-    visible: backend.inCall && !!s.overlay_enabled && (!s.overlay_speakers_only || backend.anyoneSpeaking)
+    // Over a fullscreen game ("overlay_in_game"): by default only while someone talks. Any window above a
+    // game takes away its direct path to the screen, which cost 210 -> 144 fps in CS2 (2026-11-17).
+    readonly property bool usual: !s.overlay_speakers_only || backend.anyoneSpeaking
+    readonly property string inGame: s.overlay_in_game || "speaking"
+    visible: backend.inCall && !!s.overlay_enabled
+             && (!backend.gameInFront ? usual
+                 : inGame === "always" ? usual : inGame === "speaking" ? backend.anyoneSpeaking : false)
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint
     color: "transparent"
     width: 260 * k

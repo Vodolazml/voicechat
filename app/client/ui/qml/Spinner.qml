@@ -17,8 +17,10 @@ Item {
             ctx.arc(width / 2, height / 2, width / 2 - ctx.lineWidth, 0, Math.PI * 1.4);
             ctx.stroke();
         }
-        // Not while the app is in the background: an endless rotation makes Qt redraw the window every frame.
+        // Not while the app is in the background, nor in a hidden window (an item keeps visible: true there):
+        // any running animation makes Qt redraw every shown window of the app at full speed.
         RotationAnimation on rotation { from: 0; to: 360; duration: 800; loops: Animation.Infinite
-                                        running: root.visible && Qt.application.state === Qt.ApplicationActive }
+                                        running: root.visible && root.Window.window !== null && root.Window.window.visible
+                                                 && Qt.application.state === Qt.ApplicationActive }
     }
 }

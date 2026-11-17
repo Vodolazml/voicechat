@@ -213,6 +213,14 @@ Rectangle {
                     Toggle { title: "Оверлей поверх игры"; hint: "Маленький список: кто в канале и кто говорит. Мышь проходит сквозь него, фокус он не забирает"; checked: root.s.overlay_enabled; onToggled: (v) => backend.setSetting("overlay_enabled", v) }
                     Toggle { title: "Показывать только говорящих"; checked: root.s.overlay_speakers_only; onToggled: (v) => backend.setSetting("overlay_speakers_only", v) }
                     Segmented {
+                        title: "Поверх полноэкранной игры"
+                        options: [{value: "speaking", title: "Только когда говорят"}, {value: "hide", title: "Не показывать"}, {value: "always", title: "Всегда"}]
+                        current: root.s.overlay_in_game || "speaking"
+                        onPicked: (v) => backend.setSetting("overlay_in_game", v)
+                    }
+                    Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12
+                        text: "Любое окно поверх игры отнимает у неё FPS: Windows перестаёт выводить игру на экран напрямую. Пока все молчат, оверлея над игрой нет." }
+                    Segmented {
                         title: "Положение на экране"
                         options: [{value: "top-left", title: "Слева сверху"}, {value: "top-right", title: "Справа сверху"}, {value: "bottom-left", title: "Слева снизу"}, {value: "bottom-right", title: "Справа снизу"}, {value: "custom", title: "Своё место"}]
                         current: root.s.overlay_corner

@@ -5,6 +5,7 @@
 mod dsp;
 mod engine;
 mod events;
+mod keys;
 mod room;
 
 use std::io::BufRead;
@@ -55,6 +56,7 @@ fn main() {
             })
             .expect("level thread");
     }
+    let keys = keys::Keys::start(engine.clone(), events.clone());
     events.send(json!({"ev": "ready", "version": env!("CARGO_PKG_VERSION")}));
     log::info!("vcvoice {} started", env!("CARGO_PKG_VERSION"));
 
@@ -117,6 +119,22 @@ fn main() {
                 stats["ev"] = json!("stats");
                 stats["id"] = msg["id"].clone();
                 events.send(stats);
+            }
+            "keys" => {
+                // {"name": [virtual key codes]}; {} stops reading the keyboard.
+                let combos = msg["combos"]
+                    .as_object()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(name, codes)| {
+                                let codes: Vec<i32> =
+                                    codes.as_array()?.iter().filter_map(|c| c.as_i64().map(|c| c as i32)).collect();
+                                (!codes.is_empty()).then(|| (name.clone(), codes))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                keys.set(combos);
             }
             "level" => level_on.store(msg["on"].as_bool().unwrap_or(false), Ordering::Relaxed),
             "devices" => {

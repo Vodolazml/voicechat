@@ -130,6 +130,26 @@ Rectangle {
                                 threshold: root.s.mode === "voice" && !root.s.auto_threshold ? (root.s.threshold_db + 60) / 60 : 0
                             }
                             Text { text: "Говорите: полоска покажет уровень, а зелёный цвет значит, что голос уходит друзьям."; color: Theme.faint; font.family: Theme.font; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+                            // The mic's trigger level, right under the meter so it can be set while watching it.
+                            // Works with any noise suppression, including "Стандартное".
+                            Segmented {
+                                visible: root.s.mode === "voice"
+                                title: "Порог срабатывания микрофона"
+                                options: [{value: "auto", title: "Автоматически"}, {value: "manual", title: "Вручную"}]
+                                current: root.s.auto_threshold ? "auto" : "manual"
+                                onPicked: (v) => backend.setSetting("auto_threshold", v === "auto")
+                            }
+                            SliderRow {
+                                visible: root.s.mode === "voice" && !root.s.auto_threshold
+                                title: "Порог"; from: -70; to: -10; stepSize: 1; value: root.s.threshold_db; suffix: " дБ"; displayScale: 1
+                                onMoved: (v) => backend.setSetting("threshold_db", v)
+                            }
+                            Text {
+                                visible: root.s.mode === "voice"
+                                text: root.s.auto_threshold ? "Порог подстраивается под шум комнаты сам."
+                                                            : "Белая метка на полоске — порог. Тише неё микрофон молчит: поставьте её чуть выше шума комнаты и клавиатуры, но ниже вашего голоса."
+                                color: Theme.faint; font.family: Theme.font; font.pixelSize: 12; Layout.fillWidth: true; wrapMode: Text.WordWrap
+                            }
                         }
                     }
                     Segmented {
@@ -142,12 +162,6 @@ Rectangle {
                         visible: root.s.mode === "ptt"
                         title: "Кнопка рации"; hint: "Работает поверх игр: держите и говорите. Подойдут боковые кнопки мыши."
                         value: root.s.key_ptt; onChanged: (v) => backend.setSetting("key_ptt", v)
-                    }
-                    Toggle { visible: root.s.mode === "voice"; title: "Определять порог голоса автоматически"; hint: "Подстраивается под шум комнаты"; checked: root.s.auto_threshold; onToggled: (v) => backend.setSetting("auto_threshold", v) }
-                    SliderRow {
-                        visible: root.s.mode === "voice" && !root.s.auto_threshold
-                        title: "Порог голоса"; from: -70; to: -10; stepSize: 1; value: root.s.threshold_db; suffix: " дБ"; displayScale: 1
-                        onMoved: (v) => backend.setSetting("threshold_db", v)
                     }
                     Segmented {
                         title: "Шумоподавление"

@@ -126,6 +126,9 @@ class NativeVoice:
         self.on_quality: Callable[[int, int], None] = lambda user_id, quality: None
         self.on_key_problem: Callable[[int], None] = lambda user_id: None
         self.on_transmitting: Callable[[bool], None] = lambda on: None
+        # Shortcut keys read by the engine (push-to-talk is applied there; the rest comes here).
+        self.on_key: Callable[[str, bool], None] = lambda name, down: None
+        self._keys: dict[str, list[int]] = {}
         self.path = path or engine_path()
         if self.path is None:
             raise RuntimeError("The voice engine (vcvoice) is not installed")
@@ -168,6 +171,8 @@ class NativeVoice:
             self._send(cmd="deafen", on=True)
         for user_id in self.mixer.muted_users:
             self._send(cmd="mute_user", user_id=int(user_id), on=True)
+        if self._keys:
+            self._send(cmd="keys", combos=self._keys)
         if self._running:
             self._send(cmd="start")
         if self._local_key:
@@ -238,6 +243,11 @@ class NativeVoice:
         elif kind == "tx":
             self.transmitting = bool(event.get("on"))
             self.on_transmitting(self.transmitting)
+        elif kind == "key":
+            name, down = str(event.get("name")), bool(event.get("down"))
+            if name == "ptt":
+                self._ptt = down  # the engine has already applied it
+            self.on_key(name, down)
         elif kind == "level":
             self.input_level_db = float(event.get("db", -96.0))
             self.transmitting = bool(event.get("tx", self.transmitting))
@@ -309,6 +319,13 @@ class NativeVoice:
         if bool(value) != self._ptt:
             self._ptt = bool(value)
             self._send(cmd="ptt", down=self._ptt)
+
+    def set_keys(self, combos: dict[str, tuple[int, ...]]) -> None:
+        """Shortcuts to watch ({} stops reading the keyboard)."""
+        keys = {name: [int(k) for k in codes] for name, codes in combos.items() if codes}
+        if keys != self._keys:
+            self._keys = keys
+            self._send(cmd="keys", combos=keys)
 
     def set_level_reports(self, on: bool) -> None:
         self._send(cmd="level", on=bool(on))

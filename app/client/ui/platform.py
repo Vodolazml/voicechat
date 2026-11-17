@@ -84,6 +84,10 @@ class KeyPoller:
         self._combos = {name: keys for name, text in combos.items() if (keys := parse_combo(text))}
         self._down = {name: False for name in self._combos}
 
+    @property
+    def combos(self) -> dict[str, tuple[int, ...]]:
+        return dict(self._combos)
+
     def is_down(self, name: str) -> bool:
         return self._down.get(name, False)
 
@@ -215,6 +219,8 @@ def keep_on_top(win_id: int) -> None:
         return
     try:
         user32 = ctypes.windll.user32
+        if not _topmost_above(user32, win_id):
+            return  # already first: touching the Z order would only make Windows recompose the screen
         HWND_TOPMOST = ctypes.c_void_p(-1)
         SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x1, 0x2, 0x10, 0x200
         user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
@@ -223,6 +229,22 @@ def keep_on_top(win_id: int) -> None:
                             SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
     except Exception:
         logger.debug("Overlay not put back on top", exc_info=True)
+
+
+def _topmost_above(user32, win_id: int) -> bool:
+    """Is a visible topmost window (a game's or another overlay) above ours in the Z order?"""
+    GW_HWNDPREV, GWL_EXSTYLE, WS_EX_TOPMOST = 3, -20, 0x8
+    user32.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    user32.GetWindow.restype = ctypes.c_void_p
+    get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+    hwnd = user32.GetWindow(ctypes.c_void_p(win_id), GW_HWNDPREV)
+    steps = 0
+    while hwnd and steps < 200:
+        if user32.IsWindowVisible(ctypes.c_void_p(hwnd)) and get(ctypes.c_void_p(hwnd), GWL_EXSTYLE) & WS_EX_TOPMOST:
+            return True
+        hwnd = user32.GetWindow(ctypes.c_void_p(hwnd), GW_HWNDPREV)
+        steps += 1
+    return False
 
 
 def _colorref(hex_color: str) -> int:

@@ -10,7 +10,9 @@ Window {
     // A window of its own, not owned by the main one: Windows hides owned windows together with their
     // owner, so minimising VoiceChat used to take the overlay away as well.
     transientParent: null
-    visible: backend.inCall && !!s.overlay_enabled
+    // "Only who speaks": no window at all while everyone is quiet (a window above a borderless game
+    // takes away its fast presentation path and costs fps).
+    visible: backend.inCall && !!s.overlay_enabled && (!s.overlay_speakers_only || backend.anyoneSpeaking)
     flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint
     color: "transparent"
     width: 260 * k
@@ -33,7 +35,7 @@ Window {
         interval: 1000
         repeat: true
         running: win.visible
-        onTriggered: overlayHelper.keepOnTop(win)
+        onTriggered: overlayHelper.keepOnTop(win)  // does nothing unless another topmost window got above
     }
 
     Column {

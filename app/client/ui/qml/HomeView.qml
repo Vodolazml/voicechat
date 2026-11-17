@@ -16,8 +16,9 @@ Rectangle {
                 GradientStop { position: 1; color: "#ff3d9a" } }
             Icon { anchors.centerIn: parent; name: "headset"; color: "white"; width: 48; height: 48 }
             // Only while our window is in front: an endless animation makes Qt redraw the whole window
-            // every frame (120-165 times a second), and behind a game that cost it a third of its fps.
-            SequentialAnimation on scale { loops: Animation.Infinite; running: Qt.application.state === Qt.ApplicationActive
+            // every frame (120-165 times a second), and behind a game that cost it a third of its fps. And
+            // only while the home screen is shown: hidden during a call it still kept the window at 200 fps.
+            SequentialAnimation on scale { loops: Animation.Infinite; running: visible && Qt.application.state === Qt.ApplicationActive
                 NumberAnimation { to: 1.05; duration: 1600; easing.type: Easing.InOutSine }
                 NumberAnimation { to: 1.0; duration: 1600; easing.type: Easing.InOutSine } }
         }

@@ -336,6 +336,7 @@ class Backend(QObject):
     settingsChanged = Signal()
     devicesChanged = Signal()
     levelChanged = Signal()
+    anyoneSpeakingChanged = Signal()
     onlineChanged = Signal()
     sessionsChanged = Signal()
     safetyChanged = Signal()
@@ -665,6 +666,10 @@ class Backend(QObject):
                            notify=localChanged)
     transmitting = Property(bool, lambda self: self._transmitting, notify=levelChanged)
     micLevel = Property(float, lambda self: self._level, notify=levelChanged)
+    # The overlay in "only who speaks" mode hides its window completely while everyone is quiet, so
+    # that a game in borderless mode gets its fast presentation path back (any window above it blocks it).
+    anyoneSpeaking = Property(bool, lambda self: bool(self._speakers) or self._transmitting,
+                              notify=anyoneSpeakingChanged)
 
     chatChannelId = Property(int, lambda self: self._chat_channel, notify=chatChanged)
     chatChannelName = Property(str, lambda self: self._channel_name(self._chat_channel), notify=chatChanged)
@@ -954,6 +959,7 @@ class Backend(QObject):
             on_notice=lambda level, text: self._ui(lambda: self.toast(level, text)),
             on_local=lambda flags: None,
             on_transmitting=lambda on: self._ui(lambda: self._set_transmitting(on)),
+            on_key=lambda name, down: self._ui(lambda: self._on_key(name, down)),
         )
         self.call = CallController(self.api, self.keys, self.audio_settings, listener)
         self.events = EventStream(self.api.base_url, lambda: self.api.token or "",
@@ -1378,6 +1384,7 @@ class Backend(QObject):
         if speakers != self._speakers:
             self._speakers = set(speakers)
             self._speaker_changes = getattr(self, "_speaker_changes", 0) + 1
+            self.anyoneSpeakingChanged.emit()
             if self._ui_quiet():
                 self._ui_stale = True
                 return
@@ -2352,6 +2359,10 @@ class Backend(QObject):
         # The keyboard is read only during a call and only for the shortcuts that are set (antivirus
         # heuristics rightly dislike programs that watch the keyboard all the time).
         keys = bool(self._call_channel) and self._keys_poller.has_combos
+        if native:
+            # The engine reads the shortcuts (and applies push-to-talk itself) without waking Python.
+            self.call.audio.set_keys(self._keys_poller.combos if keys else {})
+            keys = False
         for timer, wanted in ((self._level_timer, active), (self._key_timer, keys)):
             if wanted and not timer.isActive():
                 timer.start()
@@ -2364,14 +2375,19 @@ class Backend(QObject):
         if not self._call_channel or self.call is None:
             return
         for name, down in self._keys_poller.poll():
-            if name == "ptt":
-                self.call.set_push_to_talk(down)
-            elif down and name == "mute":
-                self.toggleMute()
-            elif down and name == "deafen":
-                self.toggleDeafen()
-            elif down and name == "overlay":
-                self.setSetting("overlay_enabled", not self.ui.get("overlay_enabled"))
+            self._on_key(name, down)
+
+    def _on_key(self, name: str, down: bool) -> None:
+        if not self._call_channel or self.call is None:
+            return
+        if name == "ptt":
+            self.call.set_push_to_talk(down)
+        elif down and name == "mute":
+            self.toggleMute()
+        elif down and name == "deafen":
+            self.toggleDeafen()
+        elif down and name == "overlay":
+            self.setSetting("overlay_enabled", not self.ui.get("overlay_enabled"))
 
     def _poll_level(self) -> None:
         if self.call is None:
@@ -2404,6 +2420,7 @@ class Backend(QObject):
             return
         self._transmitting = transmitting
         self.levelChanged.emit()
+        self.anyoneSpeakingChanged.emit()
         if self._call_channel:
             self.stage.update(self._me.get("id"), speaking=transmitting)
             my_row = self.channels.find(self._call_channel)

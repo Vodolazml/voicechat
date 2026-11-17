@@ -52,6 +52,7 @@ class CallListener:
     on_identity_changed: Callable[[int], None] = lambda user_id: None
     on_local: Callable[[dict], None] = lambda flags: None              # muted/deafened/transmitting
     on_transmitting: Callable[[bool], None] = lambda on: None          # native engine: our own voice gate
+    on_key: Callable[[str, bool], None] = lambda name, down: None       # native engine: a shortcut key
 
 
 @dataclass
@@ -95,6 +96,7 @@ class CallController:
             self.audio.on_quality = lambda user_id, quality: self.listener.on_quality(user_id, quality)
             self.audio.on_key_problem = lambda user_id: self._on_key_problem(self.channel_id, user_id)
             self.audio.on_transmitting = lambda on: self.listener.on_transmitting(on)
+            self.audio.on_key = lambda name, down: self.listener.on_key(name, down)
             logger.info("Voice runs in the native engine")
 
     # --- public API (UI thread) -----------------------------------------------------------------

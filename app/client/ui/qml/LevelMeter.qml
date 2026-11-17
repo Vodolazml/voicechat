@@ -6,10 +6,10 @@ Rectangle {
     property real level: 0
     property real threshold: 0.25
     property bool active: false
-    height: 10; radius: 5
+    height: 14; radius: 7
     color: Theme.line
     Rectangle {
-        height: parent.height; radius: 5
+        height: parent.height; radius: 7
         width: Math.max(parent.radius * 2, parent.width * meter.level)
         color: meter.active ? Theme.good : Theme.faint
         Behavior on width { NumberAnimation { duration: 60 } }

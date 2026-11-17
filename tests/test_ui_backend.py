@@ -425,7 +425,8 @@ def test_background_app_skips_cosmetic_updates_and_catches_up_when_active(qt_app
     stub = SimpleNamespace(_speakers=set(), _speakers_raw=set(), _speaker_seen={}, _speaker_hold_pending=True,
                            _active=False, _ui_stale=False, _call_channel=4,
                            ui={"overlay_enabled": False}, _rebuild=lambda: rebuilt.append(True),
-                           _apply_priority=lambda: None)
+                           _apply_priority=lambda: None,
+                           anyoneSpeakingChanged=SimpleNamespace(emit=lambda: None))
     stub._overlay_shown = lambda: Backend._overlay_shown(stub)
     stub._ui_quiet = lambda: Backend._ui_quiet(stub)
     Backend._on_speakers(stub, {2})

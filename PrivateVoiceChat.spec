@@ -67,6 +67,16 @@ with open('build/version_info.py', 'w', encoding='utf-8') as _f:
 )
 """)
 binaries += collect_dynamic_libs('pyrnnoise', destdir='pyrnnoise')
+# The native voice engine (native/vcvoice, built with cargo). Without it the app falls back to the
+# Python voice path, so a missing exe is loud here rather than silent in the field.
+_vcvoice = [p for p in (os.environ.get('VCVOICE_EXE', ''),
+                        os.path.join('native', 'vcvoice', 'target', 'release', 'vcvoice.exe'),
+                        r'C:\vcb\vcvoice-target\release\vcvoice.exe') if p and os.path.isfile(p)]
+if _vcvoice:
+    binaries += [(_vcvoice[0], '.')]
+    print('vcvoice bundled from', _vcvoice[0])
+else:
+    print('WARNING: vcvoice.exe not found: this build uses the Python voice engine')
 # PyAV with its ffmpeg: screen shares encoded by an NVIDIA card (h264_nvenc). Its DLLs live next to the
 # package in "av.libs" (delvewheel); take them all, avcodec needs every one to load.
 try:

@@ -904,7 +904,7 @@ fn open_streams(shared: &Arc<Shared>) -> Result<Streams, String> {
     input_stream.play().map_err(|e| e.to_string())?;
     output_stream.play().map_err(|e| e.to_string())?;
     log::info!(
-        "Audio opened: mic '{}' ({} Hz, {} ch, {:?}), speakers '{}' ({} Hz, {} ch, {:?}), noise {}, echo {}, agc {}",
+        "Audio opened: mic '{}' ({} Hz, {} ch, {:?}), speakers '{}' ({} Hz, {} ch, {:?}), noise {}, echo {}, leveler {}",
         input.name().unwrap_or_default(),
         in_config.sample_rate().0,
         in_config.channels(),

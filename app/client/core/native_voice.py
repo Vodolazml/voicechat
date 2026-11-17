@@ -188,6 +188,10 @@ class NativeVoice:
             if not line:
                 continue
             level, _, rest = line.partition(" ")
+            if level not in ("ERROR", "WARN", "INFO"):
+                # WebRTC's own C++ logging (codec collisions, socket errors...): noise unless debugging.
+                engine_log.debug("%s", line)
+                continue
             engine_log.log({"ERROR": logging.WARNING, "WARN": logging.WARNING}.get(level, logging.INFO), "%s", rest)
 
     def _read_events(self, proc: subprocess.Popen) -> None:

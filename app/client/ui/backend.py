@@ -47,6 +47,7 @@ from .screen import PRESETS, ScreenCapturer, list_monitors, list_windows, video_
 from app.client.core.media import camera_key
 
 logger = logging.getLogger("voicechat.ui")
+SPEAKING_HOLD = 0.4  # seconds of quiet before a speaker's highlight goes off
 
 LOG_DIR = SETTINGS_PATH.parent / "logs"
 AVATAR_COLORS = ["#7c5cff", "#ff5c8a", "#22c3a6", "#ffb020", "#3ea6ff", "#ff7849", "#a66bff", "#2fd67b",
@@ -383,7 +384,11 @@ class Backend(QObject):
         self._unread: dict[int, int] = {}
         self._call_state = IDLE
         self._call_channel = 0
-        self._speakers: set[int] = set()
+        self._speakers: set[int] = set()   # shown as speaking (with SPEAKING_HOLD)
+        self._speakers_raw: set[int] = set()  # speaking right now according to the media server
+        self._speaker_seen: dict[int, float] = {}
+        self._speaker_hold_pending = False
+        self._transmit_seen = 0.0
         self._streams: set[int] = set()
         self._watching: set[int] = set()
         self._quality: dict[int, int] = {}
@@ -1307,6 +1312,8 @@ class Backend(QObject):
             self._announced_channel = 0
             self.sounds.keep_open = False  # closes itself once the last sound has played
             self._speakers.clear()
+            self._speakers_raw.clear()
+            self._speaker_seen.clear()
             self._streams.clear()
             self._video_seen.clear()
             self._watching.clear()
@@ -1349,12 +1356,32 @@ class Backend(QObject):
         self._rebuild()
 
     def _on_speakers(self, speakers: set[int]) -> None:
+        # "Speaking" flickers with every pause between words. Each flip redrew the overlay and the window,
+        # which with friends talking added up to the overlay drawing at the monitor rate (12,000 frames
+        # a minute, 2026-11-17). A speaker lights up at once and goes dark only after SPEAKING_HOLD of quiet.
+        now = time.monotonic()
+        seen = self._speaker_seen
+        for uid in speakers:
+            seen[uid] = now
+        for uid in [u for u, t in seen.items() if now - t >= SPEAKING_HOLD and u not in speakers]:
+            del seen[uid]
+        self._speakers_raw = set(speakers)
+        shown = set(seen)
+        if shown - self._speakers_raw and not self._speaker_hold_pending:
+            self._speaker_hold_pending = True
+            QTimer.singleShot(int(SPEAKING_HOLD * 1000) + 20, self._speaker_hold_over)
+        speakers = shown
         if speakers != self._speakers:
             self._speakers = set(speakers)
+            self._speaker_changes = getattr(self, "_speaker_changes", 0) + 1
             if self._ui_quiet():
                 self._ui_stale = True
                 return
             self._rebuild()
+
+    def _speaker_hold_over(self) -> None:
+        self._speaker_hold_pending = False
+        self._on_speakers(self._speakers_raw)
 
     # --- background: draw and compute nothing that nobody sees ---------------------------------
 
@@ -1389,9 +1416,10 @@ class Backend(QObject):
         self._usage_mark = (now, cpu)
         frames, self._frames = self._frames, 0
         overlay, self._overlay_frames = self._overlay_frames, 0
+        changes, self._speaker_changes = getattr(self, "_speaker_changes", 0), 0
         wall = max(now - then, 0.001)
-        logger.info("Usage: %d interface frames (+%d overlay) in %.0f s, processor %.1f%% of all cores "
-                    "(%.1f%% of one), %s, %s", frames, overlay, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
+        logger.info("Usage: %d interface frames (+%d overlay, %d speaking changes) in %.0f s, processor %.1f%% "
+                    "of all cores (%.1f%% of one), %s, %s", frames, overlay, changes, wall, (cpu - cpu_then) / wall * 100 / (os.cpu_count() or 1),
                     (cpu - cpu_then) / wall * 100, "active" if self._active else "in background",
                     "in a call" if self._call_channel else "not in a call")
 
@@ -2331,8 +2359,16 @@ class Backend(QObject):
         if self._ui_quiet():
             return  # the meter and our own speaking highlight catch up when the app is active again
         audio = self.call.audio
-        level = max(0.0, min(1.0, (getattr(audio, "input_level_db", -96.0) + 60.0) / 60.0))
+        # In the background only the overlay is shown, and it has no level meter.
+        level = (max(0.0, min(1.0, (getattr(audio, "input_level_db", -96.0) + 60.0) / 60.0)) if self._active
+                 else self._level)
         transmitting = bool(audio.transmitting) and not self._muted
+        # Same hold as for friends: on at once, off after SPEAKING_HOLD without voice.
+        now = time.monotonic()
+        if transmitting:
+            self._transmit_seen = now
+        elif self._transmitting and now - self._transmit_seen < SPEAKING_HOLD:
+            transmitting = True
         if abs(level - self._level) > 0.02 or transmitting != self._transmitting:
             changed = transmitting != self._transmitting
             self._level, self._transmitting = level, transmitting

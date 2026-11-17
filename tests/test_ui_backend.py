@@ -422,7 +422,8 @@ def test_background_app_skips_cosmetic_updates_and_catches_up_when_active(qt_app
     from app.client.ui.backend import Backend
 
     rebuilt = []
-    stub = SimpleNamespace(_speakers=set(), _active=False, _ui_stale=False, _call_channel=4,
+    stub = SimpleNamespace(_speakers=set(), _speakers_raw=set(), _speaker_seen={}, _speaker_hold_pending=True,
+                           _active=False, _ui_stale=False, _call_channel=4,
                            ui={"overlay_enabled": False}, _rebuild=lambda: rebuilt.append(True),
                            _apply_priority=lambda: None)
     stub._overlay_shown = lambda: Backend._overlay_shown(stub)
@@ -434,4 +435,8 @@ def test_background_app_skips_cosmetic_updates_and_catches_up_when_active(qt_app
     # With the overlay on during a call, speaking still updates in the background.
     stub._active, stub.ui = False, {"overlay_enabled": True}
     Backend._on_speakers(stub, {3})
-    assert rebuilt == [True, True]
+    assert rebuilt == [True, True] and stub._speakers == {2, 3}, "2 stays lit for a moment after going quiet"
+    import time as _time
+    stub._speaker_seen[2] = _time.monotonic() - 1
+    Backend._on_speakers(stub, {3})
+    assert stub._speakers == {3} and rebuilt == [True, True, True]

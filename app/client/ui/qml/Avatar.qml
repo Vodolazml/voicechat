@@ -8,6 +8,7 @@ Item {
     property string source: ""
     property color color: Theme.accent
     property bool speaking: false
+    property bool animated: true  // the game overlay turns it off: every fade there is frames over the game
     property int size: 32
     readonly property int pictureSize: Math.min(256, Math.ceil(size * 2))
     implicitWidth: size
@@ -22,8 +23,8 @@ Item {
         border.color: Theme.speaking
         opacity: root.speaking ? 1 : 0
         scale: root.speaking ? 1 : 0.85
-        Behavior on opacity { NumberAnimation { duration: Theme.fast } }
-        Behavior on scale { NumberAnimation { duration: Theme.fast; easing.type: Easing.OutBack } }
+        Behavior on opacity { enabled: root.animated; NumberAnimation { duration: Theme.fast } }
+        Behavior on scale { enabled: root.animated; NumberAnimation { duration: Theme.fast; easing.type: Easing.OutBack } }
     }
     Rectangle {
         anchors.fill: parent

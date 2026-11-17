@@ -147,7 +147,14 @@ class FakeMedia:
 
     def start(self):
         self.started = True
+        self.connected = True
         self.kwargs["callbacks"].on_state("connected")
+
+    def stop_screen(self):
+        pass
+
+    def watch(self, user_id, watching):
+        pass
 
     def stop(self):
         self.stopped = True
@@ -631,7 +638,7 @@ def test_native_engine_owns_the_voice_connection():
                           media_factory=FakeMedia, audio_factory=FakeNativeAudio)
     call.join(10)
     assert wait_for(lambda: call.audio.connects)
-    assert call.media.kwargs.get("voice") is False, "the Python room carries video only"
+    assert call.media is None, "no video connection while nobody shares"
     assert call.audio.local_keys, "our key reaches the engine before it connects"
     assert ("media_credentials", (10,)) in api.calls
     assert call.state != CONNECTED or states, "media state alone does not decide when native"
@@ -642,3 +649,34 @@ def test_native_engine_owns_the_voice_connection():
     call.leave()
     assert wait_for(lambda: call.state == IDLE)
     assert call.audio.disconnects >= 1
+
+
+def test_native_video_connection_opens_only_for_video(monkeypatch):
+    from app.client.core import call as call_module
+    monkeypatch.setattr(call_module, "MEDIA_IDLE_SECONDS", 0.2)
+    api = FakeApi()
+    streams = []
+    listener = CallListener(on_streams=lambda users: streams.append(set(users)))
+    call = CallController(api, make_keys(api), AudioSettings(), listener,
+                          media_factory=FakeMedia, audio_factory=FakeNativeAudio)
+    call.join(10)
+    assert wait_for(lambda: call.audio.connects)
+    assert call.media is None
+    call.audio.on_video({2}, set())  # a friend starts sharing
+    assert wait_for(lambda: call.media is not None)
+    assert call.media.kwargs.get("voice") is False, "the Python room carries video only"
+    assert {2} in streams
+    call.audio.on_video(set(), set())  # stopped: the connection closes after a while
+    assert wait_for(lambda: call.media is None)
+    started = []
+
+    class Capturer:
+        pass
+    FakeMedia.start_screen = lambda self, capturer: started.append(capturer)
+    try:
+        call.start_screen(Capturer())  # our own share opens it and starts once connected
+        assert wait_for(lambda: started)
+        call.stop_screen()
+        assert wait_for(lambda: call.media is None)
+    finally:
+        del FakeMedia.start_screen

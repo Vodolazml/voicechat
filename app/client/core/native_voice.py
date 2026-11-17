@@ -128,6 +128,8 @@ class NativeVoice:
         self.on_transmitting: Callable[[bool], None] = lambda on: None
         # Shortcut keys read by the engine (push-to-talk is applied there; the rest comes here).
         self.on_key: Callable[[str, bool], None] = lambda name, down: None
+        # Who else shares a screen / a camera in the voice room (the call opens video only then).
+        self.on_video: Callable[[set[int], set[int]], None] = lambda screen, camera: None
         self._keys: dict[str, list[int]] = {}
         self.path = path or engine_path()
         if self.path is None:
@@ -247,6 +249,8 @@ class NativeVoice:
         elif kind == "tx":
             self.transmitting = bool(event.get("on"))
             self.on_transmitting(self.transmitting)
+        elif kind == "video":
+            self.on_video({int(i) for i in event.get("screen", [])}, {int(i) for i in event.get("camera", [])})
         elif kind == "key":
             name, down = str(event.get("name")), bool(event.get("down"))
             if name == "ptt":

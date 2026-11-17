@@ -65,6 +65,7 @@ pub struct RoomState {
     key_problem_at: HashMap<i64, Instant>,
     muted: bool,
     speakers: HashSet<i64>,
+    video: (Vec<i64>, Vec<i64>),
 }
 
 pub async fn run(shared: Arc<Shared>, events: Events, mut commands: mpsc::UnboundedReceiver<RoomCmd>) {
@@ -78,6 +79,7 @@ pub async fn run(shared: Arc<Shared>, events: Events, mut commands: mpsc::Unboun
         generation: Arc::new(Mutex::new(HashMap::new())),
         next_generation: Arc::new(AtomicU64::new(1)),
         key_problem_at: HashMap::new(),
+        video: (Vec::new(), Vec::new()),
         muted: false,
         speakers: HashSet::new(),
     };
@@ -221,6 +223,8 @@ impl RoomState {
         );
         self.events.send(json!({"ev": "state", "state": "connected", "identity": local.0}));
         self.report_participants();
+        self.video = (vec![-1], vec![-1]); // always report once per connection
+        self.report_video();
         Some(rx)
     }
 
@@ -287,6 +291,34 @@ impl RoomState {
         }
     }
 
+    /// Who else shares a screen or a camera. The app opens its video connection only while there is
+    /// something to watch (or it shares itself), instead of keeping a second connection all call.
+    fn report_video(&mut self) {
+        let Some(s) = &self.session else { return };
+        let (mut screen, mut camera) = (Vec::new(), Vec::new());
+        for (identity, participant) in s.room.remote_participants() {
+            let Some(uid) = user_id(&identity.0) else { continue };
+            if uid == s.my_id {
+                continue;
+            }
+            for publication in participant.track_publications().values() {
+                match publication.source() {
+                    TrackSource::Screenshare => screen.push(uid),
+                    TrackSource::Camera => camera.push(uid),
+                    _ => {}
+                }
+            }
+        }
+        for list in [&mut screen, &mut camera] {
+            list.sort_unstable();
+            list.dedup();
+        }
+        if (screen.clone(), camera.clone()) != self.video {
+            self.events.send(json!({"ev": "video", "screen": screen, "camera": camera}));
+            self.video = (screen, camera);
+        }
+    }
+
     fn report_participants(&self) {
         let Some(s) = &self.session else { return };
         let ids: HashSet<i64> = s.room.remote_participants().keys().filter_map(|i| user_id(&i.0)).collect();
@@ -320,10 +352,13 @@ impl RoomState {
                     }
                 }
                 self.report_participants();
+                self.report_video();
             }
             RoomEvent::TrackPublished { publication, participant } => {
                 self.maybe_subscribe(&publication, &participant.identity());
+                self.report_video();
             }
+            RoomEvent::TrackUnpublished { .. } => self.report_video(),
             RoomEvent::TrackSubscribed { track, publication, participant } => {
                 if let (RemoteTrack::Audio(audio), TrackSource::Microphone) = (track, publication.source()) {
                     if let Some(uid) = user_id(&participant.identity().0) {

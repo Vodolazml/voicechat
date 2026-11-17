@@ -27,6 +27,7 @@ KEY_REFRESH_SECONDS = 60
 
 IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "reconnecting"
 UNAVAILABLE = "unavailable"  # we are in the channel, but the server's media server is not reachable
+MEDIA_IDLE_SECONDS = 20.0
 VOICE_RETRY_SECONDS = (1, 2, 4, 8, 10)  # waits before reconnecting the native voice connection
 
 
@@ -90,6 +91,14 @@ class CallController:
         self._voice_attempt = 0
         self._voice_retry: threading.Timer | None = None
         self._pushed_keys: dict[int, str] = {}
+        # Native voice: the video connection (Python LiveKit room) is opened only while there is video to
+        # watch or to send, not for the whole call (it holds ~270 threads and a second server slot).
+        self._video_others: tuple[set[int], set[int]] = (set(), set())
+        self._video_mine: tuple[bool, bool] = (False, False)
+        self._media_mine: tuple[set[int], set[int]] = (set(), set())
+        self._video_pending: list[Callable[[MediaSession], None]] = []
+        self._watching: set[int] = set()  # given again to a video connection opened later
+        self._media_idle: threading.Timer | None = None
         if self.native:
             self.audio.on_voice_state = self._on_voice_state
             self.audio.on_speakers = self._on_speakers
@@ -97,6 +106,7 @@ class CallController:
             self.audio.on_key_problem = lambda user_id: self._on_key_problem(self.channel_id, user_id)
             self.audio.on_transmitting = lambda on: self.listener.on_transmitting(on)
             self.audio.on_key = lambda name, down: self.listener.on_key(name, down)
+            self.audio.on_video = self._on_engine_video
             logger.info("Voice runs in the native engine")
 
     # --- public API (UI thread) -----------------------------------------------------------------
@@ -132,22 +142,35 @@ class CallController:
         (self.audio.mixer.muted_users.add if muted else self.audio.mixer.muted_users.discard)(user_id)
 
     def watch(self, user_id: int, watching: bool) -> None:
+        (self._watching.add if watching else self._watching.discard)(user_id)
         if self.media:
             self.media.watch(user_id, watching)
 
     def start_screen(self, capturer) -> None:
-        if self.media:
+        if self.native:
+            self._video_mine = (True, self._video_mine[1])
+            self._with_media(lambda media: media.start_screen(capturer))
+        elif self.media:
             self.media.start_screen(capturer)
 
     def stop_screen(self) -> None:
+        if self.native:
+            self._video_mine = (False, self._video_mine[1])
+            self._submit(self._review_media, "video")
         if self.media:
             self.media.stop_screen()
 
     def start_camera(self, capturer) -> None:
-        if self.media:
+        if self.native:
+            self._video_mine = (self._video_mine[0], True)
+            self._with_media(lambda media: media.start_camera(capturer))
+        elif self.media:
             self.media.start_camera(capturer)
 
     def stop_camera(self) -> None:
+        if self.native:
+            self._video_mine = (self._video_mine[0], False)
+            self._submit(self._review_media, "video")
         if self.media:
             self.media.stop_camera()
 
@@ -231,13 +254,22 @@ class CallController:
             self._set_state(IDLE)
             self.audio.stop()
             raise
+        if self.native:
+            self._voice_attempt = 0
+            self._connect_voice(channel_id)
+            self._review_media()
+        else:
+            self._open_media(channel_id)
+        self._start_heartbeat(channel_id)
+
+    def _open_media(self, channel_id: int) -> None:
         callbacks = MediaCallbacks(
             on_state=self._on_media_state,
             on_speakers=self._on_speakers,
             on_quality=self.listener.on_quality if not self.native else (lambda user_id, quality: None),
-            on_streams=self.listener.on_streams,
+            on_streams=self.listener.on_streams if not self.native else self._on_media_streams,
             on_video_frame=self.listener.on_video_frame,
-            on_cameras=self.listener.on_cameras,
+            on_cameras=self.listener.on_cameras if not self.native else self._on_media_cameras,
             on_participants=lambda users: None,
             on_key_problem=lambda user_id: self._on_key_problem(channel_id, user_id),
         )
@@ -251,12 +283,12 @@ class CallController:
             **({"voice": False} if self.native else {}),
         )
         media.set_muted(self.muted or self.deafened)
+        for user_id in self._watching:
+            media.watch(user_id, True)
         self.media = media
         media.start()
         if self.native:
-            self._voice_attempt = 0
-            self._connect_voice(channel_id)
-        self._start_heartbeat(channel_id)
+            logger.info("Video connection opened (something to watch or to send)")
 
     def _leave(self, notify_server: bool = True, final: bool = True, keep_audio: bool = False) -> None:
         channel_id = self.channel_id
@@ -269,6 +301,13 @@ class CallController:
                 self._voice_retry = None
             self.audio.disconnect()
             self._pushed_keys.clear()
+            self._cancel_media_idle()
+            self._video_others = (set(), set())
+            self._media_mine = (set(), set())
+            self._video_pending.clear()
+            self._watching.clear()
+            if final:
+                self._video_mine = (False, False)
         media, self.media = self.media, None
         if media:
             media.stop()
@@ -462,6 +501,15 @@ class CallController:
             self.listener.on_notice("error", "Голосовой сервер недоступен: на сервере не настроен LiveKit. "
                                              "Каналы и чат работают, голос появится, когда его включат")
         if self.native and state != UNAVAILABLE:
+            if state == "connected" and self._video_pending:
+                pending, self._video_pending = self._video_pending, []
+                media = self.media
+                if media is not None:
+                    for action in pending:
+                        try:
+                            action(media)
+                        except Exception:
+                            logger.exception("Video action failed")
             return  # the call's state follows the voice connection; this one only carries video
         mapped = {"connected": CONNECTED, "reconnecting": RECONNECTING, "connecting": CONNECTING,
                   UNAVAILABLE: UNAVAILABLE}.get(state)
@@ -480,6 +528,74 @@ class CallController:
             speakers = speakers | {self.keys.my_id}
         self.speakers = speakers
         self.listener.on_speakers(speakers)
+
+    # --- native voice: the video connection on demand -----------------------------------------------
+
+    def _on_engine_video(self, screen: set[int], camera: set[int]) -> None:
+        """The voice engine sees who else shares a screen or a camera (engine thread)."""
+        self._video_others = (set(screen), set(camera))
+        self._emit_video()
+        self._submit(self._review_media, "video")
+
+    def _on_media_streams(self, users: set[int]) -> None:
+        self._media_mine = (set(users), self._media_mine[1])
+        self._emit_video()
+
+    def _on_media_cameras(self, users: set[int]) -> None:
+        self._media_mine = (self._media_mine[0], set(users))
+        self._emit_video()
+
+    def _emit_video(self) -> None:
+        # Others as the voice engine sees them, ourselves as the video connection reports us.
+        my_id = self.keys.my_id
+        screen = self._video_others[0] | (self._media_mine[0] & {my_id})
+        camera = self._video_others[1] | (self._media_mine[1] & {my_id})
+        self.listener.on_streams(screen)
+        self.listener.on_cameras(camera)
+
+    def _video_needed(self) -> bool:
+        return bool(self._video_others[0] or self._video_others[1] or any(self._video_mine)
+                    or self._video_pending)
+
+    def _with_media(self, action: Callable[[MediaSession], None]) -> None:
+        def run() -> None:
+            media = self.media
+            if media is not None and media.connected:
+                action(media)
+                return
+            self._video_pending.append(action)
+            self._review_media()
+        self._submit(run, "video")
+
+    def _review_media(self) -> None:
+        """Open the video connection when there is something to watch or send; close it a while after
+        there is nothing (so a share restarted at once does not reconnect)."""
+        channel_id = self.channel_id
+        if channel_id is None or not self.native:
+            return
+        if self._video_needed():
+            self._cancel_media_idle()
+            if self.media is None:
+                self._open_media(channel_id)
+        elif self.media is not None and self._media_idle is None:
+            timer = threading.Timer(MEDIA_IDLE_SECONDS, lambda: self._submit(self._close_idle_media, "video"))
+            timer.daemon = True
+            self._media_idle = timer
+            timer.start()
+
+    def _close_idle_media(self) -> None:
+        self._media_idle = None
+        if self._video_needed() or self.media is None:
+            return
+        media, self.media = self.media, None
+        self._media_mine = (set(), set())
+        media.stop()
+        logger.info("Video connection closed (nothing to watch or send)")
+
+    def _cancel_media_idle(self) -> None:
+        if self._media_idle is not None:
+            self._media_idle.cancel()
+            self._media_idle = None
 
     # --- native voice connection -----------------------------------------------------------------
 

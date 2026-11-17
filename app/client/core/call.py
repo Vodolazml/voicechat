@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import native_voice
 from .audio import AudioEngine, AudioSettings
 from .keys import KeyManager
 from .media import MediaCallbacks, MediaSession
@@ -26,6 +27,17 @@ KEY_REFRESH_SECONDS = 60
 
 IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "reconnecting"
 UNAVAILABLE = "unavailable"  # we are in the channel, but the server's media server is not reachable
+VOICE_RETRY_SECONDS = (1, 2, 4, 8, 10)  # waits before reconnecting the native voice connection
+
+
+def default_audio_factory(settings: AudioSettings, **kwargs):
+    """The native voice engine when it is installed, otherwise the Python one (development, tests)."""
+    if native_voice.available():
+        try:
+            return native_voice.NativeVoice(settings, **kwargs)
+        except Exception:
+            logger.exception("The native voice engine could not start: using the built-in one")
+    return AudioEngine(settings, **kwargs)
 
 
 @dataclass
@@ -39,6 +51,7 @@ class CallListener:
     on_notice: Callable[[str, str], None] = lambda level, text: None   # in-app toast, never a popup
     on_identity_changed: Callable[[int], None] = lambda user_id: None
     on_local: Callable[[dict], None] = lambda flags: None              # muted/deafened/transmitting
+    on_transmitting: Callable[[bool], None] = lambda on: None          # native engine: our own voice gate
 
 
 @dataclass
@@ -50,7 +63,7 @@ class _Job:
 class CallController:
     def __init__(self, api, keys: KeyManager, audio_settings: AudioSettings, listener: CallListener,
                  media_factory: Callable[..., MediaSession] = MediaSession,
-                 audio_factory: Callable[..., AudioEngine] = AudioEngine) -> None:
+                 audio_factory: Callable[..., AudioEngine] = default_audio_factory) -> None:
         self.api = api
         self.keys = keys
         self.listener = listener
@@ -72,6 +85,17 @@ class CallController:
         self._recovering = False
         self._silence_noticed = False  # the "mic gives perfect silence" hint is shown once per call
         self._overload_noticed = False  # the "mic too loud" hint, also once per call
+        self.native = bool(getattr(self.audio, "native", False))
+        self._voice_attempt = 0
+        self._voice_retry: threading.Timer | None = None
+        self._pushed_keys: dict[int, str] = {}
+        if self.native:
+            self.audio.on_voice_state = self._on_voice_state
+            self.audio.on_speakers = self._on_speakers
+            self.audio.on_quality = lambda user_id, quality: self.listener.on_quality(user_id, quality)
+            self.audio.on_key_problem = lambda user_id: self._on_key_problem(self.channel_id, user_id)
+            self.audio.on_transmitting = lambda on: self.listener.on_transmitting(on)
+            logger.info("Voice runs in the native engine")
 
     # --- public API (UI thread) -----------------------------------------------------------------
 
@@ -208,7 +232,7 @@ class CallController:
         callbacks = MediaCallbacks(
             on_state=self._on_media_state,
             on_speakers=self._on_speakers,
-            on_quality=self.listener.on_quality,
+            on_quality=self.listener.on_quality if not self.native else (lambda user_id, quality: None),
             on_streams=self.listener.on_streams,
             on_video_frame=self.listener.on_video_frame,
             on_cameras=self.listener.on_cameras,
@@ -222,10 +246,14 @@ class CallController:
             incoming_key=lambda user_id: self.keys.incoming(channel_id, user_id),
             mixer=self.audio.mixer,
             callbacks=callbacks,
+            **({"voice": False} if self.native else {}),
         )
         media.set_muted(self.muted or self.deafened)
         self.media = media
         media.start()
+        if self.native:
+            self._voice_attempt = 0
+            self._connect_voice(channel_id)
         self._start_heartbeat(channel_id)
 
     def _leave(self, notify_server: bool = True, final: bool = True, keep_audio: bool = False) -> None:
@@ -233,6 +261,12 @@ class CallController:
         if channel_id is not None:
             logger.info("Leaving channel %s (tell server: %s, switching: %s)", channel_id, notify_server, not final)
         self._stop_heartbeat()
+        if self.native:
+            if self._voice_retry is not None:
+                self._voice_retry.cancel()
+                self._voice_retry = None
+            self.audio.disconnect()
+            self._pushed_keys.clear()
         media, self.media = self.media, None
         if media:
             media.stop()
@@ -264,6 +298,8 @@ class CallController:
         self._last_key_refresh = time.monotonic()
         if self.media:
             self.media.refresh_keys()
+        if self.native:
+            self._push_voice_keys(channel_id)
 
     def _rotate_keys(self, channel_id: int) -> None:
         if channel_id != self.channel_id:
@@ -358,6 +394,12 @@ class CallController:
             media.push_mic_frame(frame)
 
     def _on_audio_problem(self, problem: str) -> None:
+        if problem == "engine_restarted":
+            logger.warning("The voice engine was restarted")
+            return  # it was told everything again, including the connection
+        if problem == "engine_failed":
+            self.listener.on_notice("error", "Голосовой модуль не запускается. Перезапустите программу")
+            return
         if problem == "fallback":
             self.listener.on_notice("warning", "Выбранное устройство недоступно, звук идёт через стандартное. "
                                                "Переключусь обратно, когда оно появится")
@@ -417,6 +459,8 @@ class CallController:
         if state == UNAVAILABLE and self.state != UNAVAILABLE:
             self.listener.on_notice("error", "Голосовой сервер недоступен: на сервере не настроен LiveKit. "
                                              "Каналы и чат работают, голос появится, когда его включат")
+        if self.native and state != UNAVAILABLE:
+            return  # the call's state follows the voice connection; this one only carries video
         mapped = {"connected": CONNECTED, "reconnecting": RECONNECTING, "connecting": CONNECTING,
                   UNAVAILABLE: UNAVAILABLE}.get(state)
         if mapped and mapped != self.state:
@@ -434,6 +478,65 @@ class CallController:
             speakers = speakers | {self.keys.my_id}
         self.speakers = speakers
         self.listener.on_speakers(speakers)
+
+    # --- native voice connection -----------------------------------------------------------------
+
+    def _push_voice_keys(self, channel_id: int) -> None:
+        key_id, key = self.keys.outgoing(channel_id)
+        self.audio.set_local_key(key_id, key)
+        state = self.keys.channel(channel_id)
+        for user_id in list(state.sender_keys):
+            found = self.keys.incoming(channel_id, user_id)
+            if found and self._pushed_keys.get(user_id) != found[0]:
+                self.audio.set_remote_key(user_id, found[0], found[1])
+                self._pushed_keys[user_id] = found[0]
+
+    def _connect_voice(self, channel_id: int) -> None:
+        """Our voice connection ("<id>-audio"), run by the native engine. A fresh token every time: they
+        last ten minutes, and the engine reconnects on its own only within one connection."""
+        if self.channel_id != channel_id:
+            return
+        try:
+            creds = self.api.media_credentials(channel_id, audio=True)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 503:
+                self._on_media_state(UNAVAILABLE)
+                return
+            logger.info("Voice token request failed: %s", exc)
+            self._retry_voice(channel_id)
+            return
+        self._push_voice_keys(channel_id)
+        self.audio.connect(creds["url"], creds["token"], self.keys.my_id)
+
+    def _retry_voice(self, channel_id: int) -> None:
+        if self.channel_id != channel_id:
+            return
+        delay = VOICE_RETRY_SECONDS[min(self._voice_attempt, len(VOICE_RETRY_SECONDS) - 1)]
+        self._voice_attempt += 1
+        timer = threading.Timer(delay, lambda: self._submit(lambda: self._connect_voice(channel_id), "voice"))
+        timer.daemon = True
+        self._voice_retry = timer
+        timer.start()
+
+    def _on_voice_state(self, state: str, reason: str) -> None:
+        channel_id = self.channel_id
+        if channel_id is None:
+            return
+        if state == "connected":
+            self._voice_attempt = 0
+            was = self.state
+            if was != CONNECTED:
+                self._set_state(CONNECTED)
+            if was == RECONNECTING:
+                self._submit(lambda: self._confirm_presence(channel_id), "presence")
+        elif state == "reconnecting":
+            if self.state == CONNECTED:
+                self._set_state(RECONNECTING)
+        elif state == "closed" and reason != "requested":
+            logger.info("Voice connection closed (%s): reconnecting", reason)
+            if self.state == CONNECTED:
+                self._set_state(RECONNECTING)
+            self._retry_voice(channel_id)
 
     def _apply_local(self) -> None:
         self.audio.muted = self.muted or self.deafened

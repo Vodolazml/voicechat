@@ -1,0 +1,3 @@
+# The prebuilt libwebrtc is built with the static CRT (/MT); link everything the same way.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

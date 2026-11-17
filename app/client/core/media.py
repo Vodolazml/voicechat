@@ -209,7 +209,10 @@ class MediaSession:
     def __init__(self, *, credentials: Callable[[], dict], my_id: int,
                  outgoing_key: Callable[[], tuple[str, bytes]],
                  incoming_key: Callable[[int], tuple[str, bytes] | None],
-                 mixer, callbacks: MediaCallbacks) -> None:
+                 mixer, callbacks: MediaCallbacks, voice: bool = True) -> None:
+        # voice=False: the native engine carries the voice on its own connection; this one is video only
+        # (screen shares, cameras) and neither publishes nor receives microphones.
+        self.voice = voice
         self.credentials = credentials
         self.my_id = my_id
         self.outgoing_key = outgoing_key
@@ -251,10 +254,12 @@ class MediaSession:
             self._thread.join(timeout)
 
     def _run(self) -> None:
-        # This loop carries the voice both ways (mic frames out, friends' frames into the mixer).
-        from .rt import boost_voice_thread
+        # With the Python voice path this loop carries the voice both ways and is lifted for it. With the
+        # native engine it only handles video signalling and stays an ordinary thread.
+        if self.voice:
+            from .rt import boost_voice_thread
 
-        boost_voice_thread("Audio")
+            boost_voice_thread("Audio")
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
@@ -355,7 +360,8 @@ class MediaSession:
                 identity = room.local_participant.identity
                 room.e2ee_manager.key_provider.set_key(identity, key, key_index(key_id))
                 self._applied_keys[identity] = key_id
-                await self._publish_mic(room)
+                if self.voice:
+                    await self._publish_mic(room)
                 self._use_local_key_index(key_index(key_id))
                 self._apply_keys()
                 self._apply_subscriptions()
@@ -365,7 +371,7 @@ class MediaSession:
                 self.cb.on_state("connected")
                 self._report_participants()
                 backoff = 1.0
-                pump = asyncio.create_task(self._pump_mic())
+                pump = asyncio.create_task(self._pump_mic() if self.voice else self._stop.wait())
                 closed = asyncio.create_task(self._wait_closed(room))
                 stop = asyncio.create_task(self._stop.wait())
                 await asyncio.wait({closed, stop}, return_when=asyncio.FIRST_COMPLETED)
@@ -491,7 +497,8 @@ class MediaSession:
             user_id = user_id_from_identity(participant.identity)
             for publication in participant.track_publications.values():
                 if publication.kind == rtc.TrackKind.KIND_AUDIO:
-                    wanted = publication.source == rtc.TrackSource.SOURCE_MICROPHONE or user_id in self._watching
+                    microphone = publication.source == rtc.TrackSource.SOURCE_MICROPHONE
+                    wanted = (microphone and self.voice) or (not microphone and user_id in self._watching)
                 elif publication.source == rtc.TrackSource.SOURCE_CAMERA:
                     wanted = True  # cameras are small and part of the call, like voices
                 else:
@@ -571,7 +578,8 @@ class MediaSession:
             if user_id is None:
                 return
             if track.kind == rtc.TrackKind.KIND_AUDIO and publication.source == rtc.TrackSource.SOURCE_MICROPHONE:
-                self._spawn(self._receive_audio(track, user_id))
+                if self.voice:
+                    self._spawn(self._receive_audio(track, user_id))
             elif track.kind == rtc.TrackKind.KIND_VIDEO:
                 camera = publication.source == rtc.TrackSource.SOURCE_CAMERA
                 quality = os.environ.get("VOICECHAT_VIEW_QUALITY", "").upper()  # trial: LOW / MEDIUM / HIGH
@@ -584,6 +592,8 @@ class MediaSession:
 
         @room.on("active_speakers_changed")
         def _speakers(speakers):
+            if not self.voice:
+                return  # the voice engine reports who speaks
             ids = set()
             for participant in speakers:
                 user_id = user_id_from_identity(participant.identity)

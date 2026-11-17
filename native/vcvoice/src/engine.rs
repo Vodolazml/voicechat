@@ -220,9 +220,9 @@ impl Mixer {
         }
         if let Some((effect, always)) = self.effects.pop_front() {
             if always || !self.deafened {
-                let gain = if always { 0.9 } else { 0.6 };
+                // The app picks the loudness of each sound (gain with the "sound" command).
                 for (o, s) in out.iter_mut().zip(effect.iter()) {
-                    *o += *s * gain;
+                    *o += *s;
                 }
                 active = true;
             }

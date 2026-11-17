@@ -433,6 +433,9 @@ class Backend(QObject):
         self._apply_hotkeys()
         self._key_timer = QTimer(self, interval=15, timeout=self._poll_keys)
         self._level_timer = QTimer(self, interval=60, timeout=self._poll_level)
+        self._transmit_hold = QTimer(self, singleShot=True,
+                                     timeout=lambda: self._set_transmitting(bool(getattr(self.call and self.call.audio,
+                                                                                         "transmitting", False))))
         self._ping_timer = QTimer(self, interval=10_000, timeout=self._measure_ping)
         # Real (measured) resolution and frame rate of streams, refreshed once a second.
         self._video_timer = QTimer(self, interval=1000, timeout=self._update_video_info)
@@ -950,6 +953,7 @@ class Backend(QObject):
             on_cameras=lambda users: self._ui(lambda: self._on_cameras(users)),
             on_notice=lambda level, text: self._ui(lambda: self.toast(level, text)),
             on_local=lambda flags: None,
+            on_transmitting=lambda on: self._ui(lambda: self._set_transmitting(on)),
         )
         self.call = CallController(self.api, self.keys, self.audio_settings, listener)
         self.events = EventStream(self.api.base_url, lambda: self.api.token or "",
@@ -1502,6 +1506,15 @@ class Backend(QObject):
         self._play(pcm, lane="prompt", replace=True, gain=0.9 if spoken and name in SPOKEN else 0.6)
 
     def _play(self, pcm: bytes, **options) -> None:
+        call = self.call
+        if call is not None and getattr(call.audio, "native", False) and self._call_channel:
+            # In a call the voice engine already has the speakers open: mix the sound there instead of
+            # opening a second output stream.
+            try:
+                call.audio.play(pcm, gain=options.get("gain", 1.0), always=options.get("lane") == "prompt")
+                return
+            except Exception:
+                logger.debug("UI sound not played by the voice engine", exc_info=True)
         def play() -> None:
             try:
                 self.sounds.play(pcm, **options)
@@ -2327,8 +2340,15 @@ class Backend(QObject):
         if not info and not self._watching and self._capturer is None:
             self._video_timer.stop()
 
+    def _native_voice(self) -> bool:
+        return self.call is not None and bool(getattr(self.call.audio, "native", False))
+
     def _update_timers(self) -> None:
-        active = bool(self._call_channel) or self._mic_test
+        native = self._native_voice()
+        # The native engine reports our own speaking by itself; the timer only feeds the settings meter.
+        active = self._mic_test if native else (bool(self._call_channel) or self._mic_test)
+        if native:
+            self.call.audio.set_level_reports(self._mic_test)
         # The keyboard is read only during a call and only for the shortcuts that are set (antivirus
         # heuristics rightly dislike programs that watch the keyboard all the time).
         keys = bool(self._call_channel) and self._keys_poller.has_combos
@@ -2337,7 +2357,7 @@ class Backend(QObject):
                 timer.start()
             elif not wanted and timer.isActive():
                 timer.stop()
-        if not active and self.call is not None:
+        if not (bool(self._call_channel) or self._mic_test) and self.call is not None:
             self.call.set_push_to_talk(False)
 
     def _poll_keys(self) -> None:
@@ -2362,23 +2382,34 @@ class Backend(QObject):
         # In the background only the overlay is shown, and it has no level meter.
         level = (max(0.0, min(1.0, (getattr(audio, "input_level_db", -96.0) + 60.0) / 60.0)) if self._active
                  else self._level)
-        transmitting = bool(audio.transmitting) and not self._muted
-        # Same hold as for friends: on at once, off after SPEAKING_HOLD without voice.
+        if abs(level - self._level) > 0.02:
+            self._level = level
+            self.levelChanged.emit()
+        if not getattr(audio, "native", False):
+            self._set_transmitting(bool(audio.transmitting))
+
+    def _set_transmitting(self, raw: bool) -> None:
+        """Our own speaking highlight. Same hold as for friends: on at once, off after SPEAKING_HOLD
+        without voice. The native engine calls this only when its gate opens or closes."""
+        transmitting = raw and not self._muted
         now = time.monotonic()
         if transmitting:
             self._transmit_seen = now
+            self._transmit_hold.stop()
         elif self._transmitting and now - self._transmit_seen < SPEAKING_HOLD:
-            transmitting = True
-        if abs(level - self._level) > 0.02 or transmitting != self._transmitting:
-            changed = transmitting != self._transmitting
-            self._level, self._transmitting = level, transmitting
-            self.levelChanged.emit()
-            if changed and self._call_channel:
-                self.stage.update(self._me.get("id"), speaking=transmitting)
-                my_row = self.channels.find(self._call_channel)
-                if my_row:
-                    members = [{**m, "speaking": transmitting} if m["isMe"] else m for m in my_row["members"]]
-                    self.channels.update(self._call_channel, members=members)
+            if not self._transmit_hold.isActive():
+                self._transmit_hold.start(max(1, int((SPEAKING_HOLD - (now - self._transmit_seen)) * 1000) + 5))
+            return
+        if transmitting == self._transmitting:
+            return
+        self._transmitting = transmitting
+        self.levelChanged.emit()
+        if self._call_channel:
+            self.stage.update(self._me.get("id"), speaking=transmitting)
+            my_row = self.channels.find(self._call_channel)
+            if my_row:
+                members = [{**m, "speaking": transmitting} if m["isMe"] else m for m in my_row["members"]]
+                self.channels.update(self._call_channel, members=members)
 
     # =========================================================================================
     # account, devices, security

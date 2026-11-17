@@ -86,7 +86,7 @@ class FakeApi:
             self.calls.append((name, args))
             if name == "e2ee_state":
                 return {"users": self.e2ee_users, "key_sets": []}
-            if name == "media_token":
+            if name in ("media_token", "media_credentials"):
                 return {"url": "wss://x", "token": "t"}
             return {}
         return call
@@ -181,6 +181,30 @@ class FakeAudio:
 
     def apply_settings(self, settings):
         pass
+
+
+class FakeNativeAudio(FakeAudio):
+    """The native engine's surface: it owns the voice connection and reports its state."""
+    native = True
+
+    def __init__(self, settings, on_frame, on_problem):
+        super().__init__(settings, on_frame, on_problem)
+        self.connects = []
+        self.local_keys = []
+        self.remote_keys = {}
+        self.disconnects = 0
+
+    def connect(self, url, token, my_id):
+        self.connects.append((url, token, my_id))
+
+    def disconnect(self):
+        self.disconnects += 1
+
+    def set_local_key(self, key_id, key):
+        self.local_keys.append(key_id)
+
+    def set_remote_key(self, user_id, key_id, key):
+        self.remote_keys[user_id] = key_id
 
 
 def make_call():
@@ -597,3 +621,24 @@ def test_overloaded_mic_hint_once_per_call():
     call._on_audio_problem("mic_overload")
     call._on_audio_problem("mic_overload")
     assert sum("перегружен" in n for n in notices) == 1
+
+
+def test_native_engine_owns_the_voice_connection():
+    api = FakeApi()
+    states = []
+    listener = CallListener(on_state=lambda s, c: states.append(s))
+    call = CallController(api, make_keys(api), AudioSettings(), listener,
+                          media_factory=FakeMedia, audio_factory=FakeNativeAudio)
+    call.join(10)
+    assert wait_for(lambda: call.audio.connects)
+    assert call.media.kwargs.get("voice") is False, "the Python room carries video only"
+    assert call.audio.local_keys, "our key reaches the engine before it connects"
+    assert ("media_credentials", (10,)) in api.calls
+    assert call.state != CONNECTED or states, "media state alone does not decide when native"
+    call.audio.on_voice_state("connected", "")
+    assert wait_for(lambda: call.state == CONNECTED)
+    call.audio.on_voice_state("closed", "network")
+    assert call.state == "reconnecting"
+    call.leave()
+    assert wait_for(lambda: call.state == IDLE)
+    assert call.audio.disconnects >= 1

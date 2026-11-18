@@ -29,6 +29,28 @@ def presence_identity(identity: str) -> bool:
     return identity.startswith("u") or identity.endswith("-audio")
 
 
+async def other_presence_live(channel_id: int, user_id: int, gone_identity: str) -> bool:
+    """Is another of this person's connections still in the room? Since 0.6.0 voice runs on "<id>-audio"
+    and "u<id>" carries only video, opened while someone shares: when a share ended, every viewer's "u"
+    connection closed and the server dropped them all from the call while their voice went on
+    (2026-11-18). If LiveKit cannot be asked, assume not (the old behaviour)."""
+    settings = get_settings()
+    if not settings.livekit_api_secret:
+        return False
+    others = {identity for identity in media_identities(user_id) if identity != gone_identity}
+    try:
+        async with _client() as client:
+            listed = await client.room.list_participants(api.ListParticipantsRequest(room=room_name(channel_id)))
+    except api.TwirpError as exc:
+        if exc.code != 'not_found':
+            logger.warning('Participant list failed: %s', exc.code)
+        return False
+    except (OSError, asyncio.TimeoutError):
+        logger.warning('Media service unavailable while checking participants')
+        return False
+    return any(p.identity in others for p in listed.participants)
+
+
 def _client():
     settings = get_settings()
     return api.LiveKitAPI(settings.livekit_internal_url, settings.livekit_api_key,

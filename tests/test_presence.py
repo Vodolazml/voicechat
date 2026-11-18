@@ -250,3 +250,31 @@ def test_wake_only_when_something_is_off_and_one_minute_for_everyone(client):
     assert client.post(f"/voice/{friend_id}/wake", headers=friend).status_code == 400  # not yourself
     presence_module._last_wake[friend_id] -= 61
     assert client.post(f"/voice/{friend_id}/wake", headers=admin).status_code == 200
+
+
+def test_video_connection_ending_does_not_end_a_native_voice_call(client, monkeypatch):
+    """0.6.x: voice runs on "2-audio"; "u2" only carries video and closes when a share ends."""
+    from app.server import media_sessions
+
+    admin, friend, space, voice = setup_admin_and_friend(client)
+    client.post(f"/channels/{voice[0]}/connect", headers=friend, json={})
+    asked = []
+
+    async def still_there(channel_id, user_id, gone):
+        asked.append((channel_id, user_id, gone))
+        return True
+    monkeypatch.setattr(media_sessions, "other_presence_live", still_there)
+    body, headers = signed_webhook({"event": "participant_left", "room": {"name": f"channel-{voice[0]}"},
+                                    "participant": {"identity": "u2"}})
+    assert client.post("/livekit/webhook", content=body, headers=headers).json() == {"status": "ignored"}
+    assert asked == [(voice[0], 2, "u2")]
+    states = client.get(f"/spaces/{space}/voice", headers=admin).json()
+    assert [(s["user_id"], s["channel_id"]) for s in states] == [(2, voice[0])]
+
+    async def gone(channel_id, user_id, identity):
+        return False
+    monkeypatch.setattr(media_sessions, "other_presence_live", gone)
+    body, headers = signed_webhook({"event": "participant_left", "room": {"name": f"channel-{voice[0]}"},
+                                    "participant": {"identity": "2-audio"}})
+    assert client.post("/livekit/webhook", content=body, headers=headers).status_code == 200
+    assert client.get(f"/spaces/{space}/voice", headers=admin).json() == []

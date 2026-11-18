@@ -525,6 +525,12 @@ async def livekit_webhook(request: Request) -> dict[str, str]:
     if reason == livekit_api.DisconnectReason.DUPLICATE_IDENTITY:
         logger.info("Ignoring LiveKit leave of a replaced connection: user %s, channel %s", user_id, channel_id)
         return {"status": "ignored"}
+    if await media_sessions.other_presence_live(channel_id, user_id, identity):
+        # Only one of their connections ended (the video one after a share, or the voice engine
+        # restarting): they are still in the call.
+        logger.info("Ignoring LiveKit leave of %s: another connection of user %s is still in channel %s",
+                    identity, user_id, channel_id)
+        return {"status": "ignored"}
     connection_joined = int(getattr(event.participant, "joined_at", 0) or 0)
     await asyncio.to_thread(_drop_state_if_in, channel_id, user_id, connection_joined)
     return {"status": "ok"}

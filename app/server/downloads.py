@@ -55,6 +55,9 @@ class DownloadRequest:
 
 
 _requests: dict[str, DownloadRequest] = {}
+# Addresses of signed-in apps that asked for an update: their installer link stays the plain, release-signed
+# URL (the app verifies the signature over the exact URL), so access is granted to the address instead.
+_update_ips: dict[str, float] = {}
 _lock = threading.Lock()
 
 
@@ -100,8 +103,13 @@ def protected(path: str) -> bool:
     return path.lower().endswith(".exe")
 
 
+def update_ip_allowed(ip: str) -> bool:
+    return _update_ips.get(ip, 0) > time.time()
+
+
 def allowed(path: str, query: str, ip: str) -> bool:
-    return not protected(path) or not gate_active() or link_valid(path, query, ip)
+    return (not protected(path) or update_ip_allowed(ip) or not gate_active()
+            or link_valid(path, query, ip))
 
 
 @router.get("/downloads-auth")
@@ -356,4 +364,9 @@ def update_link(version_from: str, request: Request, user_name: str | None) -> s
         bot.notify_admins(f"🔄 Обновление {html.escape(version_from)} → "
                           f"{html.escape(settings.client_latest_version)}\n"
                           f"{html.escape(who)}IP: <code>{html.escape(ip)}</code>")
-    return signed_url(settings.client_download_url, ip)
+    now = time.time()
+    with _lock:
+        for old in [a for a, until in _update_ips.items() if until < now]:
+            del _update_ips[old]
+        _update_ips[ip] = now + 3600 * settings.download_link_hours
+    return settings.client_download_url

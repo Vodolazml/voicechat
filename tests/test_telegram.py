@@ -26,6 +26,7 @@ def tg(client, monkeypatch, tmp_path):  # noqa: F811
     monkeypatch.setattr(telegram, "SessionLocal", sessions)
     monkeypatch.setattr(downloads, "SessionLocal", sessions)
     downloads._requests.clear()
+    downloads._update_ips.clear()
     calls, pending = [], []
     counter = iter(range(100, 10_000))
 
@@ -150,9 +151,9 @@ def test_updates_only_for_signed_in_people_without_approval(client, tg):  # noqa
     anonymous = client.get("/client/update", params={"version": "0.6.2"}).json()
     assert anonymous["update_available"] is False and anonymous["download_url"] == ""
     update = client.get("/client/update", params={"version": "0.6.2"}, headers=friend).json()
-    assert update["update_available"] and update["download_url"].startswith(URL + "?e=")
-    signed = urlparse(update["download_url"])
-    assert client.get("/downloads-auth", headers={"X-Forwarded-Uri": f"{signed.path}?{signed.query}"}).status_code == 204
+    # The plain URL: the release signature the app checks covers the exact URL.
+    assert update["update_available"] and update["download_url"] == URL
+    assert client.get("/downloads-auth", headers={"X-Forwarded-Uri": urlparse(URL).path}).status_code == 204
     client.get("/client/update", params={"version": "0.6.2"}, headers=friend)
     tg.flush()
     notes = [t for t in tg.sent_to(ADMIN_CHAT) if "Обновление 0.6.2 → 0.7.0" in t]

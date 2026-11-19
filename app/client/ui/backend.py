@@ -361,6 +361,7 @@ class Backend(QObject):
     gameInFrontChanged = Signal()
     onlineChanged = Signal()
     sessionsChanged = Signal()
+    telegramChanged = Signal()
     safetyChanged = Signal()
     updateChanged = Signal()
     focusChanged = Signal()
@@ -429,6 +430,7 @@ class Backend(QObject):
         self._mic_test = False
         self._focus_user = 0
         self._sessions: list[dict] = []
+        self._telegram: dict = {}
         self._safety: list[dict] = []
         self._update: dict[str, Any] = {}
         self._update_progress = -1.0
@@ -717,6 +719,7 @@ class Backend(QObject):
                              constant=True)
     strongNoiseAvailable = Property(bool, lambda self: RNNoise.available(), constant=True)
     sessions = Property("QVariantList", lambda self: self._sessions, notify=sessionsChanged)
+    telegram = Property("QVariantMap", lambda self: self._telegram, notify=telegramChanged)
     safetyCodes = Property("QVariantList", lambda self: self._safety, notify=safetyChanged)
     myFingerprint = Property(str, lambda self: self.keys.identity.fingerprint if self.keys else "", notify=meChanged)
     updateInfo = Property("QVariantMap", lambda self: self._update, notify=updateChanged)
@@ -757,8 +760,17 @@ class Backend(QObject):
                 self._install_update(on_failure=self._continue_startup)
             else:
                 self._continue_startup()
+        def check():
+            # Updates go only to signed-in people (server 0.6.3+): sign in with the remembered session first.
+            refresh = self._remembered_refresh()
+            if refresh and not self.api.token:
+                try:
+                    self.api.refresh_session(refresh)
+                except Exception as exc:  # noqa: BLE001 - the sign-in screen deals with it
+                    logger.info("Remembered session not resumed before the update check: %s", exc)
+            return self.api.check_update()
         # Offline or the server is down: start normally, the update waits for the next launch.
-        self._bg(self.api.check_update, got, lambda exc: self._continue_startup())
+        self._bg(check, got, lambda exc: self._continue_startup())
 
     def _watch_update(self) -> None:
         """Never stay stuck on the launcher: if the check or the download makes no progress for two minutes,
@@ -791,15 +803,12 @@ class Backend(QObject):
             from app.client.updater import remove_old_installers
 
             self._pool.submit(remove_old_installers)
-        stored = self.client_settings.get("remembered_refresh_dpapi")
-        if stored and self._server_url and self.client_settings.get("remember_me"):
-            try:
-                from app.client.credential_store import unprotect_text
-
-                refresh = unprotect_text(stored)
-                self.api.set_base_url(self._server_url)
-            except Exception:
-                refresh = ""
+        if self.api.token:   # already resumed for the update check
+            self._set_busy(True)
+            self._signed_in()
+            return
+        if self._server_url and self.client_settings.get("remember_me"):
+            refresh = self._remembered_refresh()
             if refresh:
                 self._set_busy(True)
                 self._bg(lambda: self.api.refresh_session(refresh), lambda _: self._signed_in(),
@@ -807,6 +816,19 @@ class Backend(QObject):
                                                       else str(exc)))
                 return
         self._show_login("")
+
+    def _remembered_refresh(self) -> str:
+        stored = self.client_settings.get("remembered_refresh_dpapi")
+        if not (stored and self._server_url and self.client_settings.get("remember_me")):
+            return ""
+        try:
+            from app.client.credential_store import unprotect_text
+
+            refresh = unprotect_text(stored)
+            self.api.set_base_url(self._server_url)
+            return refresh
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _show_login(self, error: str) -> None:
         self._set_busy(False)
@@ -1211,6 +1233,9 @@ class Backend(QObject):
             self.call.handle_event(event)
         if kind == "connected":
             self._refresh_space()
+        elif kind == "telegram.linked":
+            self.toast("success", "Telegram подключён")
+            self.loadTelegram()
         elif kind == "voice.state":
             state = event["state"]
             uid = state["user_id"]
@@ -2480,6 +2505,31 @@ class Backend(QObject):
             self._sessions = rows
             self.sessionsChanged.emit()
         self._bg(self.api.sessions, done)
+
+    def _set_telegram(self, data: dict) -> None:
+        self._telegram = dict(data or {})
+        self.telegramChanged.emit()
+
+    @Slot()
+    def loadTelegram(self) -> None:
+        """Telegram bot link status; an older server without the bot just hides the card."""
+        self._bg(self.api.telegram, self._set_telegram, lambda _exc: self._set_telegram({"available": False}))
+
+    @Slot()
+    def connectTelegram(self) -> None:
+        def opened(url: str) -> None:
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+                self.toast("info", "Нажмите «Старт» в Telegram, и аккаунт привяжется")
+        self._bg(self.api.telegram_link, opened)
+
+    @Slot(bool)
+    def setTelegramJoins(self, on: bool) -> None:
+        self._bg(lambda: self.api.telegram_settings(on), self._set_telegram)
+
+    @Slot()
+    def disconnectTelegram(self) -> None:
+        self._bg(self.api.telegram_unlink, self._set_telegram)
 
     @Slot(int)
     def revokeSession(self, session_id: int) -> None:

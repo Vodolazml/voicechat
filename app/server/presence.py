@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import media_sessions, models, schemas
+from . import media_sessions, models, schemas, telegram
 from .audit import write_audit
 from .config import get_settings
 from .database import SessionLocal, get_db
@@ -273,6 +273,8 @@ async def connect_channel(channel_id: int, payload: schemas.VoiceJoinIn, request
                 request=request)
     db.commit()
     publish_state(db, state)
+    if existing is None or previous_channel_id is not None:
+        telegram.bot.notify_join(db, user, channel)
     if previous_channel_id is not None:
         # Switching channels: the old room must not keep a hidden listener.
         await media_sessions.remove_media_participant(previous_channel_id, user.id)

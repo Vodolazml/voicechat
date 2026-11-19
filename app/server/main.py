@@ -5,7 +5,7 @@ import logging
 import secrets
 from datetime import timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -20,7 +20,7 @@ from .audit import write_audit
 from .database import SessionLocal, engine, get_db, run_migrations
 from .e2ee_state import e2ee_state
 from ..e2ee_crypto import public_key_fingerprint
-from .deps import channel_participant_ids, current_user, ensure_channel_member, require_permission, token_session_id
+from .deps import user_from_token, channel_participant_ids, current_user, ensure_channel_member, require_permission, token_session_id
 from .limits import _rate_limits, client_ip, rate_limit  # noqa: F401  (_rate_limits re-exported for tests)
 from .permissions import seed_permissions, has_permission, user_permissions
 from .security import (
@@ -34,7 +34,7 @@ from .security import (
 )
 from .media_sessions import remove_media_participant
 from .events import hub
-from . import avatars, chat, download_page, files, legal, presence, spaces
+from . import avatars, chat, download_page, downloads, files, legal, presence, spaces, telegram
 from .presence import grant_public_channels, leave_voice, voice_state_out  # noqa: F401
 from .body_limit import BodyLimitMiddleware
 from ..version import APP_VERSION
@@ -51,11 +51,14 @@ async def lifespan(_app: FastAPI):
     seed_database()
     janitor = asyncio.create_task(presence.presence_janitor())
     retention = asyncio.create_task(legal.retention_janitor(SessionLocal))
+    tasks = [janitor, retention]
+    if telegram.bot.enabled:
+        tasks.append(asyncio.create_task(telegram.bot.run()))
     try:
         yield
     finally:
-        janitor.cancel()
-        retention.cancel()
+        for task in tasks:
+            task.cancel()
 
 
 app = FastAPI(
@@ -86,11 +89,16 @@ app.include_router(files.router)
 app.include_router(spaces.router)
 app.include_router(avatars.router)
 app.include_router(download_page.router)
+app.include_router(downloads.router)
+app.include_router(telegram.router)
 app.include_router(legal.router)
 
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    if request.url.path.startswith("/downloads/") and not downloads.allowed(request.url.path, request.url.query,
+                                                                            client_ip(request)):
+        return JSONResponse(status_code=403, content={"detail": "Ссылка на скачивание устарела"})
     content_length = request.headers.get("content-length")
     if content_length:
         try:
@@ -213,18 +221,29 @@ def version_tuple(value: str) -> tuple[int, ...]:
 
 
 @app.get("/client/update", response_model=schemas.ClientUpdateOut, tags=["service"])
-def client_update(version: str = APP_VERSION) -> schemas.ClientUpdateOut:
+def client_update(request: Request, version: str = APP_VERSION, authorization: str = Header(default=""),
+                  db: Session = Depends(get_db)) -> schemas.ClientUpdateOut:
     latest = settings.client_latest_version
+    user_name = None
+    if authorization.startswith("Bearer "):
+        try:
+            user_name = user_from_token(db, authorization.removeprefix("Bearer ").strip()).display_name
+        except HTTPException:
+            user_name = None
     update_available = (
         bool(settings.client_download_url)
         and bool(settings.client_download_sha256)
         and version_tuple(latest) > version_tuple(version)
     )
+    # With download approvals on, the link goes only to signed-in people; the app checks again after
+    # sign-in and offers the update then.
+    link = downloads.update_link(version[:20], request, user_name) if update_available else ""
+    update_available = update_available and bool(link)
     return schemas.ClientUpdateOut(
         latest_version=latest,
         update_available=update_available,
         required=update_available and settings.client_update_required,
-        download_url=settings.client_download_url if update_available else "",
+        download_url=link,
         sha256=settings.client_download_sha256 if update_available else "",
         signature=settings.client_download_signature if update_available else "",
         release_notes_url=settings.client_release_notes_url if update_available else "",

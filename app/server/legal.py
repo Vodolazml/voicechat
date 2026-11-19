@@ -222,6 +222,7 @@ def wipe_account(db: Session, user: models.User) -> None:
     db.execute(delete(models.ChannelMember).where(models.ChannelMember.user_id == uid))
     db.execute(delete(models.SpaceModerator).where(models.SpaceModerator.user_id == uid))
     db.execute(delete(models.SpaceMember).where(models.SpaceMember.user_id == uid))
+    db.execute(delete(models.TelegramLink).where(models.TelegramLink.user_id == uid))
     db.execute(update(models.AuditLog).where(models.AuditLog.actor_id == uid).values(ip_address="", details="{}"))
 
 

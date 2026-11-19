@@ -27,7 +27,7 @@ Rectangle {
     readonly property bool micTestWanted: visible && tab === 0 && Qt.application.state === Qt.ApplicationActive
     onMicTestWantedChanged: backend.setMicTest(micTestWanted)
     onVisibleChanged: {
-        if (visible) { backend.refreshDevices(); backend.loadSessions() }
+        if (visible) { backend.refreshDevices(); backend.loadSessions(); backend.loadTelegram() }
     }
     Keys.onEscapePressed: root.closed()
 
@@ -293,6 +293,27 @@ Rectangle {
                             hint: "Её видят друзья в каналах, в чате и на сцене. Картинка обрежется до квадрата."
                             onPicked: (url) => backend.setMyAvatar(url)
                             onCleared: backend.setMyAvatar("")
+                        }
+                    }
+                    Text { visible: backend.telegram.available === true; text: "TELEGRAM"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Card {
+                        visible: backend.telegram.available === true
+                        Text {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; color: Theme.muted; font.family: Theme.font; font.pixelSize: 13
+                            text: backend.telegram.linked
+                                  ? "Подключён" + (backend.telegram.tg_username ? " @" + backend.telegram.tg_username : "") + " · бот @" + backend.telegram.bot_username + ". Бот напишет, когда кто-то зайдёт в голосовой канал вашего пространства, если вас там нет."
+                                  : "Привяжите свой Telegram к аккаунту: бот @" + (backend.telegram.bot_username || "") + " будет писать, когда кто-то заходит в голосовой канал."
+                        }
+                        Toggle {
+                            visible: backend.telegram.linked === true
+                            title: "Сообщать, когда кто-то заходит в голосовой канал"
+                            checked: backend.telegram.notify_joins === true
+                            onToggled: (v) => backend.setTelegramJoins(v)
+                        }
+                        RowLayout {
+                            spacing: 10
+                            PrimaryButton { text: backend.telegram.linked ? "Привязать другой Telegram" : "Подключить Telegram"; secondary: backend.telegram.linked === true; onClicked: backend.connectTelegram() }
+                            PrimaryButton { visible: backend.telegram.linked === true; secondary: true; text: "Отключить"; onClicked: backend.disconnectTelegram() }
                         }
                     }
                     Text { text: "УСТРОЙСТВА, ГДЕ ВЫ ВОШЛИ"; color: Theme.muted; font.family: Theme.font; font.pixelSize: 12; font.weight: Font.DemiBold }

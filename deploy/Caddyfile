@@ -19,9 +19,17 @@ chat.{$VOICECHAT_DOMAIN} {
     import security_headers
     # Installers straight from disk (sendfile, ranges for resumed and parallel downloads): big downloads
     # no longer pass through the API's single Python process that also carries the live chat events.
-    handle_path /downloads/* {
-        root * /srv/downloads
-        file_server
+    # Installers need a signed link (owner approval in Telegram, or the app's update check): the API
+    # answers 204/403 for every request before Caddy serves the file.
+    handle /downloads/* {
+        route {
+            forward_auth 127.0.0.1:8765 {
+                uri /downloads-auth
+            }
+            uri strip_prefix /downloads
+            root * /srv/downloads
+            file_server
+        }
     }
     handle {
         encode zstd gzip

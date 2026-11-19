@@ -1,4 +1,4 @@
-"""The public front page: one button that downloads the Windows app.
+"""The public front page: one button that downloads the Windows app (the download itself: downloads.py).
 
 The app installs once; after that it updates itself at every start, so this page always hands out the
 latest signed installer (the same file the in-app updater uses).
@@ -8,7 +8,7 @@ from __future__ import annotations
 import html
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, Response
 
 from .config import get_settings
 from ..version import APP_VERSION
@@ -94,12 +94,3 @@ def front_page() -> Response:
     return HTMLResponse(page, headers={"Content-Security-Policy":
                                        "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
                                        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"})
-
-
-@router.get("/download")
-def download_latest() -> Response:
-    """A stable link to the newest installer, for the page and for sharing."""
-    url = _installer_url()
-    if not url:
-        return HTMLResponse("Установщик ещё не опубликован", status_code=404)
-    return RedirectResponse(url, status_code=302)

@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     operator_name: str = "администратор сервера"
     operator_contact: str = "через владельца вашего пространства в программе VoiceChat"
     hosting_provider: str = "арендованный виртуальный сервер (VPS)"
+    # Telegram bot (@BotFather token). People link their account to it from the app's settings; the owner's
+    # chat also approves every installer download from the web page. Empty: no bot, downloads are open.
+    telegram_bot_token: str = ""
+    # Extra admin chat (besides the owner's linked account), e.g. set before the owner links the app.
+    telegram_admin_chat_id: int = 0
+    # How long an approved (or update) download link works.
+    download_link_hours: int = Field(default=6, ge=1, le=72)
+    # Download counter; empty: next to the chat files (on the /data volume in production).
+    download_stats_file: str = ""
 
     model_config = SettingsConfigDict(env_prefix="VOICECHAT_", env_file=".env")
 

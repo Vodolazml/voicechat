@@ -229,6 +229,18 @@ class ApiClient:
     def delete_account(self, password: str) -> None:
         self.request("POST", "/me/delete", json={"password": password})
 
+    def telegram(self) -> dict[str, Any]:
+        return self.request("GET", "/telegram")
+
+    def telegram_link(self) -> str:
+        return str(self.request("POST", "/telegram/link").get("url", ""))
+
+    def telegram_settings(self, notify_joins: bool) -> dict[str, Any]:
+        return self.request("PUT", "/telegram", json={"notify_joins": notify_joins})
+
+    def telegram_unlink(self) -> dict[str, Any]:
+        return self.request("DELETE", "/telegram")
+
     def change_password(self, old_password: str, new_password: str) -> None:
         self.request("POST", "/me/password", json={"old_password": old_password, "new_password": new_password})
 

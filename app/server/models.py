@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .database import Base
 
@@ -210,4 +210,16 @@ class AuditLog(Base):
     ip_address: Mapped[str] = mapped_column(String(64), default="")
     result: Mapped[str] = mapped_column(String(32), default="success")
     details: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TelegramLink(Base):
+    """A person's Telegram chat with the server's bot, linked from the app."""
+
+    __tablename__ = "telegram_links"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    tg_username: Mapped[str] = mapped_column(String(64), default="")
+    # "Someone joined a voice channel" messages, for the person's own channels.
+    notify_joins: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

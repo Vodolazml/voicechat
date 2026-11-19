@@ -161,6 +161,28 @@ def test_app_updates_need_no_approval(client, tg):  # noqa: F811
     assert len(notes) == 1
 
 
+def test_owner_sees_who_is_online_and_versions(client, tg):  # noqa: F811
+    admin, friend, _space, voice = setup_admin_and_friend(client)
+    link(client, admin, tg, ADMIN_CHAT)
+    link(client, friend, tg, FRIEND_CHAT)
+    client.get("/client/update", params={"version": "0.6.2"}, headers=friend)
+    client.get("/client/update", params={"version": "0.7.0"}, headers=friend)
+    client.post(f"/channels/{voice[0]}/connect", headers=friend, json={"muted": True})
+    tg.update(ADMIN_CHAT, "👥 Кто в сети")
+    online = tg.sent_to(ADMIN_CHAT)[-1]
+    assert "Друг" in online and "🔇" in online and "0.7.0" in online
+    tg.update(ADMIN_CHAT, "/versions")
+    versions = tg.sent_to(ADMIN_CHAT)[-1]
+    assert "✅ Друг: 0.7.0 (обновление с 0.6.2" in versions and "версия пока неизвестна" in versions
+    tg.update(FRIEND_CHAT, "/online")
+    assert tg.sent_to(FRIEND_CHAT)[-1] == "Недоступно."
+    # The owner's welcome carries the buttons; a friend's does not.
+    tg.update(ADMIN_CHAT, "/start")
+    tg.update(FRIEND_CHAT, "/start")
+    starts = [p for m, p in tg.calls if m == "sendMessage" and "reply_markup" in p and "keyboard" in p["reply_markup"]]
+    assert starts and all(p["chat_id"] == ADMIN_CHAT for p in starts)
+
+
 def test_crawlers_do_not_ask_the_owner(client, tg):  # noqa: F811
     admin, _friend, _space, _voice = setup_admin_and_friend(client)
     link(client, admin, tg, ADMIN_CHAT)

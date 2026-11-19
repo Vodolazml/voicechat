@@ -177,6 +177,43 @@ def stats_text() -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------- app versions per person
+
+def _versions_path() -> Path:
+    return _stats_path().with_name("client-versions.json")
+
+
+def load_versions() -> dict:
+    try:
+        return json.loads(_versions_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def record_version(user_id: int, version: str) -> None:
+    """The version a signed-in app reported (its update check after sign-in)."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with _lock:
+        versions = load_versions()
+        row = versions.get(str(user_id)) or {}
+        if row.get("version") != version:
+            if row.get("version"):
+                row["previous"] = row["version"]
+            row["version"] = version
+            row["since"] = now
+        row["seen"] = now
+        versions[str(user_id)] = row
+        path = _versions_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".versions-")
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                json.dump(versions, out, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.warning("Client versions not saved: %s", exc)
+
+
 # ---------------------------------------------------------------------- device names
 
 def describe_device(user_agent: str) -> str:

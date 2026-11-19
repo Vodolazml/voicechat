@@ -310,6 +310,15 @@ def _page(title: str, text: str, extra: str = "", refresh: str = "", status: int
     return HTMLResponse(page, status_code=status, headers={"Content-Security-Policy": CSP})
 
 
+BOTS = re.compile(r"bot\b|bot/|crawl|spider|slurp|preview|facebookexternalhit|whatsapp|vkshare|"
+                  r"skypeuripreview|curl/|wget/|python-requests|headless", re.IGNORECASE)
+
+
+@router.get("/robots.txt")
+def robots() -> Response:
+    return Response("User-agent: *\nDisallow: /download\nDisallow: /downloads/\n", media_type="text/plain")
+
+
 @router.get("/download")
 def download_latest(request: Request) -> Response:
     """The page's button and the shareable link. Waits for the owner's approval when that is on."""
@@ -319,6 +328,9 @@ def download_latest(request: Request) -> Response:
     if not gate_active():
         count("page", get_settings().client_latest_version, client_ip(request))
         return RedirectResponse(signed_url(url, client_ip(request)) if bot.enabled else url, status_code=302)
+    if BOTS.search(request.headers.get("user-agent", "")):
+        # Search engines and link previews follow the button too: no request to the owner for them.
+        return _page("Скачивание", "Откройте эту страницу в браузере.", status=403)
     req = start_request(request)
     return RedirectResponse(f"/download/wait/{req.id}", status_code=303)
 

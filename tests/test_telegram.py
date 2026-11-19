@@ -161,6 +161,16 @@ def test_app_updates_need_no_approval(client, tg):  # noqa: F811
     assert len(notes) == 1
 
 
+def test_crawlers_do_not_ask_the_owner(client, tg):  # noqa: F811
+    admin, _friend, _space, _voice = setup_admin_and_friend(client)
+    link(client, admin, tg, ADMIN_CHAT)
+    ua = "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)"
+    assert client.get("/download", headers={"User-Agent": ua}, follow_redirects=False).status_code == 403
+    tg.flush()
+    assert not any("Запрос на скачивание" in t for t in tg.sent_to(ADMIN_CHAT))
+    assert "Disallow: /download" in client.get("/robots.txt").text
+
+
 def test_device_names():
     assert downloads.describe_device(
         "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36"

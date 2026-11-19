@@ -17,8 +17,13 @@ base64 = "0.22"
 parking_lot = "0.12"
 log = "0.4"
 
+[target.'cfg(not(windows))'.dependencies]
+memmap2 = "0.9"
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Media", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Media", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Memory", "Win32_Security", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
+# Video: the card's own H.264 encoder and the webcam, both through Media Foundation.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Ole", "Win32_Media_DirectShow"] }
 
 [profile.release]
 opt-level = 3

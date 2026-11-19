@@ -46,6 +46,30 @@ def _pick_format(device):
     return best
 
 
+class NativeCamera:
+    """A webcam run by the voice engine (Media Foundation there): this only names the device. The engine
+    opens it, sends it and shows our own picture through the same path as everyone else's."""
+
+    def __init__(self, camera_id: str, title: str = "") -> None:
+        self.camera_id = camera_id
+        self.title = title
+        self.fps = FPS
+        self.max_bitrate = BITRATE
+
+    def command(self) -> dict:
+        return {"id": self.camera_id, "title": self.title, "max_height": MAX_HEIGHT, "fps": FPS,
+                "bitrate": BITRATE}
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def deleteLater(self) -> None:  # noqa: N802 - same surface as the Qt capturer
+        pass
+
+
 class CameraCapturer(QObject):
     def __init__(self, camera_id: str, preview: Callable[[QImage], None] | None = None,
                  on_error: Callable[[str], None] = lambda text: None) -> None:

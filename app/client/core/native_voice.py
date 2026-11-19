@@ -130,6 +130,13 @@ class NativeVoice:
         self.on_key: Callable[[str, bool], None] = lambda name, down: None
         # Who else shares a screen / a camera in the voice room (the call opens video only then).
         self.on_video: Callable[[set[int], set[int]], None] = lambda screen, camera: None
+        # The video connection's events go to the NativeMediaSession that runs it (set while it lives).
+        self.video_listener = None
+        self._video_commands: dict[str, dict] = {}  # given again to a video process that was restarted
+        self._video_watching: set[int] = set()
+        self._video_proc: subprocess.Popen | None = None
+        self._video_lock = threading.Lock()
+        self._video_restarts = 0
         self._keys: dict[str, list[int]] = {}
         self.path = path or engine_path()
         if self.path is None:
@@ -196,7 +203,7 @@ class NativeVoice:
                 continue
             engine_log.log({"ERROR": logging.WARNING, "WARN": logging.WARNING}.get(level, logging.INFO), "%s", rest)
 
-    def _read_events(self, proc: subprocess.Popen) -> None:
+    def _read_events(self, proc: subprocess.Popen, video: bool = False) -> None:
         for raw in proc.stdout:
             try:
                 event = json.loads(raw)
@@ -207,6 +214,9 @@ class NativeVoice:
             except Exception:
                 logger.exception("Voice engine event failed: %s", event)
         code = proc.wait()
+        if video:
+            self._video_exited(proc, code)
+            return
         if self._stopping or proc is not self._proc:
             return
         self._restarts += 1
@@ -271,11 +281,40 @@ class NativeVoice:
             self.on_key_problem(int(event["user_id"]))
         elif kind == "problem":
             self.on_problem(str(event.get("kind")))
+        elif kind == "vf":
+            listener = self.video_listener
+            if listener is not None:
+                from .native_media import ShmFrame
+
+                listener.on_vframe(int(event["key"]), ShmFrame(str(event["name"]), int(event["w"]), int(event["h"]),
+                                                               int(event["slot"]), int(event["size"])))
+        elif kind == "vgone":
+            listener = self.video_listener
+            if listener is not None:
+                listener.on_vframe(int(event["key"]), None)
+        elif kind == "vstate":
+            listener = self.video_listener
+            if listener is not None:
+                listener.on_vstate(str(event.get("state")), str(event.get("reason", "")))
+        elif kind == "vtracks":
+            listener = self.video_listener
+            if listener is not None:
+                listener.on_vtracks({int(i) for i in event.get("screen", [])}, {int(i) for i in event.get("camera", [])})
+        elif kind == "vstats":
+            listener = self.video_listener
+            if listener is not None:
+                listener.on_vstats(str(event.get("kind")), dict(event.get("stats") or {}))
+        elif kind == "vproblem":
+            self._video_commands.pop("share" if event.get("kind") == "screen" else "camera", None)
+            listener = self.video_listener
+            if listener is not None:
+                listener.on_vproblem(str(event.get("kind")), str(event.get("text", "")))
         elif kind == "ready":
             logger.info("Voice engine %s ready (%s)", event.get("version"), self.path)
 
     def close(self) -> None:
         self._stopping = True
+        self._stop_video_process()
         self._send(cmd="quit")
         proc = self._proc
         if proc is not None:
@@ -373,6 +412,100 @@ class NativeVoice:
         self._remote_keys.clear()
         self._send(cmd="disconnect")
 
+    # --- video: a second engine process ("vcvoice --video") -------------------------------------------
+    # It runs only while there is video (started by "vconnect", ended by "vdisconnect"): its memory is
+    # gone between shares, and a crash in a capture, encoder or camera driver cannot stop the voice.
+
+    def video_command(self, cmd: str, **args) -> None:
+        """Video commands; the lasting ones are remembered for a video process that has to restart."""
+        if cmd == "vconnect":
+            self._video_commands["vconnect"] = args
+            self._video_restarts = 0
+        elif cmd == "vdisconnect":
+            self._video_commands.clear()
+            self._video_watching.clear()
+            self._stop_video_process()
+            return
+        elif cmd in ("share", "camera"):
+            self._video_commands[cmd] = args
+        elif cmd in ("share_stop", "camera_stop"):
+            self._video_commands.pop(cmd.removesuffix("_stop"), None)
+        elif cmd == "watch":
+            (self._video_watching.add if args.get("on") else self._video_watching.discard)(int(args["user_id"]))
+        if self._video_proc is None:
+            if cmd != "vconnect":
+                return  # remembered; sent when the process starts
+            self._spawn_video()
+            return  # the start sends everything remembered, this command included
+        self._send_video(cmd=cmd, **args)
+
+    def _video_exited(self, proc: subprocess.Popen, code) -> None:
+        if proc is not self._video_proc or self._stopping:
+            return  # ended on purpose
+        self._video_proc = None
+        self._video_restarts += 1
+        logger.warning("The video process exited (code %s); the voice goes on (%d)", code, self._video_restarts)
+        listener = self.video_listener
+        if "vconnect" in self._video_commands and self._video_restarts <= 3:
+            time.sleep(1)
+            if "vconnect" in self._video_commands and self._video_proc is None:
+                # Our own share or camera does not come back by itself after a crash: the person decides.
+                for kind, cmd in (("screen", "share"), ("camera", "camera")):
+                    if self._video_commands.pop(cmd, None) is not None and listener is not None:
+                        listener.on_vproblem(kind, "видео-модуль перезапущен, включите снова")
+                self._spawn_video()
+        elif listener is not None:
+            listener.on_vstate("closed", "video process failed")
+
+    def _spawn_video(self) -> None:
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        proc = subprocess.Popen([str(self.path), "--video"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, creationflags=flags, bufsize=0)
+        self._video_proc = proc
+        threading.Thread(target=self._read_events, args=(proc, True), name="vcvideo-events", daemon=True).start()
+        threading.Thread(target=self._read_log, args=(proc,), name="vcvideo-log", daemon=True).start()
+        if self._local_key:
+            key_id, key = self._local_key
+            self._send_video(cmd="local_key", id=key_id, key=base64.b64encode(key).decode())
+        for user_id, (key_id, key) in list(self._remote_keys.items()):
+            self._send_video(cmd="remote_key", user_id=int(user_id), id=key_id, key=base64.b64encode(key).decode())
+        for cmd in ("vconnect", "share", "camera"):
+            if cmd in self._video_commands:
+                self._send_video(cmd=cmd, **self._video_commands[cmd])
+        for user_id in self._video_watching:
+            self._send_video(cmd="watch", user_id=user_id, on=True)
+        logger.info("Video process started")
+
+    def _stop_video_process(self) -> None:
+        proc, self._video_proc = self._video_proc, None
+        if proc is None:
+            return
+        self._send_to(proc, self._video_lock, {"cmd": "quit"})
+
+        def reap() -> None:
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            logger.info("Video process ended")
+        threading.Thread(target=reap, name="vcvideo-reap", daemon=True).start()
+
+    def _send_video(self, **message) -> None:
+        proc = self._video_proc
+        if proc is not None:
+            self._send_to(proc, self._video_lock, message)
+
+    @staticmethod
+    def _send_to(proc: subprocess.Popen, lock: threading.Lock, message: dict) -> None:
+        if proc.stdin is None:
+            return
+        with lock:
+            try:
+                proc.stdin.write((json.dumps(message) + "\n").encode())
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                pass
+
     def _send_local_key(self) -> None:
         key_id, key = self._local_key
         self._send(cmd="local_key", id=key_id, key=base64.b64encode(key).decode())
@@ -385,8 +518,10 @@ class NativeVoice:
         if self._local_key != (key_id, key):
             self._local_key = (key_id, key)
             self._send_local_key()
+            self._send_video(cmd="local_key", id=key_id, key=base64.b64encode(key).decode())
 
     def set_remote_key(self, user_id: int, key_id: str, key: bytes) -> None:
         if self._remote_keys.get(user_id) != (key_id, key):
             self._remote_keys[user_id] = (key_id, key)
             self._send_remote_key(user_id)
+            self._send_video(cmd="remote_key", user_id=int(user_id), id=key_id, key=base64.b64encode(key).decode())

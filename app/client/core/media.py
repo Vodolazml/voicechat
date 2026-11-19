@@ -203,6 +203,7 @@ class MediaCallbacks:
     on_participants: Callable[[set[int]], None] = lambda users: None
     on_cameras: Callable[[set[int]], None] = lambda users: None             # who has a camera on now
     on_key_problem: Callable[[int], None] = lambda user_id: None            # can't decrypt this person
+    on_video_problem: Callable[[str, str], None] = lambda kind, text: None  # native engine: share/camera ended
 
 
 class MediaSession:

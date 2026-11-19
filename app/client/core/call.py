@@ -6,16 +6,19 @@ interleave. The UI only calls methods and listens; nothing here blocks the inter
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable
 
 from . import native_voice
 from .audio import AudioEngine, AudioSettings
 from .keys import KeyManager
 from .media import MediaCallbacks, MediaSession
+from .native_media import NativeMediaSession, engine_supports_video
 
 logger = logging.getLogger("voicechat.call")
 
@@ -29,6 +32,11 @@ IDLE, CONNECTING, CONNECTED, RECONNECTING = "idle", "connecting", "connected", "
 UNAVAILABLE = "unavailable"  # we are in the channel, but the server's media server is not reachable
 MEDIA_IDLE_SECONDS = 20.0
 VOICE_RETRY_SECONDS = (1, 2, 4, 8, 10)  # waits before reconnecting the native voice connection
+
+
+def native_video_enabled(engine) -> bool:
+    """Video in the engine unless VOICECHAT_NATIVE_VIDEO=0 (then the old Python LiveKit path)."""
+    return engine_supports_video(engine) and os.environ.get("VOICECHAT_NATIVE_VIDEO", "") != "0"
 
 
 def default_audio_factory(settings: AudioSettings, **kwargs):
@@ -54,6 +62,7 @@ class CallListener:
     on_local: Callable[[dict], None] = lambda flags: None              # muted/deafened/transmitting
     on_transmitting: Callable[[bool], None] = lambda on: None          # native engine: our own voice gate
     on_key: Callable[[str, bool], None] = lambda name, down: None       # native engine: a shortcut key
+    on_video_problem: Callable[[str, str], None] = lambda kind, text: None  # our share/camera ended by itself
 
 
 @dataclass
@@ -272,8 +281,13 @@ class CallController:
             on_cameras=self.listener.on_cameras if not self.native else self._on_media_cameras,
             on_participants=lambda users: None,
             on_key_problem=lambda user_id: self._on_key_problem(channel_id, user_id),
+            on_video_problem=self._on_video_problem,
         )
-        media = self.media_factory(
+        factory = self.media_factory
+        if self.native and factory is MediaSession and native_video_enabled(self.audio):
+            # The engine runs the video too: no LiveKit Python library, no capture process.
+            factory = partial(NativeMediaSession, engine=self.audio)
+        media = factory(
             credentials=lambda: self.api.media_token(channel_id),
             my_id=self.keys.my_id,
             outgoing_key=lambda: self.keys.outgoing(channel_id),
@@ -522,6 +536,15 @@ class CallController:
                 # gone while still hearing us.
                 channel_id = self.channel_id
                 self._submit(lambda: self._confirm_presence(channel_id), "presence")
+
+    def _on_video_problem(self, kind: str, text: str) -> None:
+        """The engine ended our screen share or camera by itself (the window closed, the camera left...)."""
+        if kind == "screen":
+            self._video_mine = (False, self._video_mine[1])
+        elif kind == "camera":
+            self._video_mine = (self._video_mine[0], False)
+        self._submit(self._review_media, "video")
+        self.listener.on_video_problem(kind, text)
 
     def _on_speakers(self, speakers: set[int]) -> None:
         if self.audio.transmitting and not self.muted:

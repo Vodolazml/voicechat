@@ -821,6 +821,74 @@ class _NoProcess(Exception):
     pass
 
 
+class NativeScreenShare:
+    """A screen share run by the voice engine: it captures, scales and encodes. This only says what to share
+    and keeps the engine's numbers for the status line (same `stats()` as ScreenCapturer)."""
+
+    def __init__(self, monitor: int, preset: Preset, kind: str = "monitor") -> None:
+        info = resolve_source(kind, monitor)
+        self.kind = info["kind"]
+        self.monitor = info["index"]
+        self._ident = monitor if self.kind == "window" else info["index"]
+        self._rect = (info.get("left", 0), info.get("top", 0), info["width"], info["height"])
+        source_w = info.get("window_width", info["width"])
+        source_h = info.get("window_height", info["height"])
+        self._source_size = (source_w, source_h)
+        self.width, self.height = _target_size(source_w, source_h, preset.height)
+        self.fps = preset.fps
+        self.max_bitrate = preset.bitrate
+        self.preview = None
+        self.engine_stats: dict = {}
+
+    def command(self) -> dict:
+        return {"kind": self.kind, "ident": str(self._ident), "rect": list(self._rect), "width": self.width,
+                "height": self.height, "fps": self.fps, "bitrate": self.max_bitrate,
+                "encoder": os.environ.get("VOICECHAT_VIDEO_ENCODER", "")}
+
+    def stats(self) -> dict:
+        stats = {"capture_fps": 0.0, "sent_fps": 0.0, "width": self.width, "height": self.height,
+                 "source_width": self._source_size[0], "source_height": self._source_size[1], "grab_ms": 0.0,
+                 "backend": "engine", "frame_limit": 0}
+        stats.update(self.engine_stats)
+        return stats
+
+
+_shm_maps: dict[str, object] = {}
+_shm_lock = threading.Lock()
+
+
+def _shm_view(name: str, length: int):
+    """The engine's shared memory block `name` (opened once, kept while it is in use)."""
+    import mmap
+
+    with _shm_lock:
+        found = _shm_maps.get(name)
+        if found is not None:
+            return found
+        if os.name == "nt":
+            view = mmap.mmap(-1, length, tagname=f"Local\\{name}", access=mmap.ACCESS_READ)
+        else:
+            path = os.path.join("/dev/shm", name)
+            if not os.path.exists(path):
+                import tempfile
+
+                path = os.path.join(tempfile.gettempdir(), name)
+            with open(path, "rb") as handle:
+                view = mmap.mmap(handle.fileno(), length, access=mmap.ACCESS_READ)
+        _shm_maps[name] = view
+        return view
+
+
+def _shm_close(name: str) -> None:
+    with _shm_lock:
+        view = _shm_maps.pop(name, None)
+    if view is not None:
+        try:
+            view.close()
+        except BufferError:
+            pass  # a frame still points into it; the operating system frees it with the last user
+
+
 def i420_frame(width: int, height: int, data) -> QVideoFrame:
     """A QVideoFrame from a packed I420 buffer (Y, then U and V at half size). The graphics card turns it
     into colours and scales it, the processor only copies the planes (2.5x less than RGBA)."""
@@ -858,14 +926,37 @@ class VideoHub(QObject):
         self._lock = threading.Lock()
         self._frames: dict[int, QVideoFrame] = {}
         self._rates: dict[int, _Rate] = {}
+        self._blocks: dict[int, str] = {}  # picture source -> the engine's memory block it uses now
         self.frame.connect(self._noop)
 
     def _noop(self, user_id: int) -> None:
         pass
 
     def push(self, user_id: int, video_frame) -> None:
-        """Called from the video thread with an I420 rtc.VideoFrame, as the decoder produced it."""
-        frame = i420_frame(video_frame.width, video_frame.height, video_frame.data)
+        """Called from the video thread with an I420 picture: a LiveKit rtc.VideoFrame (Python video path) or
+        a slot in the engine's shared memory (`ShmFrame`). None: that picture source ended."""
+        if video_frame is None:
+            self.drop(user_id)
+            name = self._blocks.pop(user_id, None)
+            if name:
+                _shm_close(name)
+            return
+        if hasattr(video_frame, "slot"):
+            name = video_frame.name
+            old = self._blocks.get(user_id)
+            if old != name:
+                self._blocks[user_id] = name
+                if old:
+                    _shm_close(old)
+            view = _shm_view(name, video_frame.size * 3)
+            start = video_frame.slot * video_frame.size
+            data = memoryview(view)[start:start + video_frame.size]
+            try:
+                frame = i420_frame(video_frame.width, video_frame.height, data)
+            finally:
+                data.release()
+        else:
+            frame = i420_frame(video_frame.width, video_frame.height, video_frame.data)
         with self._lock:
             self._frames[user_id] = frame
             self._rates.setdefault(user_id, _Rate()).tick()

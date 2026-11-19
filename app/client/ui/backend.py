@@ -43,7 +43,7 @@ from app.version import APP_VERSION
 
 from . import platform as native
 from .models import ListModel
-from .screen import PRESETS, ScreenCapturer, list_monitors, list_windows, video_hub
+from .screen import PRESETS, NativeScreenShare, ScreenCapturer, list_monitors, list_windows, video_hub
 from app.client.core.media import camera_key
 
 logger = logging.getLogger("voicechat.ui")
@@ -1008,6 +1008,7 @@ class Backend(QObject):
             on_local=lambda flags: None,
             on_transmitting=lambda on: self._ui(lambda: self._set_transmitting(on)),
             on_key=lambda name, down: self._ui(lambda: self._on_key(name, down)),
+            on_video_problem=lambda kind, text: self._ui(lambda: self._on_video_problem(kind, text)),
         )
         self.call = CallController(self.api, self.keys, self.audio_settings, listener)
         self.events = EventStream(self.api.base_url, lambda: self.api.token or "",
@@ -1693,8 +1694,11 @@ class Backend(QObject):
         self._save()
         try:
             my_id = self._me.get("id", 0)
-            capturer = ScreenCapturer(ident, preset, preview=lambda image: self._active and video_hub().push_image(my_id, image),
-                                      kind=kind)
+            if self._native_video():
+                capturer = NativeScreenShare(ident, preset, kind=kind)
+            else:
+                capturer = ScreenCapturer(ident, preset, preview=lambda image: self._active and video_hub().push_image(my_id, image),
+                                          kind=kind)
         except Exception as exc:  # noqa: BLE001
             self.toast("error", str(exc))
             return
@@ -1728,14 +1732,18 @@ class Backend(QObject):
         if self._call_in_current_space() and not self._current_space().get("camera_allowed", True):
             self.toast("warning", "В этом пространстве камеры выключены в настройках")
             return
-        from .camera import CameraCapturer
+        from .camera import CameraCapturer, NativeCamera, list_cameras
 
         self._stop_camera_device()
         my_id = self._me.get("id", 0)
         try:
-            capturer = CameraCapturer(
-                camera_id, preview=lambda image: self._active and video_hub().push_image(camera_key(my_id), image),
-                on_error=lambda text: self._ui(lambda: (self.toast("error", f"Камера: {text}"), self.stopCamera())))
+            if self._native_video():
+                title = next((c["title"] for c in list_cameras() if c["id"] == camera_id), "")
+                capturer = NativeCamera(camera_id, title)
+            else:
+                capturer = CameraCapturer(
+                    camera_id, preview=lambda image: self._active and video_hub().push_image(camera_key(my_id), image),
+                    on_error=lambda text: self._ui(lambda: (self.toast("error", f"Камера: {text}"), self.stopCamera())))
             capturer.start()
         except Exception as exc:  # noqa: BLE001
             self.toast("error", str(exc))
@@ -2402,6 +2410,21 @@ class Backend(QObject):
             self.videoInfoChanged.emit()
         if not info and not self._watching and self._capturer is None:
             self._video_timer.stop()
+
+    def _native_video(self) -> bool:
+        from app.client.core.call import native_video_enabled
+
+        return self.call is not None and native_video_enabled(self.call.audio)
+
+    def _on_video_problem(self, kind: str, text: str) -> None:
+        """The engine ended our share or camera by itself: say why and put the buttons back."""
+        if kind == "screen" and self._capturer is not None:
+            self.toast("error", f"Демонстрация остановлена: {text}")
+            self.stopScreen()
+        elif kind == "camera" and self._camera is not None:
+            self.toast("error", f"Камера: {text}")
+            self.stopCamera()
+        self.callChanged.emit()
 
     def _native_voice(self) -> bool:
         return self.call is not None and bool(getattr(self.call.audio, "native", False))

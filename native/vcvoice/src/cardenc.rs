@@ -488,7 +488,7 @@ mod imp {
                                     payload: &bytes,
                                     timestamp_us: time,
                                     frame_type: if key { EncodedFrameType::Key } else { EncodedFrameType::Delta },
-                                    resolution,
+                                    resolution: resolution.clone(),
                                     frame_metadata: None,
                                 };
                                 source.capture_encoded_frame(&frame);

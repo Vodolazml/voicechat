@@ -227,7 +227,9 @@ def client_update(request: Request, version: str = APP_VERSION, authorization: s
     user_name = None
     if authorization.startswith("Bearer "):
         try:
-            user_name = user_from_token(db, authorization.removeprefix("Bearer ").strip()).display_name
+            caller = user_from_token(db, authorization.removeprefix("Bearer ").strip())
+            user_name = caller.display_name
+            downloads.record_version(caller.id, version[:20])
         except HTTPException:
             user_name = None
     update_available = (

@@ -51,6 +51,10 @@ fn main() {
     log::set_logger(&events::StderrLogger).ok();
     log::set_max_level(log::LevelFilter::Info);
     let events = Events::start();
+    if std::env::args().any(|a| a == "--selftest") {
+        selftest();
+        return;
+    }
     if std::env::args().any(|a| a == "--video") {
         video_main(events);
         return;
@@ -268,4 +272,73 @@ fn video_main(events: Events) {
     let _ = video_tx.send(VideoCmd::Disconnect);
     std::thread::sleep(Duration::from_millis(300));
     runtime.shutdown_timeout(Duration::from_secs(2));
+}
+
+/// `vcvoice --selftest [width height fps]`: checks the video parts on this computer without a call. Captures
+/// monitor 1 for 6 s and encodes it on the graphics card (or says why not), then opens the webcam for 3 s.
+/// Prints one JSON line with what happened.
+fn selftest() {
+    use std::sync::atomic::Ordering;
+    let args: Vec<u32> = std::env::args().skip(2).filter_map(|a| a.parse().ok()).collect();
+    let (width, height, fps) = (*args.first().unwrap_or(&2560), *args.get(1).unwrap_or(&1440), *args.get(2).unwrap_or(&60));
+    let mut report = json!({"width": width, "height": height, "fps": fps});
+    let source = livekit::webrtc::video_source::native::NativeVideoSource::new_encoded(
+        livekit::webrtc::prelude::VideoResolution { width, height },
+    );
+    let card = cardenc::CardEncoder::start(source, width, height, fps, 12_000_000, Box::new(|reason| {
+        log::warn!("card encoder failed: {reason}");
+    }));
+    match &card {
+        Ok(c) => report["encoder"] = json!(c.name()),
+        Err(e) => report["encoder_error"] = json!(e),
+    }
+    let spec = capture::ShareSpec {
+        kind: "monitor".into(), ident: 1, rect: (0, 0, 0, 0), width, height, fps, bitrate: 12_000_000, encoder: String::new(),
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let counters = Arc::new(capture::CaptureCounters::default());
+    {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+    let started = std::time::Instant::now();
+    let result = capture::run(&spec, stop, counters.clone(), |picture, ts| {
+        if let Ok(c) = &card {
+            c.push(picture, ts);
+        }
+    });
+    let seconds = started.elapsed().as_secs_f64();
+    report["capture_error"] = json!(result.err());
+    report["capture_fps"] = json!((counters.handed.load(Ordering::Relaxed) as f64 / seconds * 10.0).round() / 10.0);
+    report["source"] = json!(*counters.source_size.lock());
+    report["convert_ms"] = json!(counters.grab_us.load(Ordering::Relaxed) as f64 / 1000.0);
+    if let Ok(c) = &card {
+        report["encoded_fps"] = json!((c.encoded.load(Ordering::Relaxed) as f64 / seconds * 10.0).round() / 10.0);
+    }
+    drop(card);
+    let cam = camera::CameraSpec { id: String::new(), title: String::new(), max_height: 720, fps: 30, bitrate: 1_700_000 };
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let cam_stop = Arc::new(AtomicBool::new(false));
+    let frames = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let thread = {
+        let cam_stop = cam_stop.clone();
+        let frames = frames.clone();
+        std::thread::spawn(move || camera::run(&cam, cam_stop, ready_tx, |_, _| {
+            frames.fetch_add(1, Ordering::Relaxed);
+        }))
+    };
+    match ready_rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(size)) => {
+            std::thread::sleep(Duration::from_secs(3));
+            report["camera"] = json!({"size": size, "fps": frames.load(Ordering::Relaxed) as f64 / 3.0});
+        }
+        Ok(Err(e)) => report["camera"] = json!({"error": e}),
+        Err(_) => report["camera"] = json!({"error": "no answer in 10 s"}),
+    }
+    cam_stop.store(true, Ordering::Relaxed);
+    let _ = thread.join();
+    println!("{report}");
 }

@@ -235,8 +235,6 @@ def client_update(request: Request, version: str = APP_VERSION, authorization: s
         and bool(settings.client_download_sha256)
         and version_tuple(latest) > version_tuple(version)
     )
-    # With download approvals on, the link goes only to signed-in people; the app checks again after
-    # sign-in and offers the update then.
     link = downloads.update_link(version[:20], request, user_name) if update_available else ""
     update_available = update_available and bool(link)
     return schemas.ClientUpdateOut(

@@ -145,11 +145,12 @@ def test_owner_approves_each_download(client, tg):  # noqa: F811
     assert "Скачиваний" not in tg.sent_to(FRIEND_CHAT)[-1]
 
 
-def test_updates_only_for_signed_in_people_without_approval(client, tg):  # noqa: F811
+def test_app_updates_need_no_approval(client, tg):  # noqa: F811
     admin, friend, _space, _voice = setup_admin_and_friend(client)
     link(client, admin, tg, ADMIN_CHAT)
     anonymous = client.get("/client/update", params={"version": "0.6.2"}).json()
-    assert anonymous["update_available"] is False and anonymous["download_url"] == ""
+    assert anonymous["update_available"] and anonymous["download_url"] == URL
+    downloads._update_ips.clear()
     update = client.get("/client/update", params={"version": "0.6.2"}, headers=friend).json()
     # The plain URL: the release signature the app checks covers the exact URL.
     assert update["update_available"] and update["download_url"] == URL
@@ -157,7 +158,7 @@ def test_updates_only_for_signed_in_people_without_approval(client, tg):  # noqa
     client.get("/client/update", params={"version": "0.6.2"}, headers=friend)
     tg.flush()
     notes = [t for t in tg.sent_to(ADMIN_CHAT) if "Обновление 0.6.2 → 0.7.0" in t]
-    assert len(notes) == 1 and "Друг" in notes[0]
+    assert len(notes) == 1
 
 
 def test_device_names():

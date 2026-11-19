@@ -345,14 +345,12 @@ def download_wait(req_id: str, request: Request) -> Response:
 
 
 def update_link(version_from: str, request: Request, user_name: str | None) -> str:
-    """The installer link for an installed app's update. With approvals on, only for a signed-in person
-    (no approval needed: updates must keep working); the owner is told who updated."""
+    """The installer link for an installed app's update: for anyone with the app, without approval (having
+    the app means the owner let them in). The owner is told who updated."""
     settings = get_settings()
     if not bot.enabled:
         return settings.client_download_url
     ip = client_ip(request)
-    if gate_active() and user_name is None:
-        return ""
     try:
         rate_limit(f"update-note:{ip}:{settings.client_latest_version}", 1, 6 * 3600)
         first = True

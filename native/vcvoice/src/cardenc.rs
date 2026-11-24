@@ -26,6 +26,8 @@ pub struct CardEncoder {
     slot: Arc<Slot>,
     stop: Arc<AtomicBool>,
     pub encoded: Arc<AtomicU32>,
+    /// Pictures left out to stay within the bandwidth estimate.
+    pub skipped: Arc<AtomicU32>,
     name: String,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -46,20 +48,22 @@ impl CardEncoder {
         let slot = Arc::new(Slot { picture: Mutex::new(None), wake: Condvar::new() });
         let stop = Arc::new(AtomicBool::new(false));
         let encoded = Arc::new(AtomicU32::new(0));
+        let skipped = Arc::new(AtomicU32::new(0));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
         let thread = {
             let slot = slot.clone();
             let stop = stop.clone();
             let encoded = encoded.clone();
+            let skipped = skipped.clone();
             std::thread::Builder::new()
                 .name("card-encoder".into())
-                .spawn(move || imp::run(source, width, height, fps, bitrate, slot_api(slot), stop, encoded, ready_tx, on_failure))
+                .spawn(move || imp::run(source, width, height, fps, bitrate, slot_api(slot), stop, encoded, skipped, ready_tx, on_failure))
                 .map_err(|e| e.to_string())?
         };
         match ready_rx.recv() {
             Ok(Ok(name)) => {
                 log::info!("Card encoder {name}: {width}x{height} at {fps} fps, {} kbps", bitrate / 1000);
-                Ok(Self { slot, stop, encoded, name, thread: Some(thread) })
+                Ok(Self { slot, stop, encoded, skipped, name, thread: Some(thread) })
             }
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -110,6 +114,59 @@ impl SlotApi {
     }
 }
 
+/// Keeps what the card sends within what WebRTC's bandwidth estimate allows, by skipping pictures before
+/// they are encoded. WebRTC itself must not have to drop anything: a frame it drops after encoding breaks
+/// the H.264 chain, the pass-through then waits for a key frame, and a key frame (hundreds of kB) is far
+/// over a low estimate, which drops again. On 2026-11-24 that loop froze a share for over a minute at
+/// 50-80 kbps until the owner rejoined. Skipped pictures never reach the encoder, so the chain stays whole.
+pub struct Pacer {
+    rate_bps: u64,
+    budget: f64,
+    last: std::time::Instant,
+    last_sent: Option<std::time::Instant>,
+}
+
+impl Pacer {
+    /// How far ahead the budget may save up (one second of the rate): enough for a key frame at a
+    /// healthy rate, not a burst the estimate would punish.
+    const SAVE_SECONDS: f64 = 1.0;
+    /// At least one picture a second goes out: WebRTC's new rates arrive only with frames given to it.
+    const MAX_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+    pub fn new(rate_bps: u64, now: std::time::Instant) -> Self {
+        Self { rate_bps, budget: rate_bps as f64 / 8.0 * Self::SAVE_SECONDS, last: now, last_sent: None }
+    }
+
+    pub fn set_rate(&mut self, rate_bps: u64, now: std::time::Instant) {
+        self.refill(now);
+        self.rate_bps = rate_bps;
+    }
+
+    fn refill(&mut self, now: std::time::Instant) {
+        let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        let cap = self.rate_bps as f64 / 8.0 * Self::SAVE_SECONDS;
+        self.budget = (self.budget + elapsed * self.rate_bps as f64 / 8.0).min(cap);
+    }
+
+    /// Whether the next picture may be encoded now.
+    pub fn may_send(&mut self, now: std::time::Instant) -> bool {
+        self.refill(now);
+        let overdue = self.last_sent.map(|t| now.saturating_duration_since(t) >= Self::MAX_GAP).unwrap_or(true);
+        if self.budget >= 0.0 || overdue {
+            self.last_sent = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// An encoded frame of `bytes` went out.
+    pub fn spent(&mut self, bytes: usize) {
+        self.budget -= bytes as f64;
+    }
+}
+
 /// Annex B NAL unit types in an access unit.
 #[allow(dead_code)]
 fn nal_types(data: &[u8]) -> Vec<u8> {
@@ -143,6 +200,7 @@ mod imp {
         _slot: SlotApi,
         _stop: Arc<AtomicBool>,
         _encoded: Arc<AtomicU32>,
+        _skipped: Arc<AtomicU32>,
         ready: std::sync::mpsc::Sender<Result<String, String>>,
         _on_failure: OnFailure,
     ) {
@@ -446,6 +504,7 @@ mod imp {
         slot: SlotApi,
         stop: Arc<AtomicBool>,
         encoded: Arc<AtomicU32>,
+        skipped: Arc<AtomicU32>,
         ready: std::sync::mpsc::Sender<Result<String, String>>,
         on_failure: OnFailure,
     ) {
@@ -468,6 +527,9 @@ mod imp {
             let _ = ready.send(Ok(name));
             let mut current_bitrate = bitrate;
             let mut want_key = true;
+            let mut pacer = Pacer::new(bitrate, std::time::Instant::now());
+            // Viewers ask for key frames (a new viewer, a lost packet). One a second at most: each is large.
+            let mut last_key: Option<std::time::Instant> = None;
             // `need`: pictures the encoder asked for; `in_flight`: pictures given whose output is still due.
             let (mut need, mut in_flight) = (0u32, 0u32);
             let resolution = VideoResolution { width, height };
@@ -483,6 +545,7 @@ mod imp {
                         } else if kind == METransformHaveOutput.0 as u32 {
                             in_flight = in_flight.saturating_sub(1);
                             if let Some((bytes, key, time)) = encoder.take_output()? {
+                                pacer.spent(bytes.len());
                                 let frame = EncodedVideoFrame {
                                     codec: EncodedVideoCodec::H264,
                                     payload: &bytes,
@@ -506,16 +569,25 @@ mod imp {
                 if source.take_keyframe_request() {
                     want_key = true;
                 }
+                let now = std::time::Instant::now();
                 if let Some(rate) = source.take_rate_control_request() {
-                    let target = rate.target_bitrate_bps.clamp(300_000, bitrate.max(300_000));
+                    // The budget follows the estimate as it is; the encoder's own rate has a floor below
+                    // which pictures only get worse, not smaller.
+                    pacer.set_rate(rate.target_bitrate_bps.min(bitrate), now);
+                    let target = rate.target_bitrate_bps.clamp(100_000, bitrate.max(100_000));
                     if target.abs_diff(current_bitrate) * 10 > current_bitrate {
                         current_bitrate = target;
                         encoder.set_bitrate(target);
                     }
                 }
-                if want_key {
+                if !pacer.may_send(now) {
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                if want_key && last_key.map(|t| now.duration_since(t).as_millis() >= 1000).unwrap_or(true) {
                     encoder.force_key_frame();
                     want_key = false;
+                    last_key = Some(now);
                 }
                 encoder.feed(&picture, ts)?;
                 need -= 1;
@@ -539,6 +611,36 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pacer_holds_pictures_while_a_key_frame_is_paid_off() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(80_000, t0); // 10 kB/s, 10 kB saved up
+        assert!(pacer.may_send(t0));
+        pacer.spent(30_000); // a key frame: 20 kB in debt
+        // 33 ms later: still in debt, not overdue
+        assert!(!pacer.may_send(t0 + Duration::from_millis(33)));
+        // one second without a picture: one goes out anyway, so WebRTC can still send its new rate
+        assert!(pacer.may_send(t0 + Duration::from_millis(1000)));
+        pacer.spent(500);
+        assert!(!pacer.may_send(t0 + Duration::from_millis(1100)));
+        // the debt (20.5 kB at 10 kB/s) is paid off after about 2 s
+        assert!(pacer.may_send(t0 + Duration::from_millis(2100)));
+    }
+
+    #[test]
+    fn pacer_follows_a_higher_rate_at_once() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(50_000, t0);
+        assert!(pacer.may_send(t0));
+        pacer.spent(20_000);
+        pacer.set_rate(5_000_000, t0 + Duration::from_millis(100));
+        // at 625 kB/s the 13.75 kB debt is gone in about 22 ms
+        assert!(!pacer.may_send(t0 + Duration::from_millis(105)));
+        assert!(pacer.may_send(t0 + Duration::from_millis(130)));
+    }
 
     #[test]
     fn finds_parameter_sets_in_an_access_unit() {

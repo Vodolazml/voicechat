@@ -784,7 +784,7 @@ async fn share_stats(
     spec: ShareSpec,
     events: Events,
 ) {
-    let mut last: Option<(Instant, u32, u32, u64, u32, u32, u32)> = None;
+    let mut last: Option<(Instant, u32, u32, u64, u32, u32, u32, u32)> = None;
     let mut encoder = Value::Null;
     let mut misses = 0;
     let mut logged = Instant::now();
@@ -795,6 +795,7 @@ async fn share_stats(
         let captured = counters.captured.load(Ordering::Relaxed);
         let handed = counters.handed.load(Ordering::Relaxed);
         let card_encoded = card.as_ref().map(|c| c.encoded.load(Ordering::Relaxed)).unwrap_or(0);
+        let card_skipped = card.as_ref().map(|c| c.skipped.load(Ordering::Relaxed)).unwrap_or(0);
         let report = tokio::time::timeout(Duration::from_secs(3), track.get_stats()).await;
         let outbound = match report {
             Ok(Ok(stats)) => stats.into_iter().find_map(|s| match s {
@@ -808,7 +809,7 @@ async fn share_stats(
             .map(|o| (o.outbound.frames_encoded, o.outbound.frames_sent, o.sent.bytes_sent))
             .unwrap_or((0, 0, 0));
         let mut stats = json!({});
-        if let Some((then, c, h, b, e, s, ce)) = last {
+        if let Some((then, c, h, b, e, s, ce, cs)) = last {
             let dt = (now - then).as_secs_f64().max(0.001);
             let rate = |a: u32, b: u32| ((a.saturating_sub(b)) as f64 / dt * 10.0).round() / 10.0;
             let encoded_fps = if card.is_some() { rate(card_encoded, ce) } else { rate(frames_encoded, e) };
@@ -816,6 +817,7 @@ async fn share_stats(
                 "capture_fps": rate(captured, c).round(),
                 "sent_fps": rate(handed, h).round(),
                 "encoded_fps": encoded_fps,
+                "skipped_fps": rate(card_skipped, cs),
                 "network_fps": rate(frames_sent, s),
                 "kbps": (8.0 * bytes_sent.saturating_sub(b) as f64 / dt / 1000.0) as u64,
             });
@@ -823,7 +825,7 @@ async fn share_stats(
                 adapt_frame_rate(&counters, spec.fps, encoded_fps, now, &mut behind, &mut fine);
             }
         }
-        last = Some((now, captured, handed, bytes_sent, frames_encoded, frames_sent, card_encoded));
+        last = Some((now, captured, handed, bytes_sent, frames_encoded, frames_sent, card_encoded, card_skipped));
         match &outbound {
             Some(o) => {
                 misses = 0;

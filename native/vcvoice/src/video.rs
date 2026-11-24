@@ -49,6 +49,12 @@ const FPS_STEPS: [u32; 5] = [60, 45, 30, 20, 15];
 const FPS_BEHIND: f64 = 0.6;
 const FPS_BEHIND_SECONDS: u64 = 8;
 const FPS_RECOVER_SECONDS: u64 = 45;
+/// A share whose frames are made but none leave for this long is stuck: WebRTC's bandwidth estimate fell
+/// to a few dozen kbit/s and cannot climb while nothing is sent (2026-11-24: viewers lost the picture for
+/// minutes until the sharer rejoined). A fresh connection starts from a fresh estimate.
+const STALL_SECONDS: u64 = 10;
+/// Not more often than this, so a link that is really down is not hammered with connections.
+const STALL_RECONNECT_GAP: Duration = Duration::from_secs(60);
 
 pub enum VideoCmd {
     Connect { url: String, token: String, my_id: i64 },
@@ -62,6 +68,8 @@ pub enum VideoCmd {
     CameraStop,
     /// The card's encoder or a capture thread gave up mid-way (sent by our own threads).
     Failed { kind: &'static str, generation: u64, reason: String, card: bool },
+    /// The share's frames stopped leaving (sent by the share's stats task).
+    Stalled { generation: u64 },
 }
 
 struct Session {
@@ -136,6 +144,7 @@ pub async fn run(events: Events, tx: mpsc::UnboundedSender<VideoCmd>, mut comman
     };
     let mut room_events: Option<mpsc::UnboundedReceiver<RoomEvent>> = None;
     let (timer_tx, mut timer_rx) = mpsc::unbounded_channel::<i32>();
+    let mut stall_reconnect: Option<Instant> = None;
     loop {
         tokio::select! {
             cmd = commands.recv() => {
@@ -191,6 +200,19 @@ pub async fn run(events: Events, tx: mpsc::UnboundedSender<VideoCmd>, mut comman
                     }
                     VideoCmd::Failed { kind, generation, reason, card } => {
                         state.failed(kind, generation, reason, card).await;
+                    }
+                    VideoCmd::Stalled { generation } => {
+                        let current = state.share.as_ref().map(|s| s.generation) == Some(generation);
+                        let recent = stall_reconnect.is_some_and(|at| at.elapsed() < STALL_RECONNECT_GAP);
+                        if current && state.session.is_some() && !recent {
+                            log::warn!("Screen share: nothing has left for {STALL_SECONDS} s, connecting again");
+                            stall_reconnect = Some(Instant::now());
+                            // The app asks for a new token and connects again; the share and the camera
+                            // are published again on their own (their settings stay).
+                            state.close().await;
+                            room_events = None;
+                            state.events.send(json!({"ev": "vstate", "state": "closed", "reason": "stalled"}));
+                        }
                     }
                 }
             }
@@ -580,7 +602,9 @@ impl State {
                 })
                 .ok()
         };
-        let stats = tokio::spawn(share_stats(LocalTrack::Video(track), counters, card, spec.clone(), self.events.clone()));
+        let stats = tokio::spawn(share_stats(
+            LocalTrack::Video(track), counters, card, spec.clone(), self.events.clone(), self.tx.clone(), generation,
+        ));
         self.share = Some(Outgoing { generation, sid: publication.sid(), stop, thread, stats: Some(stats) });
         self.report_tracks();
     }
@@ -783,7 +807,10 @@ async fn share_stats(
     card: Option<Arc<CardEncoder>>,
     spec: ShareSpec,
     events: Events,
+    tx: mpsc::UnboundedSender<VideoCmd>,
+    generation: u64,
 ) {
+    let mut stalled_since: Option<Instant> = None;
     let mut last: Option<(Instant, u32, u32, u64, u32, u32, u32, u32)> = None;
     let mut encoder = Value::Null;
     let mut misses = 0;
@@ -823,6 +850,17 @@ async fn share_stats(
             });
             if card.is_none() && outbound.is_some() {
                 adapt_frame_rate(&counters, spec.fps, encoded_fps, now, &mut behind, &mut fine);
+            }
+            let target = outbound.as_ref().map(|o| o.outbound.target_bitrate).unwrap_or(0.0);
+            let made = if card.is_some() { card_encoded > ce } else { handed > h };
+            if stalled(made, frames_sent > s, target) {
+                let since = *stalled_since.get_or_insert(now);
+                if now - since >= Duration::from_secs(STALL_SECONDS) {
+                    let _ = tx.send(VideoCmd::Stalled { generation });
+                    stalled_since = None;
+                }
+            } else {
+                stalled_since = None;
             }
         }
         last = Some((now, captured, handed, bytes_sent, frames_encoded, frames_sent, card_encoded, card_skipped));
@@ -867,6 +905,12 @@ async fn share_stats(
         }
         events.send(json!({"ev": "vstats", "kind": "screen", "stats": all}));
     }
+}
+
+/// Frames are made but none leave, and WebRTC's estimate has collapsed (a layer that nobody watches is
+/// paused by the server instead, and then its target is 0).
+fn stalled(made: bool, sent: bool, target_bps: f64) -> bool {
+    made && !sent && target_bps > 0.0 && target_bps < 300_000.0
 }
 
 fn adapt_frame_rate(
@@ -917,6 +961,15 @@ fn adapt_frame_rate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_share_is_stalled_only_when_the_estimate_collapsed() {
+        assert!(stalled(true, false, 79_000.0));
+        assert!(!stalled(true, true, 79_000.0));
+        assert!(!stalled(true, false, 0.0)); // nobody watches: the server paused the layer
+        assert!(!stalled(true, false, 2_500_000.0));
+        assert!(!stalled(false, false, 79_000.0));
+    }
 
     #[test]
     fn frame_rate_steps_down_after_falling_behind_and_back_up() {

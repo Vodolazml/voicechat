@@ -1,6 +1,6 @@
 [package]
 name = "vcvoice"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2021"
 description = "VoiceChat voice engine: microphone, processing, LiveKit voice connection, mixing and speakers in one native process"
 publish = false
